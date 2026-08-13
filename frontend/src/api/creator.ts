@@ -425,7 +425,9 @@ export async function getCreatorVideoContent(apiKey: string, requestId: string):
   if (blob.type.includes('json') || blob.type.startsWith('text/')) {
     throw new Error('视频内容接口返回了无效格式，请稍后重试')
   }
-  return blob.type ? blob : blob.slice(0, blob.size, 'video/mp4')
+  // Some upstream relays return MP4 bytes as application/octet-stream. Chrome
+  // does not reliably initialize a media element from that generic Blob type.
+  return blob.type.startsWith('video/') ? blob : blob.slice(0, blob.size, 'video/mp4')
 }
 
 export function isCreatorVideoComplete(status: string): boolean {

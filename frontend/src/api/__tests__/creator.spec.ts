@@ -241,6 +241,23 @@ describe('creator gateway API', () => {
     )
   })
 
+  it('normalizes generic binary video content to MP4', async () => {
+    const genericBlob = new Blob(['video'], { type: 'application/octet-stream' })
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers(),
+      blob: vi.fn().mockResolvedValue(genericBlob),
+    } as unknown as Response)
+    const { getCreatorVideoContent } = await import('@/api/creator')
+
+    const result = await getCreatorVideoContent('sk-video', 'generic-task')
+
+    expect(result).not.toBe(genericBlob)
+    expect(result.type).toBe('video/mp4')
+    expect(result.size).toBe(genericBlob.size)
+  })
+
   it('normalizes nested video status fields', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse({
