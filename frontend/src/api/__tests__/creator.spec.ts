@@ -80,6 +80,28 @@ describe('creator gateway API', () => {
     })
   })
 
+  it('rejects a late image error envelope after an HTTP 200 heartbeat', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      jsonResponse({
+        error: {
+          type: 'upstream_error',
+          code: 'upstream_timeout',
+          message: 'image generation task timed out',
+        },
+      }),
+    )
+    const { generateCreatorImage } = await import('@/api/creator')
+
+    await expect(generateCreatorImage('sk-image', {
+      model: 'gpt-image-2',
+      prompt: 'draw a cat',
+    })).rejects.toMatchObject({
+      message: 'image generation task timed out',
+      status: 200,
+      code: 'upstream_timeout',
+    })
+  })
+
   it('uses multipart edits when reference files are present', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse({ data: [{ url: 'https://cdn.example/edited.png' }] }),

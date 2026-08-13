@@ -112,6 +112,10 @@ async function parseCreatorError(response: Response): Promise<CreatorError> {
     body = null
   }
 
+  return creatorErrorFromBody(response, body)
+}
+
+function creatorErrorFromBody(response: Response, body: any): CreatorError {
   const nestedMessage = body?.error?.message
   const message =
     (typeof nestedMessage === 'string' && nestedMessage.trim()) ||
@@ -129,7 +133,11 @@ async function parseCreatorError(response: Response): Promise<CreatorError> {
 async function fetchJSON<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) throw await parseCreatorError(response)
-  return response.json()
+  const body = await response.json()
+  // A non-streaming image heartbeat commits HTTP 200 before a late upstream
+  // error is known. Treat the final OpenAI error envelope as a failed request.
+  if (body?.error) throw creatorErrorFromBody(response, body)
+  return body
 }
 
 export async function listCreatorModels(apiKey: string): Promise<CreatorModel[]> {

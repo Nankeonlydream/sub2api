@@ -125,6 +125,37 @@ func TestForwardOpenAIImagesAPIKey_StreamKeepsDetachedUpstreamContext(t *testing
 		"流式路径原本就脱钩，不能被改回随客户端取消")
 }
 
+func TestForwardOpenAIImagesTransportErrorTriggersAccountFailover(t *testing.T) {
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","response_format":"b64_json"}`)
+
+	accounts := []*Account{
+		newOpenAIImagesAPIKeyAccount(),
+		{
+			ID:          32,
+			Name:        "openai-oauth-images",
+			Platform:    PlatformOpenAI,
+			Type:        AccountTypeOAuth,
+			Credentials: map[string]any{"access_token": "token-test"},
+		},
+	}
+	for _, account := range accounts {
+		t.Run(string(account.Type), func(t *testing.T) {
+			c, recorder := newOpenAIImagesTestContext(t, body)
+			svc := newOpenAIImagesTestService(&httpUpstreamRecorder{err: context.DeadlineExceeded})
+			parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+			require.NoError(t, err)
+
+			result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
+
+			require.Nil(t, result)
+			var failoverErr *UpstreamFailoverError
+			require.ErrorAs(t, err, &failoverErr)
+			require.Equal(t, http.StatusBadGateway, failoverErr.StatusCode)
+			require.Empty(t, recorder.Body.String(), "transport errors must stay unwritten so the handler can switch accounts")
+		})
+	}
+}
+
 // 两个 detach 辅助函数的语义差异是本次修复的根据，锁死它们防止被悄悄改动。
 func TestDetachUpstreamContextSemantics(t *testing.T) {
 	t.Run("detachUpstreamContext_always_detaches", func(t *testing.T) {

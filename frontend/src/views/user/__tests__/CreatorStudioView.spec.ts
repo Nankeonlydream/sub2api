@@ -706,6 +706,9 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('1:1')
     expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['1:1', '16:9'])
     await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('.field-block .stepper button:last-child').trigger('click')
+    await wrapper.get('.field-block .stepper button:last-child').trigger('click')
+    expect(wrapper.get('.field-block .stepper').text()).toContain('3 张')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '2048x1152' }))
@@ -715,11 +718,15 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('adobe-firefly-gpt-image-2-4k')
     expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('16:9')
     expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['16:9', '9:16'])
+    expect(wrapper.get('.field-block .stepper').text()).toContain('1 张')
+    expect(wrapper.get('.field-block .stepper button:last-child').attributes('disabled')).toBeDefined()
+    expect(wrapper.text()).toContain('当前 4K 图片模型每次只能生成 1 张')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
       model: 'adobe-firefly-gpt-image-2-4k',
       size: '3840x2160',
+      n: 1,
     }))
 
     await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('9:16')

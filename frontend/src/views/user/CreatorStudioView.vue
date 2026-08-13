@@ -639,8 +639,9 @@
               <div class="stepper">
                 <button type="button" title="减少数量" :disabled="outputCount <= 1" @click="outputCount--"><Icon name="minus" size="sm" /></button>
                 <strong>{{ outputCount }} 张</strong>
-                <button type="button" title="增加数量" :disabled="outputCount >= 4" @click="outputCount++"><Icon name="plus" size="sm" /></button>
+                <button type="button" title="增加数量" :disabled="outputCount >= maxOutputCount" @click="outputCount++"><Icon name="plus" size="sm" /></button>
               </div>
+              <small v-if="maxOutputCount === 1" class="creator-field-hint">当前 4K 图片模型每次只能生成 1 张；如需一次生成多张，请切换到 1K 或 2K。</small>
             </div>
           </template>
 
@@ -920,6 +921,7 @@ const maxReferenceImages = computed(() => {
   if (imageCapability.value === 'image2') return 16
   return 3
 })
+const maxOutputCount = computed(() => isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
 const referenceHint = computed(() => `可选，最多 ${maxReferenceImages.value} 张`)
 const selectedGroup = computed(() => groups.value.find(group => group.id === selectedGroupId.value) || null)
 const selectedApiKey = computed(() => apiKeys.value.find(key => key.status === 'active' && key.group_id === selectedGroupId.value) || null)
@@ -1269,7 +1271,7 @@ async function startGeneration() {
         capability: imageCapability.value,
         model: selectedModel.value,
         prompt: taskPrompt,
-        outputCount: outputCount.value,
+        outputCount: Math.min(outputCount.value, maxOutputCount.value),
         size: sizeForImage(),
         quality: imageQuality.value,
         outputFormat: outputFormat.value,
@@ -1344,7 +1346,7 @@ async function startGeneration() {
   } catch (error) {
     work.status = 'failed'
     work.updatedAt = Date.now()
-    work.error = errorMessage(error, '生成失败')
+    work.error = creatorGenerationErrorMessage(error)
     await persistWork(work)
     const failedWork = cloneWork(work)
     if (studioMode.value === work.type) selectedWork.value = failedWork
@@ -1385,6 +1387,21 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   })
   work.outputs = result.data.map(item => item.url).filter(Boolean)
   if (!work.outputs.length) throw new Error('模型没有返回可用图片')
+}
+
+function isSingleOutputImageModel(model: string, resolution: string, capability: ImageCapability) {
+  return capability === 'image2' && (isImage2FourKModel(model) || resolution === '4K')
+}
+
+function creatorGenerationErrorMessage(error: unknown) {
+  const message = errorMessage(error, '生成失败')
+  if (/only supports\s+n\s*=\s*1|supports\s+n\s*=\s*1/i.test(message)) {
+    return '当前 4K 图片模型每次只能生成 1 张图片，请将生成数量改为 1，或切换到 1K / 2K 后重试。'
+  }
+  if (/timeout|timed out|deadline exceeded|network|upstream request failed|gateway timeout|连接|超时|网络/i.test(message)) {
+    return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“带回参数重试”，不要连续重复提交。'
+  }
+  return message
 }
 
 async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot) {
@@ -1893,6 +1910,10 @@ watch(() => referenceImages.value.length, (count, previousCount) => {
 
 watch(outputFormat, format => {
   if (format === 'jpeg') transparentBackground.value = false
+})
+
+watch(maxOutputCount, maximum => {
+  if (outputCount.value > maximum) outputCount.value = maximum
 })
 
 watch(imageResolutionOptions, options => {
@@ -2411,6 +2432,7 @@ onBeforeUnmount(() => {
 .field-row label { display: block; margin-bottom: 7px; color: #4b5b70; font-size: 12px; font-weight: 750; }
 .field-block > small,
 .field-row small { display: block; margin-top: 6px; color: #8492a6; font-size: 10px; line-height: 1.5; }
+.creator-field-hint { color: var(--creator-accent-strong) !important; }
 .studio-input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #d7e0e7; border-radius: 8px; outline: none; color: #1b2638; background: #fff; font-size: 12px; transition: 150ms ease; }
 .studio-input:focus { border-color: #6dd4c4; box-shadow: 0 0 0 3px rgb(41 185 164 / 12%); }
 .studio-input:disabled { cursor: not-allowed; color: #97a3b2; background: #f4f6f7; }
