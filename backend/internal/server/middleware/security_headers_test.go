@@ -346,6 +346,14 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 		assert.Equal(t, 1, countDirectiveValue(enhanced, "worker-src", TencentCaptchaWorkerSource))
 	})
 
+	t.Run("adds_media_sources_for_creator_blob_video", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "media-src", "'self'"))
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "media-src", CreatorMediaBlobSource))
+	})
+
 	t.Run("default_policy_already_carries_tencent_captcha_domains", func(t *testing.T) {
 		// 默认策略与中间件强制注入表必须同形，否则 config.example.yaml 会误导自建用户
 		for _, required := range requiredCSPDirectiveValues {
