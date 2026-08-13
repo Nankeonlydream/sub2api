@@ -161,6 +161,7 @@ export default {
     announcements: 'Announcements',
     apiKeys: 'API Keys',
     batchImage: 'Batch Images',
+    creatorStudio: 'Creator Studio',
     usage: 'Usage',
     redeem: 'Redeem',
     affiliate: 'Affiliate Rebates',
@@ -205,6 +206,11 @@ export default {
     contentModeration: 'Content Moderation',
     promptAudit: 'Prompt Audit',
     auditLogs: 'Audit Logs',
+  },
+
+  creator: {
+    title: 'Creator Studio',
+    description: 'Create with image and video models',
   },
 
   // Auth

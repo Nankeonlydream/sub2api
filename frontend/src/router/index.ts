@@ -229,6 +229,18 @@ const routes: RouteRecordRaw[] = [
     }
   },
   {
+    path: '/creator',
+    name: 'CreatorStudio',
+    component: () => import('@/views/user/CreatorStudioView.vue'),
+    meta: {
+      requiresAuth: true,
+      requiresAdmin: false,
+      title: 'Creator Studio',
+      titleKey: 'creator.title',
+      descriptionKey: 'creator.description'
+    }
+  },
+  {
     path: '/usage',
     name: 'Usage',
     component: () => import('@/views/user/UsageView.vue'),

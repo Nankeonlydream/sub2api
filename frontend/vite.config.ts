@@ -114,6 +114,11 @@ export default defineConfig(({ mode }) => {
          */
         manualChunks(id: string) {
           if (id.includes('node_modules')) {
+            // FFmpeg and its worker are only needed when composing multi-shot videos.
+            if (id.includes('/@ffmpeg/')) {
+              return 'vendor-ffmpeg'
+            }
+
             // Vue 核心库
             if (
               id.includes('/vue/') ||

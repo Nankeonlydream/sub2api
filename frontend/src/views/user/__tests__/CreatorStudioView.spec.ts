@@ -1,0 +1,850 @@
+import { flushPromises, mount } from '@vue/test-utils'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+import type { ApiKey, Group } from '@/types'
+import CreatorStudioView from '../CreatorStudioView.vue'
+
+const {
+  createKey,
+  listKeys,
+  listModels,
+  listGroups,
+  listHistory,
+  putHistory,
+  removeHistory,
+  generateImage,
+  createVideo,
+  getVideoStatus,
+  getVideoContent,
+  showError,
+  showInfo,
+  showSuccess,
+} = vi.hoisted(() => ({
+  createKey: vi.fn(),
+  listKeys: vi.fn(),
+  listModels: vi.fn(),
+  listGroups: vi.fn(),
+  listHistory: vi.fn(),
+  putHistory: vi.fn(),
+  removeHistory: vi.fn(),
+  generateImage: vi.fn(),
+  createVideo: vi.fn(),
+  getVideoStatus: vi.fn(),
+  getVideoContent: vi.fn(),
+  showError: vi.fn(),
+  showInfo: vi.fn(),
+  showSuccess: vi.fn(),
+}))
+
+vi.mock('@/api/keys', () => ({
+  keysAPI: {
+    list: listKeys,
+    create: createKey,
+  },
+}))
+
+vi.mock('@/api/groups', () => ({
+  userGroupsAPI: {
+    getAvailable: listGroups,
+  },
+}))
+
+vi.mock('@/api/creator', () => ({
+  listCreatorModels: listModels,
+  generateCreatorImage: generateImage,
+  createCreatorVideo: createVideo,
+  getCreatorVideoStatus: getVideoStatus,
+  getCreatorVideoContent: getVideoContent,
+}))
+
+vi.mock('@/services/creatorHistory', () => ({
+  creatorHistory: {
+    list: listHistory,
+    put: putHistory,
+    remove: removeHistory,
+    clear: vi.fn(),
+  },
+}))
+
+vi.mock('@/stores/app', () => ({
+  useAppStore: () => ({ showError, showInfo, showSuccess }),
+}))
+
+vi.mock('vue-router', () => ({
+  useRouter: () => ({ resolve: () => ({ href: '/creator' }) }),
+}))
+
+const group = {
+  id: 7656,
+  name: '【全能型】Grok xAi',
+  description: 'Grok 图片和视频',
+  platform: 'grok',
+  status: 'active',
+  allow_image_generation: true,
+} as Group
+
+const createdKey = {
+  id: 14,
+  user_id: 1,
+  key: 'sk-created-in-studio',
+  name: '创作中心 · 【全能型】Grok xAi',
+  group_id: group.id,
+  group,
+  status: 'active',
+} as ApiKey
+
+const image2Group = {
+  ...group,
+  id: 7657,
+  name: 'Image2 原生生图',
+  description: 'gpt-image-2',
+  platform: 'openai',
+} as Group
+
+const image2Key = {
+  ...createdKey,
+  id: 15,
+  name: '创作中心 · Image2 原生生图',
+  group_id: image2Group.id,
+  group: image2Group,
+} as ApiKey
+
+const IconStub = {
+  props: ['name'],
+  template: '<span class="icon-stub">{{ name }}</span>',
+}
+
+const AppLayoutStub = {
+  template: '<div><slot /></div>',
+}
+
+describe('CreatorStudioView', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    listGroups.mockResolvedValue([group])
+    listKeys.mockResolvedValue({ items: [], total: 0, page: 1, page_size: 100, pages: 0 })
+    listHistory.mockResolvedValue([])
+    listModels.mockResolvedValue([{ id: 'grok-imagine-image' }])
+    createKey.mockResolvedValue(createdKey)
+    putHistory.mockResolvedValue(undefined)
+    removeHistory.mockResolvedValue(undefined)
+    generateImage.mockResolvedValue({ data: [{ url: 'data:image/png;base64,UE5H' }] })
+    createVideo.mockResolvedValue({ id: 'video-task-1' })
+    getVideoStatus.mockResolvedValue({
+      id: 'video-task-1',
+      status: 'completed',
+      url: '/v1/videos/video-task-1/content',
+    })
+    getVideoContent.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL: vi.fn(() => 'blob:creator-video'),
+      revokeObjectURL: vi.fn(),
+    })
+  })
+
+  it('creates and activates a group-bound key without navigating away', async () => {
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('需要创建 Key')
+    expect(wrapper.text()).toContain(group.name)
+
+    await wrapper.get('.key-needed > button').trigger('click')
+    await flushPromises()
+
+    expect(createKey).toHaveBeenCalledWith(`创作中心 · ${group.name}`, group.id)
+    expect(listModels).toHaveBeenCalledWith(createdKey.key)
+    expect(wrapper.text()).toContain(createdKey.name)
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-image')
+    expect(showSuccess).toHaveBeenCalledWith('Key 已创建并自动启用')
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('uses compact labels for Grok image models', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-image' },
+      { id: 'grok-imagine-image-quality' },
+    ])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
+      'Grok 标准版生图',
+      'Grok 高质量版生图',
+    ])
+  })
+
+  it('expands, collapses, and pages through inline prompt templates', async () => {
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.find('.prompt-tool').exists()).toBe(true)
+    expect(wrapper.find('.template-dialog').exists()).toBe(false)
+    expect(wrapper.find('.prompt-template-grid').exists()).toBe(false)
+    expect(wrapper.get('.prompt-toggle').text()).toBe('打开模板')
+    expect(wrapper.text()).toContain('作品仅保存在当前浏览器')
+
+    await wrapper.get('.prompt-toggle').trigger('click')
+    expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
+    expect(wrapper.get('.prompt-toggle').text()).toBe('收起')
+
+    const nextPage = wrapper.findAll('.prompt-page-actions button')[1]
+    await nextPage.trigger('click')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('2/3')
+    expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
+
+    await nextPage.trigger('click')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('3/3')
+    expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
+
+    await wrapper.get('.prompt-toggle').trigger('click')
+    expect(wrapper.find('.prompt-template-grid').exists()).toBe(false)
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.video-capability-card').text()).toContain('Grok 生视频')
+    expect(wrapper.get('.video-capability-card').text()).toContain('使用独立的视频分组和用户 Key')
+    await wrapper.get('.prompt-toggle').trigger('click')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('1/3')
+    expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
+  })
+
+  it('updates the history heading when the history category changes', async () => {
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.history-heading h2').text()).toBe('图片历史')
+    await wrapper.findAll('.history-tabs button')[1].trigger('click')
+    expect(wrapper.get('.history-heading h2').text()).toBe('视频历史')
+    expect(wrapper.text()).toContain('还没有视频作品')
+  })
+
+  it('automatically rotates featured briefs every three seconds', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 18')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('月光猫影')
+
+    await vi.advanceTimersByTimeAsync(3000)
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 18')
+    await vi.advanceTimersByTimeAsync(250)
+    expect(wrapper.get('.brief-summary h3').text()).toBe('雨夜电车')
+
+    await wrapper.findAll('.brief-topline button')[0].trigger('click')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 18')
+    await vi.advanceTimersByTimeAsync(2999)
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 18')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 18')
+
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('shows only the file-size error when an oversized reference image is selected', async () => {
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    const oversized = new File(['oversized'], 'large-reference.png', { type: 'image/png' })
+    Object.defineProperty(oversized, 'size', { value: 5 * 1024 * 1024 + 1 })
+    const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [oversized] })
+    await input.trigger('change')
+
+    expect(showError).toHaveBeenCalledTimes(1)
+    expect(showError).toHaveBeenCalledWith('large-reference.png 超过 5MB')
+    expect(wrapper.find('.reference-item').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('opens a history card and deletes it from its hover actions', async () => {
+    const work = {
+      id: 'image-history-1',
+      type: 'image',
+      status: 'completed',
+      prompt: '晨雾森林中的人物肖像',
+      model: 'grok-imagine-image',
+      provider: 'grok',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,UE5H'],
+      aspectRatio: '1:1',
+      resolution: '1K',
+    } as const
+    listHistory.mockResolvedValue([work])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    expect(wrapper.get('.history-item-actions').findAll('button')).toHaveLength(2)
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    expect(wrapper.get('.history-item').classes()).toContain('active')
+    expect(wrapper.text()).toContain('本次创作')
+
+    await wrapper.get('.history-delete').trigger('click')
+    await flushPromises()
+    expect(removeHistory).toHaveBeenCalledWith(work.id)
+    expect(wrapper.find('.history-item').exists()).toBe(false)
+    expect(wrapper.text()).toContain('还没有图片作品')
+  })
+
+  it('downloads base64 image results without fetching their source', async () => {
+    const work = {
+      id: 'image-download-1',
+      type: 'image',
+      status: 'completed',
+      prompt: '4K 宽屏图片',
+      model: 'gpt-image-2-4k',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,UE5H'],
+      aspectRatio: '16:9',
+      resolution: '4K',
+    } as const
+    listHistory.mockResolvedValue([work])
+    let downloaded: { href: string; filename: string } | undefined
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded = { href: this.href, filename: this.download }
+    })
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await wrapper.findAll('.result-media-actions button')[1].trigger('click')
+
+    expect(downloaded?.href).toBe(work.outputs[0])
+    expect(downloaded?.filename).toMatch(/^creator-\d+-1\.png$/)
+    expect(showError).not.toHaveBeenCalled()
+    anchorClick.mockRestore()
+  })
+
+  it('downloads a legacy cross-origin image through a local blob URL', async () => {
+    const work = {
+      id: 'legacy-image-download-1',
+      type: 'image',
+      status: 'completed',
+      prompt: '旧版 4K 图片',
+      model: 'gpt-image-2-4k',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['https://image.example.test/tmp/result.png'],
+    } as const
+    listHistory.mockResolvedValue([work])
+    const imageBlob = new Blob(['image'], { type: 'image/png' })
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: vi.fn().mockResolvedValue(imageBlob),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    let downloaded: { href: string; filename: string } | undefined
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded = { href: this.href, filename: this.download }
+    })
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await wrapper.findAll('.result-media-actions button')[1].trigger('click')
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith(work.outputs[0])
+    expect(URL.createObjectURL).toHaveBeenCalledWith(imageBlob)
+    expect(downloaded?.href).toBe('blob:creator-video')
+    expect(downloaded?.filename).toMatch(/^creator-\d+-1\.png$/)
+    expect(showError).not.toHaveBeenCalled()
+    anchorClick.mockRestore()
+  })
+
+  it('loads completed video through the authenticated content endpoint', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一只小猫奔跑')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(createVideo).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({
+      model: 'grok-imagine-video',
+      prompt: '一只小猫奔跑',
+    }))
+    expect(getVideoStatus).toHaveBeenCalledWith(createdKey.key, 'video-task-1')
+    expect(getVideoContent).toHaveBeenCalledWith(createdKey.key, 'video-task-1')
+    const video = wrapper.get<HTMLVideoElement>('.result-media.video')
+    expect(video.attributes('src')).toBe('blob:creator-video')
+    expect(video.attributes('style')).toContain('aspect-ratio: 16 / 9')
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('shows a complete multi-shot video above individually described shot materials', async () => {
+    listHistory.mockResolvedValue([{
+      id: 'multi-shot-video',
+      type: 'video',
+      status: 'completed',
+      prompt: '镜头 1：森林推进\n镜头 2：城市跟拍',
+      model: 'grok-imagine-video',
+      provider: 'Grok 视频',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['blob:shot-one', 'blob:shot-two'],
+      mergedOutput: 'blob:complete-video',
+      shotCount: 2,
+      shotPrompts: ['森林推进', '城市跟拍'],
+      shotDurations: [4, 6],
+      requestedDuration: 10,
+      aspectRatio: '16:9',
+      resolution: '720p',
+    }])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('.history-tabs button')[1].trigger('click')
+    await wrapper.get('.history-item-hitbox').trigger('click')
+
+    expect(wrapper.get('.complete-video-card').text()).toContain('所有镜头已按顺序合成')
+    expect(wrapper.get<HTMLVideoElement>('.complete-video-media').attributes('src')).toBe('blob:complete-video')
+    expect(wrapper.get<HTMLAnchorElement>('.complete-video-card footer a').attributes('download')).toBe('creator-complete-multi-shot-video.mp4')
+    expect(wrapper.findAll('.result-segment-grid .result-card')).toHaveLength(2)
+    expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['森林推进', '城市跟拍'])
+    expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 1：森林推进')
+    expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 2：城市跟拍')
+  })
+
+  it('keeps startup progress at zero and starts advancing above one percent', async () => {
+    vi.useFakeTimers()
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    let resolveFirstStatus: ((status: { id: string; status: string; progress?: number }) => void) | undefined
+    let resolveSecondStatus: ((status: { id: string; status: string; progress?: number }) => void) | undefined
+    let resolveThirdStatus: ((status: { id: string; status: string; progress?: number }) => void) | undefined
+    let resolveFourthStatus: ((status: { id: string; status: string; progress?: number }) => void) | undefined
+    getVideoStatus
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFirstStatus = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveSecondStatus = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveThirdStatus = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { resolveFourthStatus = resolve }))
+      .mockResolvedValueOnce({ id: 'video-task-1', status: 'completed' })
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一只小猫奔跑')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.generation-percent').text()).toBe('0%')
+    resolveFirstStatus?.({ id: 'video-task-1', status: 'processing', progress: 0 })
+    await flushPromises()
+    expect(wrapper.get('.generation-percent').text()).toBe('0%')
+
+    await vi.advanceTimersByTimeAsync(4000)
+    resolveSecondStatus?.({ id: 'video-task-1', status: 'processing', progress: 100 })
+    await flushPromises()
+    expect(wrapper.get('.generation-percent').text()).toBe('0%')
+
+    await vi.advanceTimersByTimeAsync(4000)
+    resolveThirdStatus?.({ id: 'video-task-1', status: 'processing', progress: 1 })
+    await flushPromises()
+    expect(wrapper.get('.generation-percent').text()).toBe('0%')
+
+    await vi.advanceTimersByTimeAsync(4000)
+    resolveFourthStatus?.({ id: 'video-task-1', status: 'processing', progress: 2 })
+    await flushPromises()
+    expect(wrapper.get('.generation-percent').text()).toBe('2%')
+
+    await vi.advanceTimersByTimeAsync(4000)
+    await flushPromises()
+    expect(wrapper.find('.generation-percent').exists()).toBe(false)
+
+    expect(wrapper.find('.generation-state').exists()).toBe(false)
+    vi.useRealTimers()
+  })
+
+  it('explains and automatically switches the video model when a reference image changes', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-video' },
+      { id: 'grok-imagine-video-1.5' },
+    ])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
+      'Grok Imagine 文生视频',
+    ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video')
+    expect(wrapper.get('#creator-model').text()).not.toContain('grok-imagine-video')
+    expect(wrapper.get('.video-model-hint').text()).toBe('只有上传参考图后，才能选择「Grok Imagine 1.5 图生视频」模型；上传后将自动切换。')
+    expect(wrapper.get('.video-model-hint').classes()).not.toContain('switched')
+
+    const reference = new File(['reference'], 'reference.png', { type: 'image/png' })
+    const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+    Object.defineProperty(input.element, 'files', { configurable: true, value: [reference] })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
+      'Grok Imagine 文生视频',
+      'Grok Imagine 1.5 图生视频',
+    ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video-1.5')
+    expect(wrapper.get('.video-model-hint').text()).toBe('已根据参考图自动切换为「Grok Imagine 1.5 图生视频」模型。')
+    expect(wrapper.get('.video-model-hint').classes()).toContain('switched')
+
+    await wrapper.get('.reference-item button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video')
+    expect(wrapper.get('.video-model-hint').text()).toBe('只有上传参考图后，才能选择「Grok Imagine 1.5 图生视频」模型；上传后将自动切换。')
+  })
+
+  it('submits every text-only professional shot with the text-to-video model', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-video-1.5' },
+      { id: 'grok-imagine-video' },
+    ])
+    createVideo
+      .mockResolvedValueOnce({ id: 'video-shot-1' })
+      .mockRejectedValueOnce(new Error('stop after checking the second request'))
+    getVideoStatus.mockResolvedValueOnce({ id: 'video-shot-1', status: 'completed' })
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第一个镜头')
+    await wrapper.get('.sequence-add').trigger('click')
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(createVideo).toHaveBeenCalledTimes(2)
+    expect(createVideo.mock.calls.map(([, request]) => request.model)).toEqual([
+      'grok-imagine-video',
+      'grok-imagine-video',
+    ])
+    expect(createVideo.mock.calls.map(([, request]) => request.prompt)).toEqual([
+      '第一个镜头',
+      '第二个镜头',
+    ])
+  })
+
+  it('keeps a 1:1 image request at 1024x1024 and lets the result follow its intrinsic height', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形森林肖像')
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('1:1')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({
+      aspectRatio: '1:1',
+      size: '1024x1024',
+      responseFormat: 'b64_json',
+    }))
+    expect(wrapper.get<HTMLElement>('.result-media').attributes('style')).toBeUndefined()
+    expect(wrapper.get('.result-media img').exists()).toBe(true)
+    expect(wrapper.get('.result-parameters').text()).toContain('完成耗时')
+    expect(wrapper.get('.result-parameters').text()).toContain('参考图')
+    expect(wrapper.get('.result-parameters').text()).toContain('Grok 生图')
+  })
+
+  it('uses the selected landscape ratio to fill the result media height', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏海底晚宴')
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    const media = wrapper.get<HTMLElement>('.result-media')
+    expect(media.classes()).toContain('landscape')
+    expect(media.attributes('style')).toContain('aspect-ratio: 16 / 9')
+  })
+
+  it('sends only the standard 1024x1024 size field for an Image2 square request', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-1' }, { id: 'gpt-image-1.5' }, { id: 'gpt-image-2' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    const modelSelect = wrapper.get<HTMLSelectElement>('#creator-model')
+    expect(modelSelect.element.value).toBe('gpt-image-2')
+    expect(modelSelect.findAll('option').map(option => option.attributes('value'))).not.toContain('gpt-image-2-4k')
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.attributes('value'))).toEqual(['1K', '2K'])
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形产品照片')
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('1:1')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({
+      model: 'gpt-image-2',
+      size: '1024x1024',
+      protocol: 'openai',
+      responseFormat: 'b64_json',
+    }))
+    const request = generateImage.mock.calls.at(-1)?.[1]
+    expect(request).not.toHaveProperty('aspectRatio')
+    expect(request).not.toHaveProperty('imageSize')
+  })
+
+  it('only sends fixed Image2 sizes supported by each resolution tier', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }, { id: 'adobe-firefly-gpt-image-2-4k' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['1:1', '3:2', '2:3'])
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('3:2')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '1536x1024' }))
+
+    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('2K')
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('1:1')
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['1:1', '16:9'])
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '2048x1152' }))
+
+    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('4K')
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('adobe-firefly-gpt-image-2-4k')
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('16:9')
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['16:9', '9:16'])
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
+      model: 'adobe-firefly-gpt-image-2-4k',
+      size: '3840x2160',
+    }))
+
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('9:16')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
+      model: 'adobe-firefly-gpt-image-2-4k',
+      size: '2160x3840',
+    }))
+
+    await wrapper.get<HTMLSelectElement>('#creator-model').setValue('gpt-image-2')
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').element.value).toBe('2K')
+  })
+
+  it('shows only elapsed time while submitting and reveals progress after generation starts', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    let releasePendingHistory: (() => void) | undefined
+    let finishImage: ((value: { data: Array<{ url: string }> }) => void) | undefined
+    putHistory.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releasePendingHistory = resolve
+    }))
+    generateImage.mockImplementationOnce(() => new Promise((resolve) => {
+      finishImage = resolve
+    }))
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一张方形产品图')
+    await wrapper.get('.generate-button').trigger('click')
+
+    expect(wrapper.get('.generation-metrics').text()).toContain('已用时')
+    expect(wrapper.find('.progress-track').exists()).toBe(false)
+
+    releasePendingHistory?.()
+    await flushPromises()
+    expect(generateImage).toHaveBeenCalled()
+    expect(wrapper.get('.progress-track').classes()).toContain('indeterminate')
+
+    finishImage?.({ data: [{ url: 'data:image/png;base64,UE5H' }] })
+    await flushPromises()
+    expect(wrapper.find('.generation-state').exists()).toBe(false)
+  })
+
+  it('keeps an image task bound to image mode when the user opens the video workspace', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    let releasePendingHistory: (() => void) | undefined
+    let finishImage: ((value: { data: Array<{ url: string }> }) => void) | undefined
+    putHistory.mockImplementationOnce(() => new Promise<void>((resolve) => {
+      releasePendingHistory = resolve
+    }))
+    generateImage.mockImplementationOnce(() => new Promise((resolve) => {
+      finishImage = resolve
+    }))
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一张正在生成的图片')
+    await wrapper.get('.generate-button').trigger('click')
+    expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.generation-state').exists()).toBe(false)
+    expect(wrapper.text()).not.toContain('正在制作你的视频')
+
+    releasePendingHistory?.()
+    await flushPromises()
+    expect(generateImage).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({
+      model: 'grok-imagine-image',
+      prompt: '一张正在生成的图片',
+    }))
+    expect(createVideo).not.toHaveBeenCalled()
+
+    await wrapper.findAll('.mode-option')[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
+
+    finishImage?.({ data: [{ url: 'data:image/png;base64,UE5H' }] })
+    await flushPromises()
+    expect(wrapper.find('.generation-state').exists()).toBe(false)
+  })
+
+  it('moves professional video shots into the main workspace', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
+
+    expect(wrapper.find('.professional-workspace').exists()).toBe(true)
+    expect(wrapper.find('.settings-panel .shot-list').exists()).toBe(false)
+    expect(wrapper.findAll('.sequence-shot')).toHaveLength(1)
+    expect(wrapper.find('.sequence-shot').classes()).toContain('active')
+    expect(wrapper.find('.selected-shot-editor').exists()).toBe(false)
+    expect(wrapper.get('.prompt-field label').text()).toBe('视频描述')
+    expect(wrapper.get('.prompt-field > small').text()).toContain('镜头 1')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 8 秒')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('单段视频')
+    await wrapper.get('.sequence-add').trigger('click')
+    expect(wrapper.findAll('.sequence-shot')).toHaveLength(2)
+    expect(wrapper.findAll('.sequence-shot')[1].classes()).toContain('active')
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头的右侧编辑文案')
+    expect(wrapper.findAll<HTMLTextAreaElement>('.sequence-shot textarea')[1].element.value).toBe('第二个镜头的右侧编辑文案')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 16 秒')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('按镜头顺序拼接')
+
+    await wrapper.findAll('.sequence-shot')[0].trigger('click')
+    expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('')
+    await wrapper.get('.field-block .stepper button:last-child').trigger('click')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 17 秒')
+  })
+})

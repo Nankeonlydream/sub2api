@@ -58,6 +58,7 @@ type GrokMediaRequestInfo struct {
 	Prompt          string
 	N               int
 	Size            string
+	AspectRatio     string
 	SizeTier        string
 	Resolution      string
 	DurationSeconds int
@@ -126,6 +127,7 @@ func ParseGrokMediaRequest(contentType string, body []byte) GrokMediaRequestInfo
 	info.Model = strings.TrimSpace(info.Model)
 	info.Prompt = strings.TrimSpace(info.Prompt)
 	info.Size = strings.TrimSpace(info.Size)
+	info.AspectRatio = strings.TrimSpace(info.AspectRatio)
 	info.SizeTier = NormalizeImageBillingTierOrDefault(info.Size)
 	info.Resolution = NormalizeVideoBillingResolutionOrDefault(info.Resolution)
 	info.DurationSeconds = NormalizeVideoBillingDurationSecondsOrDefault(info.DurationSeconds)
@@ -142,6 +144,7 @@ func parseGrokMediaJSONRequest(body []byte, info *GrokMediaRequestInfo) {
 	info.Model = strings.TrimSpace(gjson.GetBytes(body, "model").String())
 	info.Prompt = strings.TrimSpace(gjson.GetBytes(body, "prompt").String())
 	info.Size = strings.TrimSpace(gjson.GetBytes(body, "size").String())
+	info.AspectRatio = strings.TrimSpace(gjson.GetBytes(body, "aspect_ratio").String())
 	info.Resolution = strings.TrimSpace(gjson.GetBytes(body, "resolution").String())
 	if duration := gjson.GetBytes(body, "duration"); duration.Exists() && duration.Type == gjson.Number {
 		info.DurationSeconds = int(duration.Int())
@@ -255,6 +258,8 @@ func parseGrokMediaMultipartRequest(contentType string, body []byte, info *GrokM
 			info.Prompt = value
 		case "size":
 			info.Size = value
+		case "aspect_ratio":
+			info.AspectRatio = value
 		case "resolution":
 			info.Resolution = value
 		case "duration":
@@ -934,6 +939,9 @@ func prepareGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conten
 	if info.Size != "" {
 		payload["size"] = info.Size
 	}
+	if info.AspectRatio != "" {
+		payload["aspect_ratio"] = info.AspectRatio
+	}
 
 	images := make([]map[string]string, 0, len(info.InputImageURLs)+len(info.Uploads))
 	for _, imageURL := range info.InputImageURLs {
@@ -1106,12 +1114,28 @@ func sanitizeGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conte
 	}
 	switch endpoint {
 	case GrokMediaEndpointImagesGenerations, GrokMediaEndpointImagesEdits:
-		if !gjson.GetBytes(body, "size").Exists() {
-			return body, contentType, nil
-		}
-		out, err := sjson.DeleteBytes(body, "size")
-		if err != nil {
-			return nil, "", fmt.Errorf("sanitize grok media size: %w", err)
+		// xAI Imagine has its own image schema. OpenAI-compatible clients often
+		// include fields that xAI rejects with 422 (size, quality, background,
+		// output_format, output_compression, image_size, and moderation).
+		out := body
+		for _, field := range []string{
+			"size",
+			"quality",
+			"background",
+			"output_format",
+			"output_compression",
+			"image_size",
+			"moderation",
+			"user",
+		} {
+			if !gjson.GetBytes(out, field).Exists() {
+				continue
+			}
+			var err error
+			out, err = sjson.DeleteBytes(out, field)
+			if err != nil {
+				return nil, "", fmt.Errorf("sanitize grok media %s: %w", field, err)
+			}
 		}
 		return out, contentType, nil
 	default:

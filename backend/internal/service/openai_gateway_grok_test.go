@@ -1166,7 +1166,7 @@ func TestForwardGrokMediaImagesGenerationStripsUnsupportedSize(t *testing.T) {
 
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
-	body := []byte(`{"model":"grok-imagine-image","prompt":"draw a cat","size":"1024x1024"}`)
+	body := []byte(`{"model":"grok-imagine-image","prompt":"draw a cat","size":"1024x1024","quality":"auto","background":"auto","output_format":"png","output_compression":90,"image_size":"2K","moderation":"auto","user":"creator","aspect_ratio":"1:1","resolution":"2k"}`)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
 
@@ -1193,7 +1193,7 @@ func TestForwardGrokMediaImagesGenerationStripsUnsupportedSize(t *testing.T) {
 
 	result, err := svc.ForwardGrokMedia(context.Background(), c, account, GrokMediaEndpointImagesGenerations, "", body, "application/json")
 	require.NoError(t, err)
-	require.JSONEq(t, `{"model":"grok-imagine-image","prompt":"draw a cat"}`, string(upstream.lastBody))
+	require.JSONEq(t, `{"model":"grok-imagine-image","prompt":"draw a cat","aspect_ratio":"1:1","resolution":"2k"}`, string(upstream.lastBody))
 	require.Equal(t, ImageBillingSize1K, result.ImageSize)
 	require.Equal(t, "1024x1024", result.ImageInputSize)
 }
@@ -1206,6 +1206,7 @@ func TestForwardGrokMediaImagesEditMultipartConvertsToJSON(t *testing.T) {
 	writer := multipart.NewWriter(&buf)
 	require.NoError(t, writer.WriteField("model", "grok-imagine-edit"))
 	require.NoError(t, writer.WriteField("prompt", "edit this private image"))
+	require.NoError(t, writer.WriteField("aspect_ratio", "1:1"))
 	partHeader := textproto.MIMEHeader{}
 	partHeader.Set("Content-Disposition", `form-data; name="image"; filename="input.png"`)
 	partHeader.Set("Content-Type", "image/png")
@@ -1248,6 +1249,7 @@ func TestForwardGrokMediaImagesEditMultipartConvertsToJSON(t *testing.T) {
 	require.True(t, json.Valid(upstream.lastBody))
 	require.Equal(t, "vendor-image-edit", gjson.GetBytes(upstream.lastBody, "model").String())
 	require.Equal(t, "edit this private image", gjson.GetBytes(upstream.lastBody, "prompt").String())
+	require.Equal(t, "1:1", gjson.GetBytes(upstream.lastBody, "aspect_ratio").String())
 	require.True(t, strings.HasPrefix(gjson.GetBytes(upstream.lastBody, "image.url").String(), "data:image/png;base64,"))
 	require.False(t, gjson.GetBytes(upstream.lastBody, "image.image_url").Exists())
 	require.Equal(t, "grok-imagine-edit", result.BillingModel)

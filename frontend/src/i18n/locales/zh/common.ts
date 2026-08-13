@@ -161,6 +161,7 @@ export default {
     announcements: '公告',
     apiKeys: 'API 密钥',
     batchImage: '批量生图',
+    creatorStudio: '创作中心',
     usage: '使用记录',
     redeem: '兑换',
     affiliate: '邀请返利',
@@ -205,6 +206,11 @@ export default {
     contentModeration: '内容审核',
     promptAudit: '提示词审计',
     auditLogs: '操作日志',
+  },
+
+  creator: {
+    title: '创作中心',
+    description: '使用图片与视频模型完成创作',
   },
 
   // Auth
