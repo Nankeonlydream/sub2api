@@ -1363,29 +1363,42 @@ async function startGeneration() {
 async function generateImageWork(work: CreatorHistoryItem, input: ImageGenerationSnapshot) {
   generationPhase.value = 'generating'
   generationHasExactProgress.value = false
-  generationProgress.value = '正在调用图片模型，请稍候'
+  const requestCount = Math.max(1, input.outputCount || 1)
+  const requestAttempts = input.capability === 'image2' ? requestCount : 1
+  const requestN = input.capability === 'image2' ? 1 : input.outputCount
   const isGeminiProtocol = input.platform === 'gemini' || input.platform === 'antigravity'
   const usesOpenAIImageSize = input.capability === 'image2'
   const usesBase64Response = !isGeminiProtocol && (usesOpenAIImageSize || input.capability === 'grok')
-  const result = await generateCreatorImage(input.apiKey, {
-    model: input.model,
-    prompt: input.prompt,
-    n: input.outputCount,
-    size: input.size,
-    quality: input.quality,
-    outputFormat: input.outputFormat,
-    background: input.background,
-    // Grok and Image2 may return temporary cross-origin URLs that browsers cannot
-    // save through the download attribute. Base64 keeps the result self-contained.
-    responseFormat: usesBase64Response ? 'b64_json' : undefined,
-    referenceImages: input.referenceFiles,
-    protocol: isGeminiProtocol ? 'gemini' : 'openai',
-    ...(!usesOpenAIImageSize ? {
-      aspectRatio: input.aspectRatio,
-      imageSize: input.resolution,
-    } : {}),
-  })
-  work.outputs = result.data.map(item => item.url).filter(Boolean)
+  const outputs: string[] = []
+  for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
+    generationProgress.value = requestCount > 1
+      ? `正在生成第 ${index + 1} / ${requestCount} 张图片`
+      : '正在调用图片模型，请稍候'
+    const result = await generateCreatorImage(input.apiKey, {
+      model: input.model,
+      prompt: input.prompt,
+      n: requestN,
+      size: input.size,
+      quality: input.quality,
+      outputFormat: input.outputFormat,
+      background: input.background,
+      // Grok and Image2 may return temporary cross-origin URLs that browsers cannot
+      // save through the download attribute. Base64 keeps the result self-contained.
+      responseFormat: usesBase64Response ? 'b64_json' : undefined,
+      referenceImages: input.referenceFiles,
+      protocol: isGeminiProtocol ? 'gemini' : 'openai',
+      ...(!usesOpenAIImageSize ? {
+        aspectRatio: input.aspectRatio,
+        imageSize: input.resolution,
+      } : {}),
+    })
+    const batchOutputs = result.data.map(item => item.url).filter(Boolean)
+    outputs.push(...batchOutputs.slice(0, requestCount - outputs.length))
+    work.outputs = [...outputs]
+    work.updatedAt = Date.now()
+    await persistWork(work)
+  }
+  work.outputs = outputs
   if (!work.outputs.length) throw new Error('模型没有返回可用图片')
 }
 
@@ -1396,7 +1409,13 @@ function isSingleOutputImageModel(model: string, resolution: string, capability:
 function creatorGenerationErrorMessage(error: unknown) {
   const message = errorMessage(error, '生成失败')
   if (/only supports\s+n\s*=\s*1|supports\s+n\s*=\s*1/i.test(message)) {
-    return '当前 4K 图片模型每次只能生成 1 张图片，请将生成数量改为 1，或切换到 1K / 2K 后重试。'
+    return '当前图片模型每次请求只能生成 1 张图片；系统已自动按单张请求处理。若仍失败，请切换创作分组或稍后重试。'
+  }
+  if (/unknown parameter:\s*["']?tools\[0\]\.n|tools\[0\]\.n/i.test(message)) {
+    return '当前图片通道不支持批量参数；系统已自动改为逐张生成。请点击“带回参数重试”。'
+  }
+  if (/no available compatible accounts/i.test(message)) {
+    return '当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。'
   }
   if (/timeout|timed out|deadline exceeded|network|upstream request failed|gateway timeout|连接|超时|网络/i.test(message)) {
     return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“带回参数重试”，不要连续重复提交。'

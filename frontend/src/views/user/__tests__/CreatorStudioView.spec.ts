@@ -742,6 +742,80 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLSelectElement>('#creator-resolution').element.value).toBe('2K')
   })
 
+  it('generates multiple Image2 outputs as separate single-image requests', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
+    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('2K')
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('.field-block .stepper button:last-child').trigger('click')
+    expect(wrapper.get('.field-block .stepper').text()).toContain('2 张')
+
+    generateImage.mockClear()
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledTimes(2)
+    expect(generateImage.mock.calls.map(([, request]) => request.n)).toEqual([1, 1])
+    expect(generateImage.mock.calls.map(([, request]) => request.size)).toEqual(['2048x1152', '2048x1152'])
+    expect(wrapper.findAll('.result-card')).toHaveLength(2)
+    expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('explains incompatible image accounts instead of exposing the upstream message', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    generateImage.mockRejectedValueOnce(new Error('No available compatible accounts'))
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('测试兼容账号提示')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('当前创作分组没有可用的兼容图片账号')
+    expect(wrapper.text()).not.toContain('No available compatible accounts')
+  })
+
+  it('does not mislabel a standard Image2 n=1 error as a 4K restriction', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    generateImage.mockRejectedValueOnce(new Error('model gpt-image-2 only supports n=1'))
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('测试单图限制提示')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('当前图片模型每次请求只能生成 1 张图片')
+    expect(wrapper.text()).not.toContain('当前 4K 图片模型每次只能生成 1 张图片')
+  })
+
   it('shows only elapsed time while submitting and reveals progress after generation starts', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     let releasePendingHistory: (() => void) | undefined

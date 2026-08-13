@@ -183,7 +183,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				}
 				message := cls.Message
 				if !cls.ModelNotFound {
-					message = "No available compatible accounts"
+					message = "当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。"
 				}
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 				return
@@ -202,7 +202,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			}
 			message := cls.Message
 			if !cls.ModelNotFound {
-				message = "No available compatible accounts"
+				message = "当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。"
 			}
 			h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
 			return
