@@ -549,11 +549,7 @@ describe('CreatorStudioView', () => {
     listHistory.mockResolvedValue([work])
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'grok-imagine-image-quality' }])
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' })),
-    })
+    const fetchMock = vi.fn()
     vi.stubGlobal('fetch', fetchMock)
 
     const wrapper = mount(CreatorStudioView, {
@@ -567,7 +563,7 @@ describe('CreatorStudioView', () => {
     await wrapper.get('[aria-label="作为参考图继续创作"]').trigger('click')
     await flushPromises()
 
-    expect(fetchMock).toHaveBeenCalledWith(output)
+    expect(fetchMock).not.toHaveBeenCalled()
     expect(wrapper.find('.result-workspace').exists()).toBe(false)
     expect(wrapper.findAll('.reference-item')).toHaveLength(1)
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe(work.prompt)
@@ -584,6 +580,56 @@ describe('CreatorStudioView', () => {
       aspectRatio: '4:3',
       imageSize: '2K',
     }))
+  })
+
+  it('prevents duplicate reference-image reads while a remote output is loading', async () => {
+    const output = 'https://cdn.example/generated.png'
+    const work = {
+      id: 'remote-reference-source',
+      type: 'image',
+      status: 'completed',
+      prompt: '继续编辑远程图片',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      groupId: image2Group.id,
+      imageCapability: 'image2',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: [output],
+      aspectRatio: '1:1',
+      resolution: '1K',
+      outputCount: 1,
+    } as const
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    let resolveFetch: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn().mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+    const button = wrapper.get('[aria-label="作为参考图继续创作"]')
+    await button.trigger('click')
+    await button.trigger('click')
+
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(button.attributes('disabled')).toBeDefined()
+
+    resolveFetch?.({
+      ok: true,
+      status: 200,
+      blob: vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' })),
+    })
+    await flushPromises()
+    expect(wrapper.findAll('.reference-item')).toHaveLength(1)
   })
 
   it('downloads base64 image results without fetching their source', async () => {

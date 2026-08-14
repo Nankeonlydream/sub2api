@@ -252,8 +252,9 @@
                     v-if="selectedWork.type === 'image'"
                     type="button"
                     class="icon-action"
-                    title="作为参考图继续创作"
+                    :title="referencingOutputKey === `${selectedWork.id}:${index}` ? '正在添加参考图' : '作为参考图继续创作'"
                     aria-label="作为参考图继续创作"
+                    :disabled="Boolean(referencingOutputKey)"
                     @click="useOutputAsReference(output, selectedWork, index)"
                   >
                     <Icon name="plus" size="sm" />
@@ -1067,6 +1068,7 @@ const videoShots = ref<VideoShot[]>([{ id: crypto.randomUUID(), prompt: '', dura
 const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
+const referencingOutputKey = ref('')
 const activeTemplateIndex = ref(0)
 const bootstrapping = ref(false)
 const loadingModels = ref(false)
@@ -2151,10 +2153,12 @@ async function regenerateWork(work: CreatorHistoryItem) {
 }
 
 async function useOutputAsReference(output: string, work: CreatorHistoryItem, index: number) {
+  if (referencingOutputKey.value) return
+  referencingOutputKey.value = `${work.id}:${index}`
   try {
-    const response = await fetch(output)
-    if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`)
-    const blob = await response.blob()
+    const blob = output.startsWith('data:')
+      ? imageDataUrlToBlob(output)
+      : await fetchImageBlob(output)
     if (!blob.size) throw new Error('图片内容为空')
     if (blob.size > 5 * 1024 * 1024) throw new Error('图片超过 5MB，无法作为参考图上传')
     const extension = imageFileExtension(output)
@@ -2168,7 +2172,35 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     appStore.showSuccess('已将作品加入参考图，并带回当时的生成参数')
   } catch (error) {
     appStore.showError(errorMessage(error, '无法将作品加入参考图'))
+  } finally {
+    referencingOutputKey.value = ''
   }
+}
+
+function imageDataUrlToBlob(dataUrl: string) {
+  const separator = dataUrl.indexOf(',')
+  const header = separator >= 0 ? dataUrl.slice(0, separator) : ''
+  const payload = separator >= 0 ? dataUrl.slice(separator + 1) : ''
+  const mimeType = /^data:(image\/[^;,]+)/i.exec(header)?.[1]
+  if (!mimeType || !/;base64(?:;|$)/i.test(header) || !payload) {
+    throw new Error('图片数据格式无效，无法作为参考图')
+  }
+
+  let decoded: string
+  try {
+    decoded = window.atob(payload.replace(/\s/g, ''))
+  } catch {
+    throw new Error('图片数据损坏，无法作为参考图')
+  }
+  const bytes = new Uint8Array(decoded.length)
+  for (let index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index)
+  return new Blob([bytes], { type: mimeType })
+}
+
+async function fetchImageBlob(output: string) {
+  const response = await fetch(output)
+  if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`)
+  return response.blob()
 }
 
 function continueCreating() {
