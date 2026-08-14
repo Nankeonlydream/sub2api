@@ -65,6 +65,32 @@ type openAIImagesFailoverHTTPUpstream struct {
 	accountIDs []int64
 }
 
+type openAIImagesSuccessHTTPUpstream struct {
+	service.HTTPUpstream
+	mu         sync.Mutex
+	accountIDs []int64
+	models     []string
+}
+
+func (u *openAIImagesSuccessHTTPUpstream) Do(req *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
+	body, _ := io.ReadAll(req.Body)
+	u.mu.Lock()
+	u.accountIDs = append(u.accountIDs, accountID)
+	u.models = append(u.models, gjson.GetBytes(body, "model").String())
+	u.mu.Unlock()
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(bytes.NewBufferString(`{"data":[{"b64_json":"aW1hZ2U="}]}`)),
+	}, nil
+}
+
+func (u *openAIImagesSuccessHTTPUpstream) calls() ([]int64, []string) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]int64(nil), u.accountIDs...), append([]string(nil), u.models...)
+}
+
 func (u *openAIImagesFailoverHTTPUpstream) Do(_ *http.Request, _ string, accountID int64, _ int) (*http.Response, error) {
 	u.mu.Lock()
 	u.accountIDs = append(u.accountIDs, accountID)
@@ -200,4 +226,199 @@ func TestOpenAIGatewayHandlerImages_ServerErrorFailsOverAndReturnsClearErrorWhen
 	require.Len(t, events, 2)
 	require.Equal(t, "failover", events[0].Kind)
 	require.Equal(t, "failover", events[1].Kind)
+}
+
+func TestOpenAIGatewayHandlerImages_SkipsFixed4KAccountForSmallerRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(3131)
+	accounts := []service.Account{
+		{
+			ID:          1,
+			Name:        "fixed-4k-image-account",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeAPIKey,
+			Status:      service.StatusActive,
+			Schedulable: true,
+			Concurrency: 0,
+			Priority:    0,
+			Credentials: map[string]any{
+				"api_key":  "token-1",
+				"base_url": "https://image-upstream.example/v1",
+				"model_mapping": map[string]any{
+					"gpt-image-2": "adobe-firefly-gpt-image-2-4k",
+				},
+			},
+		},
+		{
+			ID:          2,
+			Name:        "standard-image-account",
+			Platform:    service.PlatformOpenAI,
+			Type:        service.AccountTypeAPIKey,
+			Status:      service.StatusActive,
+			Schedulable: true,
+			Concurrency: 0,
+			Priority:    1,
+			Credentials: map[string]any{
+				"api_key":  "token-2",
+				"base_url": "https://image-upstream.example/v1",
+				"model_mapping": map[string]any{
+					"gpt-image-2": "gpt-image-2",
+				},
+			},
+		},
+	}
+	accountRepo := openAIImagesFailoverAccountRepo{accounts: accounts}
+	upstream := &openAIImagesFailoverHTTPUpstream{}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	gatewayService := service.NewOpenAIGatewayService(
+		accountRepo,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		upstream,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingService.Stop)
+	handler := NewOpenAIGatewayHandler(
+		gatewayService,
+		service.NewConcurrencyService(nil),
+		billingService,
+		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
+		nil,
+		nil,
+		nil,
+		nil,
+		cfg,
+	)
+	handler.maxAccountSwitches = 10
+
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a wide scene","quality":"high","size":"1536x656"}`)
+	core, observedLogs := observer.New(zap.DebugLevel)
+	requestCtx := logger.IntoContext(context.Background(), zap.New(core))
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		ID:      100,
+		GroupID: &groupID,
+		Group: &service.Group{
+			ID:                   groupID,
+			AllowImageGeneration: true,
+		},
+		User: &service.User{ID: 101},
+	})
+	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 101, Concurrency: 0})
+
+	handler.Images(c)
+
+	require.Equal(t, []int64{2}, upstream.calls())
+	require.Len(t, observedLogs.FilterMessage("openai.images.account_skipped_model_size_mismatch").All(), 1)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestOpenAIGatewayHandlerImages_UsesChannelAliasForAccountSelectionAndForwarding(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	groupID := int64(3132)
+	channelRepo := makeOpenAIImagesChannelRepo(groupID, "gpt-image-2", "opt-image-2")
+	channelService := service.NewChannelService(channelRepo, nil, nil, nil)
+	accountRepo := openAIImagesFailoverAccountRepo{accounts: []service.Account{{
+		ID:          3,
+		Name:        "channel-alias-image-account",
+		Platform:    service.PlatformOpenAI,
+		Type:        service.AccountTypeAPIKey,
+		Status:      service.StatusActive,
+		Schedulable: true,
+		Credentials: map[string]any{
+			"api_key":  "token-3",
+			"base_url": "https://image-upstream.example/v1",
+			"model_mapping": map[string]any{
+				"opt-image-2": "gpt-image-2",
+			},
+		},
+	}}}
+	upstream := &openAIImagesSuccessHTTPUpstream{}
+	cfg := &config.Config{RunMode: config.RunModeSimple}
+	gatewayService := service.NewOpenAIGatewayService(
+		accountRepo, nil, nil, nil, nil, nil, nil, cfg, nil, nil, nil, nil, nil,
+		upstream, nil, nil, nil, nil, channelService, nil, nil, nil,
+	)
+	billingService := service.NewBillingCacheService(nil, nil, nil, nil, nil, nil, cfg, nil)
+	t.Cleanup(billingService.Stop)
+	handler := NewOpenAIGatewayHandler(
+		gatewayService,
+		service.NewConcurrencyService(nil),
+		billingService,
+		service.NewAPIKeyService(nil, nil, nil, nil, nil, nil, cfg),
+		nil, nil, nil, nil, cfg,
+	)
+
+	body := []byte(`{"model":"gpt-image-2","prompt":"draw a cat","size":"2048x2048"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+	c.Set(string(middleware2.ContextKeyAPIKey), &service.APIKey{
+		ID:      102,
+		GroupID: &groupID,
+		Group: &service.Group{
+			ID:                   groupID,
+			AllowImageGeneration: true,
+		},
+		User: &service.User{ID: 103},
+	})
+	c.Set(string(middleware2.ContextKeyUser), middleware2.AuthSubject{UserID: 103})
+
+	handler.Images(c)
+
+	accountIDs, models := upstream.calls()
+	require.Equal(t, []int64{3}, accountIDs)
+	require.Equal(t, []string{"gpt-image-2"}, models)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+type openAIImagesChannelRepo struct {
+	service.ChannelRepository
+	groupID int64
+	source  string
+	target  string
+}
+
+func makeOpenAIImagesChannelRepo(groupID int64, source, target string) *openAIImagesChannelRepo {
+	return &openAIImagesChannelRepo{groupID: groupID, source: source, target: target}
+}
+
+func (r *openAIImagesChannelRepo) ListAll(_ context.Context) ([]service.Channel, error) {
+	return []service.Channel{{
+		ID:       91,
+		Name:     "image-channel",
+		Status:   service.StatusActive,
+		GroupIDs: []int64{r.groupID},
+		ModelMapping: map[string]map[string]string{
+			service.PlatformOpenAI: {r.source: r.target},
+		},
+	}}, nil
+}
+
+func (r *openAIImagesChannelRepo) GetGroupPlatforms(_ context.Context, _ []int64) (map[int64]string, error) {
+	return map[int64]string{r.groupID: service.PlatformOpenAI}, nil
 }

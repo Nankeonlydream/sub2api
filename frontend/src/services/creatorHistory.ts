@@ -1,5 +1,6 @@
 export type CreatorWorkType = 'image' | 'video'
 export type CreatorWorkStatus = 'pending' | 'completed' | 'failed'
+export type CreatorVideoGenerationMethod = 'text' | 'image' | 'reference'
 
 export interface CreatorHistoryItem {
   id: string
@@ -17,6 +18,7 @@ export interface CreatorHistoryItem {
   shotDurations?: number[]
   mergeError?: string
   groupId?: number
+  apiKeyId?: number
   imageCapability?: 'grok' | 'image2' | 'banner'
   aspectRatio?: string
   resolution?: string
@@ -28,6 +30,7 @@ export interface CreatorHistoryItem {
   completedAt?: number
   generationDurationMs?: number
   referenceCount?: number
+  videoGenerationMethod?: CreatorVideoGenerationMethod
   outputCount?: number
   requestedDuration?: number
   shotCount?: number

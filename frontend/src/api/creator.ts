@@ -50,6 +50,7 @@ export interface VideoGenerationInput {
   model: string
   prompt: string
   imageDataUrl?: string
+  referenceImageDataUrls?: string[]
   duration?: number
   aspectRatio?: string
   resolution?: string
@@ -348,6 +349,13 @@ export async function createCreatorVideo(
   apiKey: string,
   input: VideoGenerationInput,
 ): Promise<VideoGenerationResult> {
+  const referenceImageDataUrls = (input.referenceImageDataUrls || []).filter(Boolean)
+  if (input.imageDataUrl && referenceImageDataUrls.length) {
+    throw new Error('首帧图与参考图不能同时用于同一个视频请求')
+  }
+  if (referenceImageDataUrls.length > 7) {
+    throw new Error('参考图生视频最多支持 7 张参考图')
+  }
   const payload = {
     ...input.extra,
     model: input.model,
@@ -355,7 +363,10 @@ export async function createCreatorVideo(
     ...(input.duration !== undefined ? { duration: input.duration } : {}),
     ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
     ...(input.resolution ? { resolution: input.resolution } : {}),
-    ...(input.imageDataUrl ? { image: { image_url: input.imageDataUrl } } : {}),
+    ...(input.imageDataUrl ? { image: { url: input.imageDataUrl } } : {}),
+    ...(referenceImageDataUrls.length
+      ? { reference_images: referenceImageDataUrls.map(url => ({ url })) }
+      : {}),
   }
   const body = await fetchJSON<any>(buildGatewayUrl('/v1/videos/generations'), {
     method: 'POST',

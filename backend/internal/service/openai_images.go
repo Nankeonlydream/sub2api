@@ -455,7 +455,7 @@ func applyOpenAIImagesDefaults(req *OpenAIImagesRequest) {
 }
 
 func isOpenAIImageGenerationModel(model string) bool {
-	return IsGPTImageGenerationModel(model) || isGrokImageGenerationModel(model)
+	return IsGPTImageGenerationModel(model) || isFixed4KOpenAIImageModel(model) || isGrokImageGenerationModel(model)
 }
 
 // IsGPTImageGenerationModel identifies the GPT native image-generation model family.
@@ -548,6 +548,77 @@ func normalizeOpenAIImageSizeTier(size string) string {
 	return NormalizeImageBillingTierOrDefault(size)
 }
 
+type OpenAIImagesModelSizeMismatchError struct {
+	Model         string
+	RequestedTier string
+}
+
+func (e *OpenAIImagesModelSizeMismatchError) Error() string {
+	return fmt.Sprintf("model %s is a fixed 4K SKU, but size requests %s", e.Model, e.RequestedTier)
+}
+
+// ResolveOpenAIImagesUpstreamModel resolves channel and account mappings and
+// rejects fixed-resolution SKUs before a mismatched request reaches upstream.
+func ResolveOpenAIImagesUpstreamModel(
+	account *Account,
+	parsed *OpenAIImagesRequest,
+	channelMappedModel string,
+) (string, error) {
+	if account == nil {
+		return "", fmt.Errorf("openai images account is required")
+	}
+	if parsed == nil {
+		return "", fmt.Errorf("parsed images request is required")
+	}
+
+	clientModel := strings.TrimSpace(parsed.Model)
+	if err := validateOpenAIImagesModel(clientModel); err != nil {
+		return "", err
+	}
+
+	requestModel := clientModel
+	if mapped := strings.TrimSpace(channelMappedModel); mapped != "" {
+		requestModel = mapped
+	}
+
+	upstreamModel := requestModel
+	if account.Type == AccountTypeAPIKey {
+		var matched bool
+		upstreamModel, matched = account.ResolveMappedModel(requestModel)
+		if !matched && requestModel != clientModel {
+			upstreamModel, matched = account.ResolveMappedModel(clientModel)
+		}
+		if !matched {
+			upstreamModel = requestModel
+		}
+	}
+	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
+		return "", err
+	}
+	if isFixed4KOpenAIImageModel(upstreamModel) && parsed.SizeTier != ImageBillingSize4K {
+		return "", &OpenAIImagesModelSizeMismatchError{
+			Model:         upstreamModel,
+			RequestedTier: parsed.SizeTier,
+		}
+	}
+	return upstreamModel, nil
+}
+
+func isFixed4KOpenAIImageModel(model string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(model))
+	if !strings.Contains(normalized, "gpt-image-2") {
+		return false
+	}
+	for _, part := range strings.FieldsFunc(normalized, func(r rune) bool {
+		return r == '-' || r == '_' || r == '.' || r == '/'
+	}) {
+		if part == "4k" {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *OpenAIGatewayService) ForwardImages(
 	ctx context.Context,
 	c *gin.Context,
@@ -582,11 +653,8 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	if mapped := strings.TrimSpace(channelMappedModel); mapped != "" {
 		requestModel = mapped
 	}
-	if err := validateOpenAIImagesModel(requestModel); err != nil {
-		return nil, err
-	}
-	upstreamModel := account.GetMappedModel(requestModel)
-	if err := validateOpenAIImagesModel(upstreamModel); err != nil {
+	upstreamModel, err := ResolveOpenAIImagesUpstreamModel(account, parsed, channelMappedModel)
+	if err != nil {
 		return nil, err
 	}
 	logger.LegacyPrintf(

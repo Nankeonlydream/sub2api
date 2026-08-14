@@ -325,6 +325,79 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_ExplicitSizeRequiresNative
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 }
 
+func TestResolveOpenAIImagesUpstreamModel_RejectsFixed4KAccountMappingForSmallerSize(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"gpt-image-2": "adobe-firefly-gpt-image-2-4k",
+			},
+		},
+	}
+
+	parsed := &OpenAIImagesRequest{
+		Model:    "gpt-image-2",
+		SizeTier: ImageBillingSize2K,
+	}
+	_, err := ResolveOpenAIImagesUpstreamModel(account, parsed, "")
+	var mismatch *OpenAIImagesModelSizeMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, "adobe-firefly-gpt-image-2-4k", mismatch.Model)
+	require.Equal(t, ImageBillingSize2K, mismatch.RequestedTier)
+
+	parsed.SizeTier = ImageBillingSize4K
+	model, err := ResolveOpenAIImagesUpstreamModel(account, parsed, "")
+	require.NoError(t, err)
+	require.Equal(t, "adobe-firefly-gpt-image-2-4k", model)
+}
+
+func TestResolveOpenAIImagesUpstreamModel_ResolvesChannelAliasThroughAccountMapping(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"opt-image-2": "gpt-image-2",
+			},
+		},
+	}
+	parsed := &OpenAIImagesRequest{
+		Model:    "gpt-image-2",
+		SizeTier: ImageBillingSize2K,
+	}
+
+	model, err := ResolveOpenAIImagesUpstreamModel(account, parsed, "opt-image-2")
+	require.NoError(t, err)
+	require.Equal(t, "gpt-image-2", model)
+}
+
+func TestResolveOpenAIImagesUpstreamModel_RejectsFixed4KChannelAliasForSmallerSize(t *testing.T) {
+	account := &Account{
+		Platform: PlatformOpenAI,
+		Type:     AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{
+				"opt-image-2": "adobe-firefly-gpt-image-2-4k",
+			},
+		},
+	}
+	parsed := &OpenAIImagesRequest{
+		Model:    "gpt-image-2",
+		SizeTier: ImageBillingSize2K,
+	}
+
+	_, err := ResolveOpenAIImagesUpstreamModel(account, parsed, "opt-image-2")
+	var mismatch *OpenAIImagesModelSizeMismatchError
+	require.ErrorAs(t, err, &mismatch)
+	require.Equal(t, "adobe-firefly-gpt-image-2-4k", mismatch.Model)
+}
+
+func TestValidateOpenAIImagesModel_AllowsKnownFixed4KSKU(t *testing.T) {
+	require.NoError(t, validateOpenAIImagesModel("adobe-firefly-gpt-image-2-4k"))
+	require.Error(t, validateOpenAIImagesModel("adobe-firefly-unrelated-4k"))
+}
+
 func TestOpenAIGatewayServiceParseOpenAIImagesRequest_RejectsNonImageModel(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	body := []byte(`{"model":"gpt-5.4","prompt":"draw a cat"}`)

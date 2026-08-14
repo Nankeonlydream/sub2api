@@ -17,6 +17,9 @@ import (
 	"go.uber.org/zap"
 )
 
+const incompatibleOpenAIImageSizeAccountMessage = "当前创作分组没有与所选尺寸兼容的图片账号；固定 4K 模型只能生成 4K 图片。请重试，或切换创作分组/输出尺寸。"
+const unsupportedOpenAIImageAccountMessage = "当前创作分组未配置支持所选图片模型的可用账号，请检查账号模型映射，或切换创作分组。"
+
 // Images handles OpenAI Images API requests.
 // POST /v1/images/generations
 // POST /v1/images/edits
@@ -115,6 +118,10 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	setOpsEndpointContext(c, "", int16(service.RequestTypeFromLegacy(parsed.Stream, false)))
 
 	channelMapping, _ := h.gatewayService.ResolveChannelMappingAndRestrict(c.Request.Context(), apiKey.GroupID, routingModel)
+	selectionModel := routingModel
+	if mapped := strings.TrimSpace(channelMapping.MappedModel); mapped != "" {
+		selectionModel = mapped
+	}
 
 	if h.errorPassthroughService != nil {
 		service.BindErrorPassthroughService(c, h.errorPassthroughService)
@@ -152,6 +159,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 	failedAccountIDs := make(map[int64]struct{})
 	sameAccountRetryCount := make(map[int64]int)
 	var lastFailoverErr *service.UpstreamFailoverError
+	var lastModelSizeMismatch *service.OpenAIImagesModelSizeMismatchError
 	stopJSONKeepalive := func() {}
 	jsonKeepaliveStarted := false
 	defer func() { stopJSONKeepalive() }()
@@ -163,7 +171,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			requestCtx,
 			apiKey.GroupID,
 			sessionHash,
-			routingModel,
+			selectionModel,
 			failedAccountIDs,
 			parsed.RequiredCapability,
 		)
@@ -177,15 +185,27 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				zap.Int("excluded_account_count", len(failedAccountIDs)),
 			)
 			if len(failedAccountIDs) == 0 {
-				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, clientRequestModel, routingModel, service.PlatformOpenAI)
+				cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, selectionModel, clientRequestModel, service.PlatformOpenAI)
 				if !cls.ModelNotFound {
 					markOpsRoutingCapacityLimitedIfNoAvailable(c, err)
 				}
 				message := cls.Message
-				if !cls.ModelNotFound {
+				if cls.ModelNotFound {
+					message = unsupportedOpenAIImageAccountMessage
+				} else {
 					message = "当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。"
 				}
 				h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
+				return
+			}
+			if lastModelSizeMismatch != nil && lastFailoverErr == nil {
+				h.handleStreamingAwareError(
+					c,
+					http.StatusServiceUnavailable,
+					"service_unavailable",
+					incompatibleOpenAIImageSizeAccountMessage,
+					streamStarted,
+				)
 				return
 			}
 			if lastFailoverErr != nil {
@@ -196,12 +216,24 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			return
 		}
 		if selection == nil || selection.Account == nil {
-			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, clientRequestModel, routingModel, service.PlatformOpenAI)
+			if lastModelSizeMismatch != nil && lastFailoverErr == nil {
+				h.handleStreamingAwareError(
+					c,
+					http.StatusServiceUnavailable,
+					"service_unavailable",
+					incompatibleOpenAIImageSizeAccountMessage,
+					streamStarted,
+				)
+				return
+			}
+			cls := classifyNoAccountErrorFromGin(c, h.gatewayService, apiKey, selectionModel, clientRequestModel, service.PlatformOpenAI)
 			if !cls.ModelNotFound {
 				markOpsRoutingCapacityLimited(c)
 			}
 			message := cls.Message
-			if !cls.ModelNotFound {
+			if cls.ModelNotFound {
+				message = unsupportedOpenAIImageAccountMessage
+			} else {
 				message = "当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。"
 			}
 			h.handleStreamingAwareError(c, cls.Status, cls.ErrType, message, streamStarted)
@@ -218,8 +250,30 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 		)
 
 		account := selection.Account
+		resolvedUpstreamModel, compatibilityErr := service.ResolveOpenAIImagesUpstreamModel(account, parsed, channelMapping.MappedModel)
+		if compatibilityErr != nil {
+			var sizeMismatch *service.OpenAIImagesModelSizeMismatchError
+			if errors.As(compatibilityErr, &sizeMismatch) {
+				failedAccountIDs[account.ID] = struct{}{}
+				lastModelSizeMismatch = sizeMismatch
+				reqLog.Info(
+					"openai.images.account_skipped_model_size_mismatch",
+					zap.Int64("account_id", account.ID),
+					zap.String("upstream_model", sizeMismatch.Model),
+					zap.String("requested_size_tier", sizeMismatch.RequestedTier),
+				)
+				continue
+			}
+			h.handleStreamingAwareError(c, http.StatusBadRequest, "invalid_request_error", compatibilityErr.Error(), streamStarted)
+			return
+		}
 		sessionHash = ensureOpenAIPoolModeSessionHash(sessionHash, account)
-		reqLog.Debug("openai.images.account_selected", zap.Int64("account_id", account.ID), zap.String("account_name", account.Name))
+		reqLog.Debug(
+			"openai.images.account_selected",
+			zap.Int64("account_id", account.ID),
+			zap.String("account_name", account.Name),
+			zap.String("upstream_model", resolvedUpstreamModel),
+		)
 		setOpsSelectedAccount(c, account.ID, account.Platform)
 
 		accountReleaseFunc, slotResult := h.acquireResponsesAccountSlot(c, apiKey.GroupID, sessionHash, selection, parsed.Stream, &streamStarted, reqLog)
@@ -271,7 +325,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				var imageUpstreamErr *service.OpenAIImagesUpstreamError
 				if errors.As(err, &imageUpstreamErr) {
 					retryableServerError := service.IsOpenAIImagesRetryableUpstreamError(imageUpstreamErr)
-					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(requestModel), !retryableServerError, nil)
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, resolvedUpstreamModel, !retryableServerError, nil)
 					logEvent := "openai.images.upstream_user_error"
 					if retryableServerError {
 						logEvent = "openai.images.upstream_server_error_after_flush"
@@ -287,7 +341,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 				}
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
-					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(requestModel), false, nil)
+					h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, resolvedUpstreamModel, false, nil)
 					if service.OpenAIImagesJSONKeepaliveAdjustedWrittenSize(c) != writerSizeBeforeForward {
 						reqLog.Warn("openai.images.upstream_failover_skipped_after_flush",
 							zap.Int64("account_id", account.ID),
@@ -341,7 +395,7 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 					)
 					continue
 				}
-				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(requestModel), false, nil)
+				h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, resolvedUpstreamModel, false, nil)
 				upstreamErrorAlreadyCommunicated := openAIForwardErrorAlreadyCommunicated(c, writerSizeBeforeForward, err)
 				wroteFallback := false
 				if !upstreamErrorAlreadyCommunicated {
@@ -366,9 +420,9 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			if account.Type == service.AccountTypeOAuth && !account.IsShadow() {
 				h.gatewayService.UpdateCodexUsageSnapshotFromHeaders(c.Request.Context(), account.ID, result.ResponseHeaders)
 			}
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(requestModel), true, result.FirstTokenMs)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, resolvedUpstreamModel, true, result.FirstTokenMs)
 		} else {
-			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, account.GetMappedModel(requestModel), true, nil)
+			h.gatewayService.ReportOpenAIAccountScheduleResult(account.ID, resolvedUpstreamModel, true, nil)
 		}
 
 		userAgent := c.GetHeader("User-Agent")

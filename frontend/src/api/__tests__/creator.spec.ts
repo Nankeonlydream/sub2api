@@ -232,8 +232,51 @@ describe('creator gateway API', () => {
       duration: 8,
       aspect_ratio: '16:9',
       resolution: '720p',
-      image: { image_url: 'data:image/png;base64,UE5H' },
+      image: { url: 'data:image/png;base64,UE5H' },
     })
+  })
+
+  it('creates a reference-to-video job with up to seven reference images', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ request_id: 'video-reference-123' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    const references = Array.from({ length: 7 }, (_, index) => `data:image/png;base64,REF${index + 1}`)
+
+    await createCreatorVideo('sk-video', {
+      model: 'grok-imagine-video',
+      prompt: 'keep the same person and outfit',
+      duration: 10,
+      aspectRatio: '3:2',
+      resolution: '720p',
+      referenceImageDataUrls: references,
+    })
+
+    const [, init] = vi.mocked(fetch).mock.calls[0]
+    expect(JSON.parse(String(init?.body))).toEqual({
+      model: 'grok-imagine-video',
+      prompt: 'keep the same person and outfit',
+      duration: 10,
+      aspect_ratio: '3:2',
+      resolution: '720p',
+      reference_images: references.map(url => ({ url })),
+    })
+  })
+
+  it('rejects mixed or oversized video reference inputs before sending a request', async () => {
+    const { createCreatorVideo } = await import('@/api/creator')
+
+    await expect(createCreatorVideo('sk-video', {
+      model: 'grok-imagine-video',
+      prompt: 'invalid mixed input',
+      imageDataUrl: 'data:image/png;base64,SOURCE',
+      referenceImageDataUrls: ['data:image/png;base64,REF'],
+    })).rejects.toThrow('首帧图与参考图不能同时用于同一个视频请求')
+
+    await expect(createCreatorVideo('sk-video', {
+      model: 'grok-imagine-video',
+      prompt: 'too many references',
+      referenceImageDataUrls: Array.from({ length: 8 }, (_, index) => `data:image/png;base64,REF${index}`),
+    })).rejects.toThrow('最多支持 7 张参考图')
+    expect(fetch).not.toHaveBeenCalled()
   })
 
   it('gets video status and binary content', async () => {
