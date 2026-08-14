@@ -3,7 +3,7 @@
     <Transition name="modal">
       <div
         v-if="show"
-        class="modal-overlay"
+        :class="['modal-overlay', { 'modal-overlay--soft': appearance === 'soft' }]"
         :style="zIndexStyle"
         :aria-labelledby="dialogId"
         role="dialog"
@@ -11,7 +11,11 @@
         @click.self="handleClose"
       >
         <!-- Modal panel -->
-        <div ref="dialogRef" :class="['modal-content', widthClasses]" @click.stop>
+        <div
+          ref="dialogRef"
+          :class="['modal-content', widthClasses, { 'modal-content--soft': appearance === 'soft' }]"
+          @click.stop
+        >
           <!-- Header -->
           <div class="modal-header">
             <h3 :id="dialogId" class="modal-title">
@@ -56,11 +60,13 @@ const modalBodyRef = ref<HTMLElement | null>(null)
 let previousActiveElement: HTMLElement | null = null
 
 type DialogWidth = 'narrow' | 'normal' | 'wide' | 'extra-wide' | 'full'
+type DialogAppearance = 'default' | 'soft'
 
 interface Props {
   show: boolean
   title: string
   width?: DialogWidth
+  appearance?: DialogAppearance
   closeOnEscape?: boolean
   closeOnClickOutside?: boolean
   showCloseButton?: boolean
@@ -73,6 +79,7 @@ interface Emits {
 
 const props = withDefaults(defineProps<Props>(), {
   width: 'normal',
+  appearance: 'default',
   closeOnEscape: true,
   closeOnClickOutside: false,
   showCloseButton: true,
@@ -155,3 +162,64 @@ onUnmounted(() => {
   document.body.classList.remove('modal-open')
 })
 </script>
+
+<style scoped>
+.modal-overlay--soft {
+  padding: 24px;
+  background: rgb(20 29 38 / 48%);
+  backdrop-filter: blur(18px) saturate(82%);
+  -webkit-backdrop-filter: blur(18px) saturate(82%);
+}
+
+.modal-content--soft {
+  width: min(680px, calc(100vw - 48px));
+  max-width: 680px;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 72%);
+  border-radius: 28px;
+  box-shadow: 0 30px 80px rgb(15 23 42 / 30%), 0 8px 24px rgb(15 23 42 / 12%);
+}
+
+.modal-content--soft .modal-header {
+  padding: 22px 26px 16px;
+  border-bottom: 0;
+}
+
+.modal-content--soft .modal-title {
+  font-size: 20px;
+  font-weight: 750;
+}
+
+.modal-content--soft .modal-body {
+  padding: 0 26px 20px;
+}
+
+.modal-content--soft .modal-footer {
+  gap: 14px;
+  padding: 0 26px 24px;
+  border-top: 0;
+}
+
+@media (max-width: 640px) {
+  .modal-overlay--soft {
+    padding: 12px;
+  }
+
+  .modal-content--soft {
+    width: calc(100vw - 24px);
+    border-radius: 22px;
+  }
+
+  .modal-content--soft .modal-header {
+    padding: 18px 18px 14px;
+  }
+
+  .modal-content--soft .modal-body {
+    padding: 0 18px 16px;
+  }
+
+  .modal-content--soft .modal-footer {
+    padding: 0 18px 18px;
+  }
+}
+</style>

@@ -16,8 +16,15 @@ export interface CreatorHistoryItem {
   shotPrompts?: string[]
   shotDurations?: number[]
   mergeError?: string
+  groupId?: number
+  imageCapability?: 'grok' | 'image2' | 'banner'
   aspectRatio?: string
   resolution?: string
+  outputSize?: string
+  imageSizeMode?: 'auto' | 'ratio' | 'custom'
+  quality?: string
+  outputFormat?: string
+  background?: string
   completedAt?: number
   generationDurationMs?: number
   referenceCount?: number

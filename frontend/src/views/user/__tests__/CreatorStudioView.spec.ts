@@ -1,7 +1,10 @@
-import { flushPromises, mount } from '@vue/test-utils'
+import { config, flushPromises, mount } from '@vue/test-utils'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ApiKey, Group } from '@/types'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import CreatorStudioView from '../CreatorStudioView.vue'
+
+config.global.stubs = { teleport: true }
 
 const {
   createKey,
@@ -108,6 +111,22 @@ const image2Key = {
   group: image2Group,
 } as ApiKey
 
+const bananaGroup = {
+  ...group,
+  id: 7658,
+  name: '【外接生图】Nano-Banana',
+  description: 'Gemini 图片生成',
+  platform: 'gemini',
+} as Group
+
+const bananaKey = {
+  ...createdKey,
+  id: 16,
+  name: '创作中心 · Nano-Banana',
+  group_id: bananaGroup.id,
+  group: bananaGroup,
+} as ApiKey
+
 const IconStub = {
   props: ['name'],
   template: '<span class="icon-stub">{{ name }}</span>',
@@ -177,10 +196,92 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
+    expect(wrapper.findAll('.capability-switch .online-dot')).toHaveLength(3)
     expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
       'Grok 标准版生图',
       'Grok 高质量版生图',
     ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual([
+      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '2:1', '1:2', '19.5:9', '9:19.5', '20:9', '9:20', 'auto',
+    ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.text())).toEqual([
+      '1K · 1024 px 级',
+      '2K · 2048 px 级',
+    ])
+  })
+
+  it('shows all supported Banana ratios and labelled resolution tiers', async () => {
+    listGroups.mockResolvedValue([bananaGroup])
+    listKeys.mockResolvedValue({ items: [bananaKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'gemini-3-pro-image-preview' },
+      { id: 'gemini-3.1-flash-image' },
+    ])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[2].trigger('click')
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
+      'gemini-3-pro-image-preview',
+      'gemini-3.1-flash-image',
+    ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual([
+      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9',
+    ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.text())).toEqual([
+      '1K · 快速', '2K · 高清', '4K · 超清',
+    ])
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('Banana 宽幅图片')
+    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('21:9')
+    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('4K')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage).toHaveBeenCalledWith(bananaKey.key, expect.objectContaining({
+      protocol: 'gemini',
+      aspectRatio: '21:9',
+      imageSize: '4K',
+    }))
+  })
+
+  it('keeps the model selector stable while a capability model list is loading', async () => {
+    let resolveImage2Models: ((models: Array<{ id: string }>) => void) | undefined
+    const pendingImage2Models = new Promise<Array<{ id: string }>>(resolve => {
+      resolveImage2Models = resolve
+    })
+    const stableImage2Key = { ...image2Key, key: 'sk-image2-stable-loading-test' }
+    listGroups.mockResolvedValue([group, image2Group])
+    listKeys.mockResolvedValue({ items: [createdKey, stableImage2Key], total: 2, page: 1, page_size: 100, pages: 1 })
+    listModels.mockImplementation((key: string) => key === stableImage2Key.key
+      ? pendingImage2Models
+      : Promise.resolve([{ id: 'grok-imagine-image' }]))
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-image')
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.vm.$nextTick()
+
+    const loadingSelect = wrapper.get<HTMLSelectElement>('#creator-model')
+    expect(loadingSelect.element.value).toBe('grok-imagine-image')
+    expect(loadingSelect.findAll('option').map(option => option.attributes('value'))).toContain('grok-imagine-image')
+    expect(loadingSelect.attributes('aria-busy')).toBe('true')
+
+    resolveImage2Models?.([{ id: 'gpt-image-2' }, { id: 'gpt-image-2-4k' }])
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('gpt-image-2')
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').attributes('aria-busy')).toBe('false')
   })
 
   it('expands, collapses, and pages through inline prompt templates', async () => {
@@ -318,6 +419,171 @@ describe('CreatorStudioView', () => {
     expect(removeHistory).toHaveBeenCalledWith(work.id)
     expect(wrapper.find('.history-item').exists()).toBe(false)
     expect(wrapper.text()).toContain('还没有图片作品')
+  })
+
+  it('restores the historical group, model, prompt, ratio, resolution, and count when selected', async () => {
+    const work = {
+      id: 'grok-history-settings',
+      type: 'image',
+      status: 'completed',
+      prompt: '历史中的高质量宽幅摄影',
+      model: 'grok-imagine-image-quality',
+      provider: 'Grok 生图',
+      groupName: group.name,
+      groupId: group.id,
+      imageCapability: 'grok',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,UE5H'],
+      aspectRatio: '2:1',
+      resolution: '2K',
+      outputCount: 3,
+      referenceCount: 1,
+    } as const
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-image' },
+      { id: 'grok-imagine-image-quality' },
+    ])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#creator-group').element.value).toBe(String(group.id))
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe(work.model)
+    expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe(work.prompt)
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('2:1')
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').element.value).toBe('2K')
+    expect(wrapper.get('.field-block .stepper').text()).toContain('3 张')
+    expect(wrapper.text()).toContain('当时使用了 1 张参考图')
+    expect(wrapper.text()).toContain('2K · 2048 px 级')
+  })
+
+  it('immediately regenerates a completed image with its historical settings', async () => {
+    const work = {
+      id: 'grok-regenerate-source',
+      type: 'image',
+      status: 'completed',
+      prompt: '重新生成这张月光产品摄影',
+      model: 'grok-imagine-image-quality',
+      provider: 'Grok 生图',
+      groupName: group.name,
+      groupId: group.id,
+      imageCapability: 'grok',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,T0xE'],
+      aspectRatio: '4:3',
+      resolution: '2K',
+      outputCount: 1,
+      quality: 'high',
+      outputFormat: 'png',
+    } as const
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-image' },
+      { id: 'grok-imagine-image-quality' },
+    ])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const regenerateButton = wrapper.findAll('.result-heading-actions button')
+      .find(button => button.text().includes('再次生成'))
+    expect(regenerateButton).toBeDefined()
+    await regenerateButton!.trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledTimes(1)
+    expect(generateImage).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({
+      model: work.model,
+      prompt: work.prompt,
+      n: 1,
+      quality: work.quality,
+      outputFormat: work.outputFormat,
+      aspectRatio: work.aspectRatio,
+      imageSize: work.resolution,
+    }))
+    expect(wrapper.text()).toContain('本次创作')
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'completed',
+      outputs: ['data:image/png;base64,UE5H'],
+      source: '再次生成',
+    }))
+    expect(showSuccess).toHaveBeenCalledWith('作品生成完成')
+  })
+
+  it('uses a generated image as a reference and restores its original settings', async () => {
+    const output = 'data:image/png;base64,UE5H'
+    const work = {
+      id: 'grok-reference-source',
+      type: 'image',
+      status: 'completed',
+      prompt: '把这张图片继续编辑',
+      model: 'grok-imagine-image-quality',
+      provider: 'Grok 生图',
+      groupName: group.name,
+      groupId: group.id,
+      imageCapability: 'grok',
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: [output],
+      aspectRatio: '4:3',
+      resolution: '2K',
+      outputCount: 1,
+    } as const
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-image-quality' }])
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      blob: vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' })),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+    await wrapper.get('[aria-label="作为参考图继续创作"]').trigger('click')
+    await flushPromises()
+
+    expect(fetchMock).toHaveBeenCalledWith(output)
+    expect(wrapper.find('.result-workspace').exists()).toBe(false)
+    expect(wrapper.findAll('.reference-item')).toHaveLength(1)
+    expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe(work.prompt)
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe(work.model)
+    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('4:3')
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').element.value).toBe('2K')
+    expect(showSuccess).toHaveBeenCalledWith('已将作品加入参考图，并带回当时的生成参数')
+
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({
+      model: work.model,
+      referenceImages: [expect.any(File)],
+      aspectRatio: '4:3',
+      imageSize: '2K',
+    }))
   })
 
   it('downloads base64 image results without fetching their source', async () => {
@@ -665,9 +931,10 @@ describe('CreatorStudioView', () => {
     const modelSelect = wrapper.get<HTMLSelectElement>('#creator-model')
     expect(modelSelect.element.value).toBe('gpt-image-2')
     expect(modelSelect.findAll('option').map(option => option.attributes('value'))).not.toContain('gpt-image-2-4k')
-    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.attributes('value'))).toEqual(['1K', '2K'])
+    expect(wrapper.find('#creator-aspect').exists()).toBe(false)
+    expect(wrapper.find('#creator-resolution').exists()).toBe(false)
+    expect(wrapper.get('#creator-output-size').text()).toContain('1K · 1024×1024')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形产品照片')
-    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('1:1')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
 
@@ -682,7 +949,7 @@ describe('CreatorStudioView', () => {
     expect(request).not.toHaveProperty('imageSize')
   })
 
-  it('only sends fixed Image2 sizes supported by each resolution tier', async () => {
+  it('selects Image2 ratio sizes in a modal and keeps unstable 4K generation single-image', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }, { id: 'adobe-firefly-gpt-image-2-4k' }])
@@ -696,16 +963,33 @@ describe('CreatorStudioView', () => {
     await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
-    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['1:1', '3:2', '2:3'])
-    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('3:2')
+
+    await wrapper.get('#creator-output-size').trigger('click')
+    let dialog = wrapper.getComponent(BaseDialog)
+    expect(dialog.props('appearance')).toBe('soft')
+    expect(dialog.get('.modal-overlay').classes()).toContain('modal-overlay--soft')
+    expect(dialog.get('.modal-content').classes()).toContain('modal-content--soft')
+    expect(dialog.get('.image-size-confirm').text()).toBe('确定')
+    expect(wrapper.get('.image-quality-field').classes()).toContain('wide')
+    expect(wrapper.get('.image-quality-field').text()).toContain('画面质量')
+    expect(dialog.text()).toContain('自动')
+    expect(dialog.text()).toContain('按比例')
+    expect(dialog.text()).toContain('自定义宽高')
+    expect(dialog.findAll('.image-ratio-grid button').map(button => button.text())).toEqual([
+      '1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4', '21:9',
+    ])
+    await dialog.findAll('.image-ratio-grid button')[1].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '1536x1024' }))
 
-    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('2K')
-    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('1:1')
-    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['1:1', '16:9'])
-    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('#creator-output-size').trigger('click')
+    dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-resolution-grid button')[1].trigger('click')
+    await dialog.findAll('.image-ratio-grid button')[3].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
+    expect(wrapper.get('#creator-output-size').text()).toContain('2K · 2048×1152')
     await wrapper.get('.field-block .stepper button:last-child').trigger('click')
     await wrapper.get('.field-block .stepper button:last-child').trigger('click')
     expect(wrapper.get('.field-block .stepper').text()).toContain('3 张')
@@ -713,11 +997,13 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '2048x1152' }))
 
-    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('4K')
+    await wrapper.get('#creator-output-size').trigger('click')
+    dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-resolution-grid button')[2].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
     await flushPromises()
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('adobe-firefly-gpt-image-2-4k')
-    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').element.value).toBe('16:9')
-    expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual(['16:9', '9:16'])
+    expect(wrapper.get('#creator-output-size').text()).toContain('4K · 3840×2160')
     expect(wrapper.get('.field-block .stepper').text()).toContain('1 张')
     expect(wrapper.get('.field-block .stepper button:last-child').attributes('disabled')).toBeDefined()
     expect(wrapper.text()).toContain('当前 4K 图片模型每次只能生成 1 张')
@@ -729,7 +1015,10 @@ describe('CreatorStudioView', () => {
       n: 1,
     }))
 
-    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('9:16')
+    await wrapper.get('#creator-output-size').trigger('click')
+    dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-ratio-grid button')[4].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
@@ -739,7 +1028,43 @@ describe('CreatorStudioView', () => {
 
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('gpt-image-2')
     await flushPromises()
-    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').element.value).toBe('2K')
+    expect(wrapper.get('#creator-output-size').text()).toContain('2K')
+  })
+
+  it('supports Image2 automatic and normalized custom size modes', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }, { id: 'gpt-image-2-4k' }])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('自定义尺寸产品图')
+    await wrapper.get('#creator-output-size').trigger('click')
+    let dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-size-mode-tabs button')[0].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('gpt-image-2')
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ model: 'gpt-image-2', size: 'auto' }))
+
+    await wrapper.get('#creator-output-size').trigger('click')
+    dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-size-mode-tabs button')[2].trigger('click')
+    const inputs = dialog.findAll<HTMLInputElement>('.image-custom-size input')
+    await inputs[0].setValue('1919')
+    await inputs[1].setValue('1079')
+    await dialog.get('.image-size-confirm').trigger('click')
+    expect(wrapper.get('#creator-output-size').text()).toContain('1920×1072')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '1920x1072' }))
   })
 
   it('generates multiple Image2 outputs as separate single-image requests', async () => {
@@ -756,8 +1081,11 @@ describe('CreatorStudioView', () => {
     await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
-    await wrapper.get<HTMLSelectElement>('#creator-resolution').setValue('2K')
-    await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
+    await wrapper.get('#creator-output-size').trigger('click')
+    const dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-resolution-grid button')[1].trigger('click')
+    await dialog.findAll('.image-ratio-grid button')[3].trigger('click')
+    await dialog.get('.image-size-confirm').trigger('click')
     await wrapper.get('.field-block .stepper button:last-child').trigger('click')
     expect(wrapper.get('.field-block .stepper').text()).toContain('2 张')
 
@@ -814,6 +1142,54 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.text()).toContain('当前图片模型每次请求只能生成 1 张图片')
     expect(wrapper.text()).not.toContain('当前 4K 图片模型每次只能生成 1 张图片')
+  })
+
+  it('retries a temporary Grok upstream failure once and completes the work', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    const temporaryError = Object.assign(new Error('Upstream service temporarily unavailable'), { status: 502 })
+    generateImage
+      .mockRejectedValueOnce(temporaryError)
+      .mockResolvedValueOnce({ data: [{ url: 'data:image/png;base64,UkVUUlk=' }] })
+    vi.useFakeTimers()
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('高质量方形产品图')
+    const generation = wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.generation-state').text()).toContain('2 秒后自动重试（1/1）')
+    await vi.advanceTimersByTimeAsync(2000)
+    await generation
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledTimes(2)
+    expect(wrapper.findAll('.result-card')).toHaveLength(1)
+    expect(showSuccess).toHaveBeenCalledWith('作品生成完成')
+    expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+    vi.useRealTimers()
+  })
+
+  it('does not retry a non-transient Grok validation error', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    generateImage.mockRejectedValueOnce(Object.assign(new Error('invalid aspect ratio'), { status: 400 }))
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('参数错误不应重试')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledTimes(1)
+    expect(wrapper.text()).toContain('invalid aspect ratio')
   })
 
   it('shows only elapsed time while submitting and reveals progress after generation starts', async () => {

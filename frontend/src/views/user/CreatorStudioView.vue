@@ -84,7 +84,7 @@
             </span>
             <span class="history-copy">
               <strong>{{ historyWorkTitle(work) }}</strong>
-              <small>{{ work.model }} · {{ formatHistoryTime(work.createdAt) }}</small>
+              <small>{{ work.model }} · {{ work.aspectRatio || '自动' }} · {{ workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
             </span>
             <span class="history-item-actions">
               <button type="button" title="打开作品" aria-label="打开作品" @click.stop="selectWork(work)">
@@ -156,7 +156,13 @@
                 {{ isMultiShotVideo(selectedWork) ? `完整成片 + ${selectedWork.outputs.length} 段` : `${selectedWork.outputs.length} ${selectedWork.type === 'image' ? '张' : '段'}` }}
               </span>
               <button v-if="selectedWork.status === 'completed'" type="button" class="secondary-command" @click="continueCreating">继续创作</button>
-              <button v-if="selectedWork.status === 'completed'" type="button" class="secondary-command primary-soft" @click="reuseWork(selectedWork)">再次生成</button>
+              <button
+                v-if="selectedWork.status === 'completed'"
+                type="button"
+                class="secondary-command primary-soft"
+                :disabled="Boolean(regeneratingWorkId)"
+                @click="regenerateWork(selectedWork)"
+              >{{ regeneratingWorkId === selectedWork.id ? '准备生成...' : '再次生成' }}</button>
               <button type="button" class="icon-action danger" title="删除这条作品" @click="removeWork(selectedWork)">
                 <Icon name="trash" size="sm" />
               </button>
@@ -192,7 +198,7 @@
               <footer>
                 <div>
                   <strong>完整视频</strong>
-                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ selectedWork.resolution || '默认清晰度' }}</span>
+                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
                 </div>
                 <a :href="selectedWork.mergedOutput" :download="mergedDownloadName(selectedWork)" class="secondary-command primary-soft" title="下载完整视频">
                   <Icon name="download" size="sm" /> 下载完整视频
@@ -232,7 +238,7 @@
               <div class="result-actions">
                 <div class="result-description">
                   <strong>{{ selectedWork.type === 'video' ? `镜头 ${index + 1}` : selectedWork.provider }}</strong>
-                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ selectedWork.resolution || '默认清晰度' }}</span>
+                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
                   <p>{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -242,7 +248,17 @@
                   <button type="button" class="icon-action" title="下载作品" @click="downloadOutput(output, selectedWork, index)">
                     <Icon name="download" size="sm" />
                   </button>
-                  <button type="button" class="icon-action" title="继续创作" @click="continueCreating">
+                  <button
+                    v-if="selectedWork.type === 'image'"
+                    type="button"
+                    class="icon-action"
+                    title="作为参考图继续创作"
+                    aria-label="作为参考图继续创作"
+                    @click="useOutputAsReference(output, selectedWork, index)"
+                  >
+                    <Icon name="plus" size="sm" />
+                  </button>
+                  <button v-else type="button" class="icon-action" title="继续创作" @click="continueCreating">
                     <Icon name="plus" size="sm" />
                   </button>
                 </div>
@@ -257,7 +273,7 @@
               <div class="result-actions">
                 <div class="result-description">
                   <strong>镜头 {{ index + 1 }}</strong>
-                  <span>{{ shotDurationLabel(selectedWork, index) }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ selectedWork.resolution || '默认清晰度' }}</span>
+                  <span>{{ shotDurationLabel(selectedWork, index) }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
                   <p>{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -451,7 +467,7 @@
               @click="imageCapability = capability.id"
             >
               {{ capability.label }}
-              <span v-if="capability.id === 'grok'" class="online-dot"></span>
+              <span class="online-dot" aria-hidden="true"></span>
             </button>
           </div>
 
@@ -474,8 +490,15 @@
 
           <div class="field-block">
             <label for="creator-model">{{ studioMode === 'image' ? '图片模型' : '视频模型' }}</label>
-            <select id="creator-model" v-model="selectedModel" class="studio-input" :disabled="loadingModels || !selectedApiKey">
-              <option v-if="loadingModels" value="">正在读取可用模型...</option>
+            <select
+              id="creator-model"
+              v-model="selectedModel"
+              class="studio-input model-input"
+              :class="{ 'is-loading': loadingModels }"
+              :disabled="loadingModels || !selectedApiKey"
+              :aria-busy="loadingModels"
+            >
+              <option v-if="loadingModels && !modelOptions.length" value="">正在读取可用模型...</option>
               <option v-else-if="!modelOptions.length" value="">请先创建 Key</option>
               <option v-for="model in modelOptions" :key="model" :value="model">{{ modelLabel(model) }}</option>
             </select>
@@ -591,10 +614,37 @@
                 <button type="button" title="移除参考图" @click="removeReference(index)"><Icon name="x" size="xs" /></button>
               </div>
             </div>
+            <p v-else-if="selectedWork?.referenceCount" class="history-reference-note">
+              当时使用了 {{ selectedWork.referenceCount }} 张参考图，原始上传文件未保存在历史中
+            </p>
           </div>
 
           <template v-if="studioMode === 'image'">
-            <div class="two-column-fields">
+            <div v-if="imageCapability === 'image2'" class="two-column-fields image-output-fields">
+              <div class="field-block">
+                <label>输出尺寸</label>
+                <button
+                  id="creator-output-size"
+                  type="button"
+                  class="studio-input image-size-trigger"
+                  aria-haspopup="dialog"
+                  @click="openImageSizeDialog"
+                >
+                  <span>{{ imageSizeTriggerLabel }}</span>
+                  <Icon name="chevronDown" size="sm" />
+                </button>
+              </div>
+              <div class="field-block">
+                <label for="creator-format">输出格式</label>
+                <select id="creator-format" v-model="outputFormat" class="studio-input">
+                  <option value="png">PNG</option>
+                  <option value="jpeg">JPEG</option>
+                  <option value="webp">WebP</option>
+                </select>
+              </div>
+            </div>
+
+            <div v-else class="two-column-fields">
               <div class="field-block">
                 <label for="creator-aspect">画布比例</label>
                 <select id="creator-aspect" v-model="aspectRatio" class="studio-input">
@@ -604,21 +654,13 @@
               <div class="field-block">
                 <label for="creator-resolution">分辨率</label>
                 <select id="creator-resolution" v-model="imageResolution" class="studio-input">
-                  <option v-for="resolution in imageResolutionOptions" :key="resolution" :value="resolution">{{ resolution }}</option>
+                  <option v-for="resolution in imageResolutionOptions" :key="resolution" :value="resolution">{{ imageResolutionLabel(resolution) }}</option>
                 </select>
               </div>
             </div>
 
             <div v-if="imageCapability === 'image2'" class="advanced-grid">
-              <div class="field-block">
-                <label for="creator-format">输出格式</label>
-                <select id="creator-format" v-model="outputFormat" class="studio-input">
-                  <option value="png">PNG</option>
-                  <option value="jpeg">JPEG</option>
-                  <option value="webp">WebP</option>
-                </select>
-              </div>
-              <div class="field-block">
+              <div class="field-block wide image-quality-field">
                 <label for="creator-quality">画面质量</label>
                 <select id="creator-quality" v-model="imageQuality" class="studio-input">
                   <option value="auto">自动</option>
@@ -698,6 +740,89 @@
       <button type="button" class="preview-close" title="关闭预览" @click="previewUrl = ''"><Icon name="x" size="sm" /></button>
       <img :src="previewUrl" alt="生成图片预览" @click.stop />
     </div>
+
+    <BaseDialog
+      :show="imageSizeDialogOpen"
+      title="设置图像尺寸"
+      width="normal"
+      appearance="soft"
+      :close-on-click-outside="true"
+      @close="imageSizeDialogOpen = false"
+    >
+      <div class="image-size-dialog">
+        <p class="image-size-current">当前：<strong>{{ imageSizeTriggerLabel }}</strong></p>
+
+        <div class="image-size-mode-tabs" role="tablist" aria-label="图像尺寸模式">
+          <button
+            v-for="mode in imageSizeModes"
+            :key="mode.value"
+            type="button"
+            role="tab"
+            :aria-selected="imageSizeDraftMode === mode.value"
+            :class="{ active: imageSizeDraftMode === mode.value }"
+            @click="imageSizeDraftMode = mode.value"
+          >{{ mode.label }}</button>
+        </div>
+
+        <div v-if="imageSizeDraftMode === 'auto'" class="image-size-auto-panel">
+          <span><Icon name="sparkles" size="lg" /></span>
+          <strong>自动尺寸</strong>
+          <p>由模型根据画面内容选择输出尺寸</p>
+        </div>
+
+        <template v-else-if="imageSizeDraftMode === 'ratio'">
+          <section class="image-size-section">
+            <h4>基准分辨率</h4>
+            <div class="image-resolution-grid">
+              <button
+                v-for="resolution in imageResolutionOptions"
+                :key="resolution"
+                type="button"
+                :class="{ active: imageSizeDraftResolution === resolution }"
+                @click="imageSizeDraftResolution = resolution"
+              >{{ resolution }}</button>
+            </div>
+          </section>
+
+          <section class="image-size-section">
+            <h4>图像比例</h4>
+            <div class="image-ratio-grid">
+              <button
+                v-for="option in image2RatioOptions"
+                :key="option.value"
+                type="button"
+                :class="{ active: imageSizeDraftRatio === option.value }"
+                @click="imageSizeDraftRatio = option.value"
+              >
+                <i :style="ratioShapeStyle(option.value)"></i>
+                <span>{{ option.value }}</span>
+              </button>
+            </div>
+            <button type="button" class="custom-ratio-command" @click="imageSizeDraftMode = 'custom'">自定义比例</button>
+          </section>
+        </template>
+
+        <section v-else class="image-custom-size">
+          <h4>输入具体像素值</h4>
+          <div>
+            <label>宽度<input v-model.number="imageSizeDraftWidth" type="number" min="16" max="3840" step="16" /></label>
+            <span>×</span>
+            <label>高度<input v-model.number="imageSizeDraftHeight" type="number" min="16" max="3840" step="16" /></label>
+          </div>
+          <p>宽高会自动调整为 16 的倍数，最大边 3840px，宽高比不超过 3:1，总像素范围为 655360 - 8294400。</p>
+        </section>
+
+        <div class="image-size-result">
+          <span>将使用</span>
+          <strong>{{ imageSizeDraftResult.replace('x', '×') }}</strong>
+        </div>
+      </div>
+
+      <template #footer>
+        <button type="button" class="image-size-cancel" @click="imageSizeDialogOpen = false">取消</button>
+        <button type="button" class="image-size-confirm" @click="confirmImageSize">确定</button>
+      </template>
+    </BaseDialog>
     </section>
   </AppLayout>
 </template>
@@ -705,6 +830,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/icons/Icon.vue'
+import BaseDialog from '@/components/common/BaseDialog.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
 import { keysAPI } from '@/api/keys'
 import { userGroupsAPI } from '@/api/groups'
@@ -725,6 +851,7 @@ import type { ApiKey, Group } from '@/types'
 type StudioMode = 'image' | 'video'
 type ImageCapability = 'grok' | 'image2' | 'banner'
 type GenerationPhase = 'submitting' | 'generating'
+type ImageSizeMode = 'auto' | 'ratio' | 'custom'
 
 interface PromptTemplate {
   title: string
@@ -758,6 +885,7 @@ interface ImageGenerationSnapshot {
   referenceFiles: File[]
   aspectRatio: string
   resolution: string
+  sizeMode: ImageSizeMode
 }
 
 interface VideoGenerationSnapshot {
@@ -825,21 +953,85 @@ const defaultAspectOptions = [
   { value: '9:16', label: '9:16 竖屏' },
 ]
 
+const bananaAspectOptions = [
+  { value: '1:1', label: '1:1 方形' },
+  { value: '16:9', label: '16:9 横向' },
+  { value: '9:16', label: '9:16 竖向' },
+  { value: '4:3', label: '4:3 横向' },
+  { value: '3:4', label: '3:4 竖向' },
+  { value: '3:2', label: '3:2 横向' },
+  { value: '2:3', label: '2:3 竖向' },
+  { value: '5:4', label: '5:4 横向' },
+  { value: '4:5', label: '4:5 竖向' },
+  { value: '21:9', label: '21:9 超宽' },
+]
+
+const grokAspectOptions = [
+  { value: '1:1', label: '1:1 方形' },
+  { value: '16:9', label: '16:9 横向' },
+  { value: '9:16', label: '9:16 竖向' },
+  { value: '4:3', label: '4:3 横向' },
+  { value: '3:4', label: '3:4 竖向' },
+  { value: '3:2', label: '3:2 横向' },
+  { value: '2:3', label: '2:3 竖向' },
+  { value: '2:1', label: '2:1 宽幅' },
+  { value: '1:2', label: '1:2 长幅' },
+  { value: '19.5:9', label: '19.5:9 手机横向' },
+  { value: '9:19.5', label: '9:19.5 手机竖向' },
+  { value: '20:9', label: '20:9 超宽' },
+  { value: '9:20', label: '9:20 超长' },
+  { value: 'auto', label: '自动' },
+]
+
+const image2RatioOptions = [
+  { value: '1:1', label: '1:1 方形' },
+  { value: '3:2', label: '3:2 横向' },
+  { value: '2:3', label: '2:3 纵向' },
+  { value: '16:9', label: '16:9 横向' },
+  { value: '9:16', label: '9:16 竖向' },
+  { value: '4:3', label: '4:3 横向' },
+  { value: '3:4', label: '3:4 竖向' },
+  { value: '21:9', label: '21:9 超宽' },
+]
+
 const image2SizeOptions: Record<string, Array<{ value: string; label: string; size: string }>> = {
   '1K': [
     { value: '1:1', label: '1:1 方形 · 1024×1024', size: '1024x1024' },
     { value: '3:2', label: '3:2 横图 · 1536×1024', size: '1536x1024' },
     { value: '2:3', label: '2:3 竖图 · 1024×1536', size: '1024x1536' },
+    { value: '16:9', label: '16:9 横图 · 1536×864', size: '1536x864' },
+    { value: '9:16', label: '9:16 竖图 · 864×1536', size: '864x1536' },
+    { value: '4:3', label: '4:3 横图 · 1360×1024', size: '1360x1024' },
+    { value: '3:4', label: '3:4 竖图 · 1024×1360', size: '1024x1360' },
+    { value: '21:9', label: '21:9 超宽 · 1536×656', size: '1536x656' },
   ],
   '2K': [
     { value: '1:1', label: '1:1 方形 · 2048×2048', size: '2048x2048' },
+    { value: '3:2', label: '3:2 横图 · 2048×1360', size: '2048x1360' },
+    { value: '2:3', label: '2:3 竖图 · 1360×2048', size: '1360x2048' },
     { value: '16:9', label: '16:9 横图 · 2048×1152', size: '2048x1152' },
+    { value: '9:16', label: '9:16 竖图 · 1152×2048', size: '1152x2048' },
+    { value: '4:3', label: '4:3 横图 · 2048×1536', size: '2048x1536' },
+    { value: '3:4', label: '3:4 竖图 · 1536×2048', size: '1536x2048' },
+    { value: '21:9', label: '21:9 超宽 · 2048×880', size: '2048x880' },
   ],
   '4K': [
+    { value: '1:1', label: '1:1 方形 · 2880×2880', size: '2880x2880' },
+    { value: '3:2', label: '3:2 横图 · 3520×2352', size: '3520x2352' },
+    { value: '2:3', label: '2:3 竖图 · 2352×3520', size: '2352x3520' },
     { value: '16:9', label: '16:9 横图 · 3840×2160', size: '3840x2160' },
     { value: '9:16', label: '9:16 竖图 · 2160×3840', size: '2160x3840' },
+    { value: '4:3', label: '4:3 横图 · 3312×2496', size: '3312x2496' },
+    { value: '3:4', label: '3:4 竖图 · 2496×3312', size: '2496x3312' },
+    { value: '21:9', label: '21:9 超宽 · 3840×1648', size: '3840x1648' },
   ],
 }
+
+const imageSizeModes: Array<{ value: ImageSizeMode; label: string }> = [
+  { value: 'auto', label: '自动' },
+  { value: 'ratio', label: '按比例' },
+  { value: 'custom', label: '自定义宽高' },
+]
 
 const appStore = useAppStore()
 const studioMode = ref<StudioMode>('image')
@@ -855,6 +1047,15 @@ const prompt = ref('')
 const referenceImages = ref<ReferenceImage[]>([])
 const aspectRatio = ref('1:1')
 const imageResolution = ref('1K')
+const imageSizeMode = ref<ImageSizeMode>('ratio')
+const imageCustomWidth = ref(1024)
+const imageCustomHeight = ref(1024)
+const imageSizeDialogOpen = ref(false)
+const imageSizeDraftMode = ref<ImageSizeMode>('ratio')
+const imageSizeDraftResolution = ref('1K')
+const imageSizeDraftRatio = ref('1:1')
+const imageSizeDraftWidth = ref(1024)
+const imageSizeDraftHeight = ref(1024)
 const videoResolution = ref('720p')
 const imageQuality = ref('auto')
 const outputFormat = ref('png')
@@ -871,6 +1072,7 @@ const bootstrapping = ref(false)
 const loadingModels = ref(false)
 const creatingKey = ref(false)
 const generating = ref(false)
+const regeneratingWorkId = ref('')
 const generationMode = ref<StudioMode | null>(null)
 const generationProgress = ref('正在提交生成任务...')
 const generationPhase = ref<GenerationPhase>('submitting')
@@ -889,6 +1091,7 @@ let modelRequestSequence = 0
 let disposed = false
 let generationTimer: number | undefined
 let templateAutoplayTimer: number | undefined
+let restoringWorkSettings = false
 const transientObjectUrls = new Set<string>()
 
 const activeTemplates = computed(() => studioMode.value === 'image' ? imageTemplates : videoTemplates)
@@ -914,7 +1117,22 @@ const aspectOptions = computed(() => {
   if (studioMode.value === 'image' && imageCapability.value === 'image2') {
     return image2SizeOptions[imageResolution.value] || image2SizeOptions['1K']
   }
+  if (studioMode.value === 'image' && imageCapability.value === 'grok') return grokAspectOptions
+  if (studioMode.value === 'image' && imageCapability.value === 'banner') return bananaAspectOptions
   return defaultAspectOptions
+})
+const imageSizeTriggerLabel = computed(() => {
+  if (imageSizeMode.value === 'auto') return '自动'
+  const size = sizeForImage().replace('x', '×')
+  return imageSizeMode.value === 'custom' ? `自定义 · ${size}` : `${imageResolution.value} · ${size}`
+})
+const imageSizeDraftResult = computed(() => {
+  if (imageSizeDraftMode.value === 'auto') return 'auto'
+  if (imageSizeDraftMode.value === 'custom') {
+    const [width, height] = normalizeCustomImageSize(imageSizeDraftWidth.value, imageSizeDraftHeight.value)
+    return `${width}x${height}`
+  }
+  return image2SizeFor(imageSizeDraftResolution.value, imageSizeDraftRatio.value)
 })
 const maxReferenceImages = computed(() => {
   if (studioMode.value === 'video') return 1
@@ -1045,25 +1263,32 @@ function syncSelectedGroup() {
 
 async function loadModels() {
   const sequence = ++modelRequestSequence
-  modelOptions.value = []
-  selectedModel.value = ''
   const key = selectedApiKey.value
-  if (!key) return
+  if (!key) {
+    modelOptions.value = []
+    selectedModel.value = ''
+    loadingModels.value = false
+    return
+  }
   loadingModels.value = true
   try {
     const remoteModels = await listCreatorModels(key.key)
     if (sequence !== modelRequestSequence) return
     const filtered = filterModels(remoteModels.map(model => typeof model === 'string' ? model : model.id))
-    modelOptions.value = filtered.length ? filtered : fallbackModels()
-    selectedModel.value = modelOptions.value.includes(preferredModel())
+    const nextModels = filtered.length ? filtered : fallbackModels()
+    const nextModel = nextModels.includes(preferredModel())
       ? preferredModel()
-      : modelOptions.value[0] || ''
+      : nextModels[0] || ''
+    modelOptions.value = nextModels
+    selectedModel.value = nextModel
   } catch (error) {
     if (sequence !== modelRequestSequence) return
-    modelOptions.value = fallbackModels()
-    selectedModel.value = modelOptions.value.includes(preferredModel())
+    const nextModels = fallbackModels()
+    const nextModel = nextModels.includes(preferredModel())
       ? preferredModel()
-      : modelOptions.value[0] || ''
+      : nextModels[0] || ''
+    modelOptions.value = nextModels
+    selectedModel.value = nextModel
   } finally {
     if (sequence === modelRequestSequence) loadingModels.value = false
   }
@@ -1123,8 +1348,7 @@ function switchMode(mode: StudioMode) {
   historyFilter.value = mode
   activeTemplateIndex.value = 0
   selectedWork.value = null
-  referenceImages.value.forEach(reference => URL.revokeObjectURL(reference.url))
-  referenceImages.value = []
+  clearReferenceImages()
   aspectRatio.value = mode === 'image' ? '1:1' : '16:9'
   if (mode === 'video') selectedShotId.value = videoShots.value[0]?.id || ''
 }
@@ -1233,12 +1457,35 @@ function removeReference(index: number) {
   if (removed) URL.revokeObjectURL(removed.url)
 }
 
-function sizeForImage() {
-  // Image2 only accepts this fixed size catalogue. In particular, its 4K SKU
-  // supports 3840x2160 and 2160x3840, not arbitrary <=3840 dimensions.
+function clearReferenceImages() {
+  referenceImages.value.forEach(reference => URL.revokeObjectURL(reference.url))
+  referenceImages.value = []
+}
+
+function imageResolutionLabel(resolution: string) {
+  if (imageCapability.value === 'grok') {
+    return resolution === '2K' ? '2K · 2048 px 级' : '1K · 1024 px 级'
+  }
+  if (imageCapability.value === 'banner') {
+    if (resolution === '4K') return '4K · 超清'
+    if (resolution === '2K') return '2K · 高清'
+    return '1K · 快速'
+  }
   if (imageCapability.value === 'image2') {
-    const options = image2SizeOptions[imageResolution.value] || image2SizeOptions['1K']
-    return options.find(option => option.value === aspectRatio.value)?.size || options[0].size
+    const option = (image2SizeOptions[resolution] || []).find(item => item.value === aspectRatio.value)
+    if (option) return `${resolution} · ${option.size.replace('x', '×')}`
+  }
+  return resolution
+}
+
+function sizeForImage() {
+  if (imageCapability.value === 'image2') {
+    if (imageSizeMode.value === 'auto') return 'auto'
+    if (imageSizeMode.value === 'custom') {
+      const [width, height] = normalizeCustomImageSize(imageCustomWidth.value, imageCustomHeight.value)
+      return `${width}x${height}`
+    }
+    return image2SizeFor(imageResolution.value, aspectRatio.value)
   }
 
   const scale = imageResolution.value === '2K' ? 2 : imageResolution.value === '4K' ? 4 : 1
@@ -1253,7 +1500,100 @@ function sizeForImage() {
   return `${width * scale}x${height * scale}`
 }
 
+function image2SizeFor(resolution: string, ratio: string) {
+  const options = image2SizeOptions[resolution] || image2SizeOptions['1K']
+  return options.find(option => option.value === ratio)?.size || options[0].size
+}
+
+function normalizeCustomImageSize(widthValue: number, heightValue: number): [number, number] {
+  const toMultipleOf16 = (value: number) => Math.max(16, Math.min(3840, Math.round(Number(value || 0) / 16) * 16))
+  let width = toMultipleOf16(widthValue)
+  let height = toMultipleOf16(heightValue)
+
+  if (width / height > 3) height = toMultipleOf16(width / 3)
+  if (height / width > 3) width = toMultipleOf16(height / 3)
+
+  const minPixels = 655360
+  const maxPixels = 8294400
+  const pixels = width * height
+  if (pixels < minPixels || pixels > maxPixels) {
+    const targetPixels = pixels < minPixels ? minPixels : maxPixels
+    const scale = Math.sqrt(targetPixels / pixels)
+    width = toMultipleOf16(width * scale)
+    height = toMultipleOf16(height * scale)
+  }
+
+  while (width * height > maxPixels) {
+    if (width >= height) width -= 16
+    else height -= 16
+  }
+  return [width, height]
+}
+
+function customImageResolution(width: number, height: number) {
+  if (Math.max(width, height) > 2048) return '4K'
+  if (Math.max(width, height) > 1536 || width * height > 1572864) return '2K'
+  return '1K'
+}
+
+function ratioForDimensions(width: number, height: number) {
+  const greatestCommonDivisor = (left: number, right: number): number => right === 0
+    ? left
+    : greatestCommonDivisor(right, left % right)
+  const divisor = greatestCommonDivisor(width, height)
+  return `${width / divisor}:${height / divisor}`
+}
+
+function openImageSizeDialog() {
+  imageSizeDraftMode.value = imageSizeMode.value
+  imageSizeDraftResolution.value = imageResolution.value
+  imageSizeDraftRatio.value = image2RatioOptions.some(option => option.value === aspectRatio.value)
+    ? aspectRatio.value
+    : '1:1'
+  imageSizeDraftWidth.value = imageCustomWidth.value
+  imageSizeDraftHeight.value = imageCustomHeight.value
+  imageSizeDialogOpen.value = true
+}
+
+function confirmImageSize() {
+  if (imageSizeDraftMode.value === 'auto') {
+    imageResolution.value = '1K'
+  } else if (imageSizeDraftMode.value === 'custom') {
+    const [width, height] = normalizeCustomImageSize(imageSizeDraftWidth.value, imageSizeDraftHeight.value)
+    const resolution = customImageResolution(width, height)
+    if (resolution === '4K' && !imageResolutionOptions.value.includes('4K')) {
+      appStore.showError('当前创作分组没有可用的 4K 图片模型，请缩小尺寸后重试')
+      return
+    }
+    imageCustomWidth.value = width
+    imageCustomHeight.value = height
+    imageResolution.value = resolution
+    aspectRatio.value = ratioForDimensions(width, height)
+  } else if (imageSizeDraftMode.value === 'ratio') {
+    imageResolution.value = imageSizeDraftResolution.value
+    aspectRatio.value = imageSizeDraftRatio.value
+  }
+  imageSizeMode.value = imageSizeDraftMode.value
+  imageSizeDialogOpen.value = false
+}
+
+function ratioShapeStyle(ratio: string) {
+  const [width, height] = ratio.split(':').map(Number)
+  if (!width || !height) return undefined
+  const maxWidth = 36
+  const maxHeight = 30
+  const scale = Math.min(maxWidth / width, maxHeight / height)
+  return {
+    width: `${Math.max(8, width * scale)}px`,
+    height: `${Math.max(8, height * scale)}px`,
+  }
+}
+
 async function startGeneration() {
+  await generateFromCurrentSettings('初版作品')
+}
+
+async function generateFromCurrentSettings(source: string) {
   if (!canGenerate.value || !selectedApiKey.value || !selectedGroup.value) return
   const taskMode = studioMode.value
   const taskGroup = selectedGroup.value
@@ -1279,6 +1619,7 @@ async function startGeneration() {
         referenceFiles: referenceImages.value.map(reference => reference.file),
         aspectRatio: taskAspectRatio,
         resolution: imageResolution.value,
+        sizeMode: imageSizeMode.value,
       }
     : null
   const videoSnapshot: VideoGenerationSnapshot | null = taskMode === 'video'
@@ -1313,11 +1654,18 @@ async function startGeneration() {
     model: selectedModel.value,
     provider: taskMode === 'image' ? imageCapabilities.find(item => item.id === imageCapability.value)?.label || imageCapability.value : 'Grok 视频',
     groupName: taskGroup.name,
+    groupId: taskGroup.id,
     createdAt: now,
     updatedAt: now,
     outputs: [],
+    imageCapability: taskMode === 'image' ? imageSnapshot?.capability : undefined,
     aspectRatio: taskAspectRatio,
     resolution: taskMode === 'image' ? imageSnapshot?.resolution : videoSnapshot?.resolution,
+    outputSize: taskMode === 'image' && imageSnapshot?.capability === 'image2' ? imageSnapshot.size : undefined,
+    imageSizeMode: taskMode === 'image' && imageSnapshot?.capability === 'image2' ? imageSnapshot.sizeMode : undefined,
+    quality: taskMode === 'image' ? imageSnapshot?.quality : undefined,
+    outputFormat: taskMode === 'image' ? imageSnapshot?.outputFormat : undefined,
+    background: taskMode === 'image' ? imageSnapshot?.background : undefined,
     referenceCount: taskReferenceCount,
     outputCount: taskMode === 'image' ? imageSnapshot?.outputCount : videoSnapshot?.shots.length,
     requestedDuration: taskMode === 'video' ? videoSnapshot?.shots.reduce((sum, shot) => sum + shot.duration, 0) : undefined,
@@ -1325,7 +1673,7 @@ async function startGeneration() {
     shotPrompts: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.prompt) : undefined,
     shotDurations: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.duration) : undefined,
     version: 'v1',
-    source: '初版作品',
+    source,
   }
   historyItems.value = [work, ...historyItems.value]
   await persistWork(work)
@@ -1370,28 +1718,40 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   const usesOpenAIImageSize = input.capability === 'image2'
   const usesBase64Response = !isGeminiProtocol && (usesOpenAIImageSize || input.capability === 'grok')
   const outputs: string[] = []
+  const generate = () => generateCreatorImage(input.apiKey, {
+    model: input.model,
+    prompt: input.prompt,
+    n: requestN,
+    size: input.size,
+    quality: input.quality,
+    outputFormat: input.outputFormat,
+    background: input.background,
+    // Grok and Image2 may return temporary cross-origin URLs that browsers cannot
+    // save through the download attribute. Base64 keeps the result self-contained.
+    responseFormat: usesBase64Response ? 'b64_json' : undefined,
+    referenceImages: input.referenceFiles,
+    protocol: isGeminiProtocol ? 'gemini' : 'openai',
+    ...(!usesOpenAIImageSize ? {
+      aspectRatio: input.aspectRatio,
+      imageSize: input.resolution,
+    } : {}),
+  })
   for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
     generationProgress.value = requestCount > 1
       ? `正在生成第 ${index + 1} / ${requestCount} 张图片`
       : '正在调用图片模型，请稍候'
-    const result = await generateCreatorImage(input.apiKey, {
-      model: input.model,
-      prompt: input.prompt,
-      n: requestN,
-      size: input.size,
-      quality: input.quality,
-      outputFormat: input.outputFormat,
-      background: input.background,
-      // Grok and Image2 may return temporary cross-origin URLs that browsers cannot
-      // save through the download attribute. Base64 keeps the result self-contained.
-      responseFormat: usesBase64Response ? 'b64_json' : undefined,
-      referenceImages: input.referenceFiles,
-      protocol: isGeminiProtocol ? 'gemini' : 'openai',
-      ...(!usesOpenAIImageSize ? {
-        aspectRatio: input.aspectRatio,
-        imageSize: input.resolution,
-      } : {}),
-    })
+    let result
+    try {
+      result = await generate()
+    } catch (error) {
+      if (input.capability !== 'grok' || !isRetryableGrokImageError(error)) throw error
+      generationProgress.value = 'Grok 上游暂时不可用，2 秒后自动重试（1/1）'
+      await delay(2000)
+      generationProgress.value = requestCount > 1
+        ? `正在重试第 ${index + 1} / ${requestCount} 张图片`
+        : '正在重新调用 Grok 图片模型'
+      result = await generate()
+    }
     const batchOutputs = result.data.map(item => item.url).filter(Boolean)
     outputs.push(...batchOutputs.slice(0, requestCount - outputs.length))
     work.outputs = [...outputs]
@@ -1417,10 +1777,24 @@ function creatorGenerationErrorMessage(error: unknown) {
   if (/no available compatible accounts/i.test(message)) {
     return '当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。'
   }
+  if (/upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway/i.test(message)) {
+    return 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
+  }
   if (/timeout|timed out|deadline exceeded|network|upstream request failed|gateway timeout|连接|超时|网络/i.test(message)) {
     return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“带回参数重试”，不要连续重复提交。'
   }
   return message
+}
+
+function isRetryableGrokImageError(error: unknown) {
+  const candidate = typeof error === 'object' && error
+    ? error as { status?: number; code?: string | number; message?: string; error?: { message?: string } }
+    : {}
+  const status = Number(candidate.status || candidate.code)
+  if ([502, 503, 504].includes(status)) return true
+  return /upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway/i.test(
+    candidate.error?.message || candidate.message || '',
+  )
 }
 
 async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot) {
@@ -1554,6 +1928,7 @@ function createTrackedObjectUrl(blob: Blob) {
 
 async function selectWork(work: CreatorHistoryItem) {
   selectedWork.value = work
+  await restoreWorkSettings(work)
   const hasExpiredObjectUrl = work.outputs.some(output => output.startsWith('blob:'))
   const needsMergedVideo = isMultiShotVideo(work) && !work.mergedOutput
   if (work.type === 'video' && work.requestId && (work.status === 'pending' || hasExpiredObjectUrl || !work.outputs.length || needsMergedVideo)) {
@@ -1652,22 +2027,148 @@ async function removeWork(work: CreatorHistoryItem) {
   appStore.showSuccess('作品记录已删除')
 }
 
-function reuseWork(work: CreatorHistoryItem) {
-  switchMode(work.type)
-  const shotPrompts = workShotPrompts(work)
-  if (work.type === 'video' && shotPrompts.length > 1) {
-    professionalVideo.value = true
-    videoShots.value = shotPrompts.map((shotPrompt, index) => ({
-      id: crypto.randomUUID(),
-      prompt: shotPrompt,
-      duration: work.shotDurations?.[index] || Math.max(1, Math.round((work.requestedDuration || 8) / shotPrompts.length)),
-    }))
-    selectedShotId.value = videoShots.value[0].id
-    prompt.value = ''
-  } else {
-    prompt.value = work.prompt
+async function restoreWorkSettings(work: CreatorHistoryItem) {
+  restoringWorkSettings = true
+  try {
+    if (studioMode.value !== work.type) {
+      studioMode.value = work.type
+      historyFilter.value = work.type
+      activeTemplateIndex.value = 0
+      promptTemplatePage.value = 0
+    }
+    clearReferenceImages()
+
+    if (work.type === 'image') {
+      imageCapability.value = work.imageCapability || inferImageCapability(work)
+      imageResolution.value = work.resolution || '1K'
+      aspectRatio.value = work.aspectRatio || '1:1'
+      if (imageCapability.value === 'image2') restoreImage2SizeSettings(work)
+      outputCount.value = Math.max(1, Math.min(4, work.outputCount || work.outputs.length || 1))
+      imageQuality.value = work.quality || 'auto'
+      outputFormat.value = work.outputFormat || 'png'
+      transparentBackground.value = work.background === 'transparent'
+    } else {
+      aspectRatio.value = work.aspectRatio || '16:9'
+      videoResolution.value = work.resolution || '720p'
+    }
+
+    const historicalGroup = groups.value.find(group => group.id === work.groupId)
+      || groups.value.find(group => group.name === work.groupName)
+    if (historicalGroup && groupMatchesCurrentCapability(historicalGroup)) {
+      selectedGroupId.value = historicalGroup.id
+    } else {
+      syncSelectedGroup()
+    }
+
+    const shotPrompts = workShotPrompts(work)
+    if (work.type === 'video' && shotPrompts.length > 1) {
+      professionalVideo.value = true
+      videoShots.value = shotPrompts.map((shotPrompt, index) => ({
+        id: crypto.randomUUID(),
+        prompt: shotPrompt,
+        duration: work.shotDurations?.[index] || Math.max(1, Math.round((work.requestedDuration || 8) / shotPrompts.length)),
+      }))
+      selectedShotId.value = videoShots.value[0].id
+      prompt.value = ''
+    } else {
+      professionalVideo.value = false
+      prompt.value = work.prompt
+      if (work.type === 'video') videoDuration.value = work.requestedDuration || work.shotDurations?.[0] || 8
+    }
+
+    await nextTick()
+    await loadModels()
+    if (work.model) {
+      if (!modelOptions.value.includes(work.model)) modelOptions.value = [work.model, ...modelOptions.value]
+      selectedModel.value = work.model
+    }
+  } finally {
+    restoringWorkSettings = false
   }
+}
+
+function restoreImage2SizeSettings(work: CreatorHistoryItem) {
+  const outputSize = work.outputSize || ''
+  if (work.imageSizeMode === 'auto' || outputSize === 'auto') {
+    imageSizeMode.value = 'auto'
+    return
+  }
+
+  const knownSize = Object.values(image2SizeOptions)
+    .flat()
+    .find(option => option.size === outputSize)
+  if (work.imageSizeMode !== 'custom' && knownSize) {
+    imageSizeMode.value = 'ratio'
+    aspectRatio.value = knownSize.value
+    return
+  }
+
+  const match = /^(\d+)x(\d+)$/.exec(outputSize)
+  if (match) {
+    const [width, height] = normalizeCustomImageSize(Number(match[1]), Number(match[2]))
+    imageSizeMode.value = 'custom'
+    imageCustomWidth.value = width
+    imageCustomHeight.value = height
+    aspectRatio.value = ratioForDimensions(width, height)
+    return
+  }
+  imageSizeMode.value = 'ratio'
+}
+
+function inferImageCapability(work: CreatorHistoryItem): ImageCapability {
+  const value = `${work.provider} ${work.model}`.toLowerCase()
+  if (/grok|xai/.test(value)) return 'grok'
+  if (/image\s*2|gpt[-_ ]?image/.test(value)) return 'image2'
+  return 'banner'
+}
+
+async function reuseWork(work: CreatorHistoryItem) {
+  await restoreWorkSettings(work)
+  const shotPrompts = workShotPrompts(work)
+  if (work.type === 'video' && shotPrompts.length > 1) selectedShotId.value = videoShots.value[0].id
   selectedWork.value = null
+  await nextTick()
+  document.getElementById('creator-prompt')?.focus()
+}
+
+async function regenerateWork(work: CreatorHistoryItem) {
+  if (generating.value || regeneratingWorkId.value) return
+  regeneratingWorkId.value = work.id
+  try {
+    await restoreWorkSettings(work)
+    const shotPrompts = workShotPrompts(work)
+    if (work.type === 'video' && shotPrompts.length > 1) selectedShotId.value = videoShots.value[0].id
+    selectedWork.value = null
+    await nextTick()
+    if (!canGenerate.value) {
+      appStore.showError('无法按原参数再次生成，请检查原分组、模型和提示词是否仍然可用')
+      return
+    }
+    await generateFromCurrentSettings('再次生成')
+  } finally {
+    regeneratingWorkId.value = ''
+  }
+}
+
+async function useOutputAsReference(output: string, work: CreatorHistoryItem, index: number) {
+  try {
+    const response = await fetch(output)
+    if (!response.ok) throw new Error(`读取图片失败：HTTP ${response.status}`)
+    const blob = await response.blob()
+    if (!blob.size) throw new Error('图片内容为空')
+    if (blob.size > 5 * 1024 * 1024) throw new Error('图片超过 5MB，无法作为参考图上传')
+    const extension = imageFileExtension(output)
+    const mimeType = blob.type.startsWith('image/') ? blob.type : `image/${extension === 'jpg' ? 'jpeg' : extension}`
+    const file = new File([blob], `creator-reference-${work.id}-${index + 1}.${extension}`, { type: mimeType })
+    await restoreWorkSettings(work)
+    addReferenceFiles([file])
+    selectedWork.value = null
+    await nextTick()
+    document.getElementById('creator-prompt')?.focus()
+    appStore.showSuccess('已将作品加入参考图，并带回当时的生成参数')
+  } catch (error) {
+    appStore.showError(errorMessage(error, '无法将作品加入参考图'))
+  }
 }
 
 function continueCreating() {
@@ -1720,7 +2221,16 @@ function mergedDownloadName(work: CreatorHistoryItem) {
 }
 
 function resultMeta(work: CreatorHistoryItem) {
-  return `${work.provider} · ${work.model} · ${work.aspectRatio || '自动画幅'} · ${work.resolution || '默认清晰度'}`
+  return `${work.provider} · ${work.model} · ${work.aspectRatio || '自动画幅'} · ${workResolutionLabel(work)}`
+}
+
+function workResolutionLabel(work: CreatorHistoryItem) {
+  if (!work.resolution) return '默认清晰度'
+  if (work.type === 'image' && (work.imageCapability === 'grok' || /^grok-/i.test(work.model))) {
+    return work.resolution === '2K' ? '2K · 2048 px 级' : '1K · 1024 px 级'
+  }
+  if (work.outputSize) return `${work.resolution} · ${work.outputSize.replace('x', '×')}`
+  return work.resolution
 }
 
 function resultAspectRatio(work: CreatorHistoryItem) {
@@ -1755,7 +2265,7 @@ function formatResultTime(timestamp: number) {
 }
 
 function detailedResultMeta(work: CreatorHistoryItem) {
-  const parts = [work.provider, work.model, work.aspectRatio || '自动画幅', work.resolution || '默认清晰度']
+  const parts = [work.provider, work.model, work.aspectRatio || '自动画幅', workResolutionLabel(work)]
   if (work.type === 'video') parts.push(`${work.shotCount || 1} 个镜头`, `${work.requestedDuration || 0} 秒`)
   parts.push(`${work.referenceCount || 0} 张参考图`)
   return parts.join(' · ')
@@ -1865,11 +2375,7 @@ function modelLabel(model: string) {
   }
   if (grokImageLabels[model]) return grokImageLabels[model]
 
-  const labels: Record<string, string> = {
-    'gemini-3-pro-image-preview': 'Gemini 3 Pro Image',
-    'gemini-2.5-flash-image': 'Gemini 2.5 Flash Image',
-  }
-  return labels[model] ? `${labels[model]} · ${model}` : model
+  return model
 }
 
 function maskedKey(key: string) {
@@ -1905,6 +2411,7 @@ function delay(milliseconds: number) {
 }
 
 watch([studioMode, imageCapability], () => {
+  if (restoringWorkSettings) return
   activeTemplateIndex.value = 0
   promptTemplatePage.value = 0
   selectedWork.value = null
@@ -1915,6 +2422,7 @@ watch([studioMode, imageCapability], () => {
 })
 
 watch(selectedGroupId, () => {
+  if (restoringWorkSettings) return
   void loadModels()
 })
 
@@ -1941,10 +2449,6 @@ watch(imageResolutionOptions, options => {
 
 watch(imageResolution, resolution => {
   if (studioMode.value !== 'image' || imageCapability.value !== 'image2') return
-  const supportedRatios = image2SizeOptions[resolution] || image2SizeOptions['1K']
-  if (!supportedRatios.some(option => option.value === aspectRatio.value)) {
-    aspectRatio.value = supportedRatios[0].value
-  }
   if (resolution === '4K') {
     const fourKModel = image2FourKModel()
     if (fourKModel) selectedModel.value = fourKModel
@@ -1956,6 +2460,7 @@ watch(imageResolution, resolution => {
 })
 
 watch(aspectOptions, options => {
+  if (studioMode.value === 'image' && imageCapability.value === 'image2') return
   if (!options.some(option => option.value === aspectRatio.value)) {
     aspectRatio.value = options[0]?.value || '1:1'
   }
@@ -1964,7 +2469,16 @@ watch(aspectOptions, options => {
 watch(selectedModel, model => {
   if (studioMode.value !== 'image' || imageCapability.value !== 'image2' || !model) return
   if (isImage2FourKModel(model)) imageResolution.value = '4K'
-  else if (imageResolution.value === '4K') imageResolution.value = '2K'
+  else if (imageResolution.value === '4K') {
+    imageResolution.value = '2K'
+    if (imageSizeMode.value === 'custom') {
+      const [width, height] = normalizeCustomImageSize(imageCustomWidth.value, imageCustomHeight.value)
+      if (customImageResolution(width, height) === '4K') {
+        imageSizeMode.value = 'ratio'
+        aspectRatio.value = '1:1'
+      }
+    }
+  }
 })
 
 onMounted(() => {
@@ -2455,7 +2969,49 @@ onBeforeUnmount(() => {
 .studio-input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #d7e0e7; border-radius: 8px; outline: none; color: #1b2638; background: #fff; font-size: 12px; transition: 150ms ease; }
 .studio-input:focus { border-color: #6dd4c4; box-shadow: 0 0 0 3px rgb(41 185 164 / 12%); }
 .studio-input:disabled { cursor: not-allowed; color: #97a3b2; background: #f4f6f7; }
+.model-input { height: 42px; contain: layout; }
+.model-input.is-loading:disabled:not(:invalid) { color: #1b2638; background: #fff; }
 textarea.studio-input { padding: 10px 12px; resize: vertical; }
+.image-size-trigger { display: flex; align-items: center; justify-content: space-between; text-align: left; }
+.image-size-trigger svg { flex: 0 0 auto; color: #8c9aab; }
+.image-size-dialog { color: #354258; }
+.image-size-current { margin: 0 0 16px; color: #91a0b3; font-size: 12px; }
+.image-size-current strong { color: #627086; font-variant-numeric: tabular-nums; }
+.image-size-mode-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-bottom: 22px; padding: 5px; border-radius: 16px; background: #eef4f3; }
+.image-size-mode-tabs button { min-height: 46px; border-radius: 12px; color: #68788e; font-size: 13px; font-weight: 750; }
+.image-size-mode-tabs button.active { color: #172236; background: #fff; box-shadow: 0 4px 14px rgb(25 58 54 / 9%); }
+.image-size-section + .image-size-section { margin-top: 20px; }
+.image-size-section h4,
+.image-custom-size h4 { margin: 0 0 10px; color: #8796a9; font-size: 12px; font-weight: 750; }
+.image-resolution-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
+.image-resolution-grid button { min-height: 50px; border: 1px solid #d8e2e1; border-radius: 14px; color: #65758a; background: #fff; font-size: 14px; font-weight: 800; transition: 150ms ease; }
+.image-resolution-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
+.image-ratio-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
+.image-ratio-grid button { display: grid; min-height: 80px; place-items: center; align-content: center; gap: 7px; border: 1px solid #d8e2e8; border-radius: 14px; color: #66768c; background: #fff; font-size: 12px; font-weight: 750; transition: 150ms ease; }
+.image-ratio-grid button i { display: block; box-sizing: border-box; border: 2px solid #95a4b7; border-radius: 3px; }
+.image-ratio-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
+.image-ratio-grid button.active i { border-color: #4f9e94; }
+.custom-ratio-command { width: 100%; min-height: 42px; margin-top: 10px; border: 1px solid #d8e3e1; border-radius: 14px; color: #6a7a8e; background: #fff; font-size: 12px; font-weight: 700; }
+.image-size-auto-panel { display: grid; min-height: 280px; place-items: center; align-content: center; gap: 12px; text-align: center; }
+.image-size-auto-panel > span { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 20px; color: #087f74; background: #e7f8f5; }
+.image-size-auto-panel strong { color: #334155; font-size: 15px; }
+.image-size-auto-panel p { max-width: 330px; margin: 0; color: #93a2b5; font-size: 12px; line-height: 1.7; }
+.image-custom-size > div { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: end; gap: 12px; }
+.image-custom-size label { color: #607087; font-size: 12px; font-weight: 700; }
+.image-custom-size input { width: 100%; min-height: 50px; margin-top: 8px; padding: 0 14px; border: 1px solid #d7e0e7; border-radius: 14px; outline: 0; color: #314057; background: #fff; font-size: 14px; }
+.image-custom-size > div > span { padding-bottom: 15px; color: #a1afbf; font-weight: 800; }
+.image-custom-size > p { margin: 14px 0 0; padding: 13px 15px; border: 1px solid #d8e8e4; border-radius: 14px; color: #64758b; background: #f6faf9; font-size: 11px; line-height: 1.75; }
+.image-size-result { margin-top: 22px; padding: 17px 18px; border-radius: 16px; background: #f4f8f7; }
+.image-size-result span,
+.image-size-result strong { display: block; }
+.image-size-result span { color: #92a0b2; font-size: 11px; }
+.image-size-result strong { margin-top: 7px; color: #152136; font-size: 18px; font-variant-numeric: tabular-nums; }
+.image-size-cancel,
+.image-size-confirm { min-width: 0; min-height: 48px; flex: 1; border-radius: 14px; font-size: 14px; font-weight: 750; transition: 150ms ease; }
+.image-size-cancel { color: #687990; background: #f1f5f9; }
+.image-size-confirm { color: #fff; background: #087f74; }
+.image-size-cancel:hover { color: #45566c; background: #e8eef4; }
+.image-size-confirm:hover { background: #066d64; box-shadow: 0 8px 18px rgb(8 127 116 / 20%); }
 .video-model-hint.switched { color: var(--creator-accent-strong); }
 .key-ready { gap: 9px; min-height: 62px; margin-bottom: 18px; padding: 10px 12px; border: 1px solid #9ce2bf; border-radius: 8px; color: #27835c; background: #f0fcf5; }
 .key-ready > div { min-width: 0; flex: 1; }
@@ -2520,10 +3076,12 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .reference-item { position: relative; aspect-ratio: 1; overflow: hidden; border: 1px solid #d8e2e7; border-radius: 7px; background: #edf2f3; }
 .reference-item img { width: 100%; height: 100%; object-fit: cover; }
 .reference-item button { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: 0; color: #fff; background: rgb(22 30 42 / 70%); }
+.history-reference-note { margin: 8px 0 0; color: #8a98aa; font-size: 10px; line-height: 1.5; }
 .two-column-fields,
 .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.advanced-grid { margin-bottom: 16px; padding: 12px; border: 1px solid #e0e7eb; border-radius: 8px; background: #f8fafb; }
+.advanced-grid { grid-template-columns: minmax(0, 1fr); margin-bottom: 16px; padding: 12px; border: 1px solid #e0e7eb; border-radius: 8px; background: #f8fafb; }
 .advanced-grid .field-block { margin-bottom: 0; }
+.advanced-grid .field-block.wide { grid-column: 1 / -1; }
 .stepper { min-height: 44px; border: 1px solid #d7e0e7; border-radius: 8px; overflow: hidden; }
 .stepper button { display: grid; place-items: center; width: 46px; height: 42px; color: var(--creator-accent-strong); background: #fff; }
 .stepper button:first-child { border-right: 1px solid #e0e6eb; }
@@ -2641,6 +3199,16 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .stepper,
 :global(.dark) .stepper button { border-color: #354643; color: #c3cfcc; background: #172321; }
 :global(.dark) .studio-input { color: #ecf3f2; }
+:global(.dark) .image-size-mode-tabs,
+:global(.dark) .image-size-result { background: #172321; }
+:global(.dark) .image-size-mode-tabs button.active,
+:global(.dark) .image-resolution-grid button,
+:global(.dark) .image-ratio-grid button,
+:global(.dark) .custom-ratio-command,
+:global(.dark) .image-custom-size input { border-color: #354643; color: #d7e1df; background: #14211f; }
+:global(.dark) .image-size-result strong,
+:global(.dark) .image-size-auto-panel strong { color: #e8f1ef; }
+:global(.dark) .image-custom-size > p { border-color: #334642; color: #a9b8b5; background: #172321; }
 :global(.dark) .history-item:hover,
 :global(.dark) .advanced-grid,
 :global(.dark) .toggle-row { background: #172321; }
@@ -2728,6 +3296,12 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .mode-option span { font-size: 11px; }
   .two-column-fields,
   .advanced-grid { grid-template-columns: 1fr; }
+  .image-ratio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .image-size-mode-tabs button { padding: 0 5px; font-size: 11px; }
+  .image-custom-size > div { grid-template-columns: 1fr; }
+  .image-custom-size > div > span { display: none; }
+  .image-size-cancel,
+  .image-size-confirm { min-width: 0; flex: 1; }
   .toggle-row.wide { grid-column: auto; }
   .featured-brief { margin-top: 18px; }
   .brief-topline { margin: 0 14px; }
