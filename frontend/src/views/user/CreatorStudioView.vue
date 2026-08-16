@@ -693,7 +693,7 @@
                 <strong>{{ outputCount }} 张</strong>
                 <button type="button" title="增加数量" :disabled="outputCount >= maxOutputCount" @click="outputCount++"><Icon name="plus" size="sm" /></button>
               </div>
-              <small v-if="maxOutputCount === 1" class="creator-field-hint">当前 4K 图片模型每次只能生成 1 张；如需一次生成多张，请切换到 1K 或 2K。</small>
+              <small v-if="imageCapability === 'image2' && imageResolution === '4K'" class="creator-field-hint">4K 使用 gpt-image-2 逐张提交，最多可连续生成 4 张。</small>
             </div>
           </template>
 
@@ -1131,7 +1131,7 @@ const promptPlaceholder = computed(() => studioMode.value === 'image'
 const imageResolutionOptions = computed(() => {
   if (imageCapability.value === 'banner') return ['1K', '2K', '4K']
   if (imageCapability.value === 'image2') {
-    return modelOptions.value.some(isImage2FourKModel) ? ['1K', '2K', '4K'] : ['1K', '2K']
+    return image2StandardModel() ? ['1K', '2K', '4K'] : ['1K', '2K']
   }
   return ['1K', '2K']
 })
@@ -1267,16 +1267,14 @@ function filterModels(models: string[]) {
     return clean.filter(model => /video/i.test(model))
   }
   if (imageCapability.value === 'grok') return clean.filter(model => /grok.*imag.*image|grok-imagine$/i.test(model))
-  if (imageCapability.value === 'image2') return clean.filter(model => /gpt.*image|image-?2/i.test(model))
+  if (imageCapability.value === 'image2') {
+    return clean.filter(model => /gpt.*image|image-?2/i.test(model) && !isImage2FourKModel(model))
+  }
   return clean.filter(model => /image|imagen|banana/i.test(model))
 }
 
 function isImage2FourKModel(model: string) {
   return /gpt[-_]?image[-_]?2/i.test(model) && /(?:^|[-_])4k(?:$|[-_])/i.test(model)
-}
-
-function image2FourKModel() {
-  return modelOptions.value.find(isImage2FourKModel)
 }
 
 function image2StandardModel() {
@@ -1286,9 +1284,7 @@ function image2StandardModel() {
 
 function imageModelForGeneration() {
   if (imageCapability.value !== 'image2') return selectedModel.value
-  if (imageResolution.value === '4K') return image2FourKModel() || selectedModel.value
-  if (isImage2FourKModel(selectedModel.value)) return image2StandardModel() || ''
-  return selectedModel.value
+  return image2StandardModel() || selectedModel.value
 }
 
 function syncSelectedGroup() {
@@ -1801,7 +1797,10 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
       result = await generate()
     }
     const batchOutputs = result.data.map(item => item.url).filter(Boolean)
-    outputs.push(...batchOutputs.slice(0, requestCount - outputs.length))
+    const normalizedOutputs = input.capability === 'image2' && input.sizeMode !== 'auto'
+      ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageAspect(output, input.aspectRatio)))
+      : batchOutputs
+    outputs.push(...normalizedOutputs.slice(0, requestCount - outputs.length))
     work.outputs = [...outputs]
     work.updatedAt = Date.now()
     await persistWork(work)
@@ -1810,8 +1809,74 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   if (!work.outputs.length) throw new Error('模型没有返回可用图片')
 }
 
-function isSingleOutputImageModel(model: string, resolution: string, capability: ImageCapability) {
-  return capability === 'image2' && (isImage2FourKModel(model) || resolution === '4K')
+function isSingleOutputImageModel(model: string, _resolution: string, capability: ImageCapability) {
+  return capability === 'image2' && isImage2FourKModel(model)
+}
+
+async function normalizeCreatorImageAspect(output: string, requestedRatio: string) {
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(requestedRatio || '')
+  if (!match || !output) return output
+  const targetRatio = Number(match[1]) / Number(match[2])
+  if (!Number.isFinite(targetRatio) || targetRatio <= 0 || typeof window === 'undefined') return output
+  const mimeType = /^data:(image\/(?:png|jpeg|webp));base64,/i.exec(output.trim())?.[1]
+  if (!mimeType) return output
+  const sourceSize = imageDataUrlDimensions(output)
+  if (sourceSize && Math.abs(sourceSize.width / sourceSize.height - targetRatio) < 0.01) return output
+  if (!sourceSize && mimeType.toLowerCase() === 'image/png') return output
+
+  return new Promise<string>(resolve => {
+    const timeout = window.setTimeout(() => resolve(output), 5000)
+    const image = new Image()
+    image.crossOrigin = 'anonymous'
+    image.onload = () => {
+      window.clearTimeout(timeout)
+      const sourceWidth = image.naturalWidth || image.width || sourceSize?.width || 0
+      const sourceHeight = image.naturalHeight || image.height || sourceSize?.height || 0
+      if (!sourceWidth || !sourceHeight) {
+        resolve(output)
+        return
+      }
+      const sourceRatio = sourceWidth / sourceHeight
+      const cropWidth = sourceRatio > targetRatio ? Math.round(sourceHeight * targetRatio) : sourceWidth
+      const cropHeight = sourceRatio > targetRatio ? sourceHeight : Math.round(sourceWidth / targetRatio)
+      const canvas = document.createElement('canvas')
+      canvas.width = cropWidth
+      canvas.height = cropHeight
+      const context = canvas.getContext('2d')
+      if (!context) {
+        resolve(output)
+        return
+      }
+      const offsetX = Math.round((sourceWidth - cropWidth) / 2)
+      const offsetY = Math.round((sourceHeight - cropHeight) / 2)
+      context.drawImage(image, offsetX, offsetY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight)
+      try {
+        resolve(canvas.toDataURL(mimeType))
+      } catch {
+        resolve(output)
+      }
+    }
+    image.onerror = () => {
+      window.clearTimeout(timeout)
+      resolve(output)
+    }
+    image.src = output
+  })
+}
+
+function imageDataUrlDimensions(output: string) {
+  const match = /^data:image\/png;base64,([a-z0-9+/=\s]+)$/i.exec(output.trim())
+  if (!match) return null
+  try {
+    const decoded = window.atob(match[1].replace(/\s/g, ''))
+    if (decoded.length < 24 || decoded.slice(0, 8) !== '\x89PNG\r\n\x1a\n' || decoded.slice(12, 16) !== 'IHDR') return null
+    const view = new DataView(Uint8Array.from(decoded, character => character.charCodeAt(0)).buffer)
+    const width = view.getUint32(16)
+    const height = view.getUint32(20)
+    return width > 0 && height > 0 ? { width, height } : null
+  } catch {
+    return null
+  }
 }
 
 function creatorGenerationErrorMessage(error: unknown) {
@@ -1827,6 +1892,9 @@ function creatorGenerationErrorMessage(error: unknown) {
   }
   if (/no available compatible accounts/i.test(message)) {
     return '当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。'
+  }
+  if (/(?:size|resolution).*(?:not supported|unsupported|invalid)|unsupported.*(?:size|resolution)/i.test(message)) {
+    return '当前 gpt-image-2 图片通道不支持所选 4K 尺寸，请切换创作分组或改用 1K / 2K。'
   }
   if (/upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway/i.test(message)) {
     return 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
@@ -2631,14 +2699,7 @@ watch(imageResolutionOptions, options => {
 
 watch(imageResolution, resolution => {
   if (studioMode.value !== 'image' || imageCapability.value !== 'image2') return
-  if (resolution === '4K') {
-    const fourKModel = image2FourKModel()
-    if (fourKModel) selectedModel.value = fourKModel
-    return
-  }
-  if (isImage2FourKModel(selectedModel.value)) {
-    selectedModel.value = image2StandardModel() || selectedModel.value
-  }
+  if (resolution === '4K' && !image2StandardModel()) imageResolution.value = '2K'
 })
 
 watch(aspectOptions, options => {
@@ -2650,16 +2711,8 @@ watch(aspectOptions, options => {
 
 watch(selectedModel, model => {
   if (studioMode.value !== 'image' || imageCapability.value !== 'image2' || !model) return
-  if (isImage2FourKModel(model)) imageResolution.value = '4K'
-  else if (imageResolution.value === '4K') {
-    imageResolution.value = '2K'
-    if (imageSizeMode.value === 'custom') {
-      const [width, height] = normalizeCustomImageSize(imageCustomWidth.value, imageCustomHeight.value)
-      if (customImageResolution(width, height) === '4K') {
-        imageSizeMode.value = 'ratio'
-        aspectRatio.value = '1:1'
-      }
-    }
+  if (isImage2FourKModel(model)) {
+    selectedModel.value = image2StandardModel() || ''
   }
 })
 

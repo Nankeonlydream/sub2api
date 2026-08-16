@@ -1435,7 +1435,7 @@ describe('CreatorStudioView', () => {
     expect(request).not.toHaveProperty('imageSize')
   })
 
-  it('selects Image2 ratio sizes in a modal and keeps unstable 4K generation single-image', async () => {
+  it('selects Image2 ratio sizes in a modal and uses the standard model for 4K', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }, { id: 'adobe-firefly-gpt-image-2-4k' }])
@@ -1488,15 +1488,15 @@ describe('CreatorStudioView', () => {
     await dialog.findAll('.image-resolution-grid button')[2].trigger('click')
     await dialog.get('.image-size-confirm').trigger('click')
     await flushPromises()
-    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('adobe-firefly-gpt-image-2-4k')
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('gpt-image-2')
     expect(wrapper.get('#creator-output-size').text()).toContain('4K · 3840×2160')
-    expect(wrapper.get('.field-block .stepper').text()).toContain('1 张')
-    expect(wrapper.get('.field-block .stepper button:last-child').attributes('disabled')).toBeDefined()
-    expect(wrapper.text()).toContain('当前 4K 图片模型每次只能生成 1 张')
+    expect(wrapper.get('.field-block .stepper').text()).toContain('3 张')
+    expect(wrapper.get('.field-block .stepper button:last-child').attributes('disabled')).toBeUndefined()
+    expect(wrapper.text()).toContain('4K 使用 gpt-image-2 逐张提交')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
-      model: 'adobe-firefly-gpt-image-2-4k',
+      model: 'gpt-image-2',
       size: '3840x2160',
       n: 1,
     }))
@@ -1508,13 +1508,13 @@ describe('CreatorStudioView', () => {
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
-      model: 'adobe-firefly-gpt-image-2-4k',
+      model: 'gpt-image-2',
       size: '2160x3840',
     }))
 
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('gpt-image-2')
     await flushPromises()
-    expect(wrapper.get('#creator-output-size').text()).toContain('2K')
+    expect(wrapper.get('#creator-output-size').text()).toContain('4K')
   })
 
   it('supports Image2 automatic and normalized custom size modes', async () => {
