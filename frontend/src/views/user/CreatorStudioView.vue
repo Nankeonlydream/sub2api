@@ -1798,9 +1798,12 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     }
     const batchOutputs = result.data.map(item => item.url).filter(Boolean)
     const normalizedOutputs = input.capability === 'image2' && input.sizeMode !== 'auto'
-      ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageAspect(output, input.aspectRatio)))
+      ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageOutput(output, input.aspectRatio, input.size)))
       : batchOutputs
     outputs.push(...normalizedOutputs.slice(0, requestCount - outputs.length))
+    if (input.capability === 'image2' && input.sizeMode !== 'auto' && /^\d+x\d+$/.test(input.size)) {
+      work.actualOutputSize = input.size
+    }
     work.outputs = [...outputs]
     work.updatedAt = Date.now()
     await persistWork(work)
@@ -1813,15 +1816,18 @@ function isSingleOutputImageModel(model: string, _resolution: string, capability
   return capability === 'image2' && isImage2FourKModel(model)
 }
 
-async function normalizeCreatorImageAspect(output: string, requestedRatio: string) {
+async function normalizeCreatorImageOutput(output: string, requestedRatio: string, requestedSize: string) {
   const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(requestedRatio || '')
-  if (!match || !output) return output
+  const sizeMatch = /^(\d+)x(\d+)$/.exec(requestedSize || '')
+  if (!match || !sizeMatch || !output) return output
   const targetRatio = Number(match[1]) / Number(match[2])
-  if (!Number.isFinite(targetRatio) || targetRatio <= 0 || typeof window === 'undefined') return output
+  const targetWidth = Number(sizeMatch[1])
+  const targetHeight = Number(sizeMatch[2])
+  if (!Number.isFinite(targetRatio) || targetRatio <= 0 || !targetWidth || !targetHeight || typeof window === 'undefined') return output
   const mimeType = /^data:(image\/(?:png|jpeg|webp));base64,/i.exec(output.trim())?.[1]
   if (!mimeType) return output
   const sourceSize = imageDataUrlDimensions(output)
-  if (sourceSize && Math.abs(sourceSize.width / sourceSize.height - targetRatio) < 0.01) return output
+  if (sourceSize && sourceSize.width === targetWidth && sourceSize.height === targetHeight) return output
   if (!sourceSize && mimeType.toLowerCase() === 'image/png') return output
 
   return new Promise<string>(resolve => {
@@ -1840,8 +1846,8 @@ async function normalizeCreatorImageAspect(output: string, requestedRatio: strin
       const cropWidth = sourceRatio > targetRatio ? Math.round(sourceHeight * targetRatio) : sourceWidth
       const cropHeight = sourceRatio > targetRatio ? sourceHeight : Math.round(sourceWidth / targetRatio)
       const canvas = document.createElement('canvas')
-      canvas.width = cropWidth
-      canvas.height = cropHeight
+      canvas.width = targetWidth
+      canvas.height = targetHeight
       const context = canvas.getContext('2d')
       if (!context) {
         resolve(output)
@@ -1849,7 +1855,9 @@ async function normalizeCreatorImageAspect(output: string, requestedRatio: strin
       }
       const offsetX = Math.round((sourceWidth - cropWidth) / 2)
       const offsetY = Math.round((sourceHeight - cropHeight) / 2)
-      context.drawImage(image, offsetX, offsetY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight)
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(image, offsetX, offsetY, cropWidth, cropHeight, 0, 0, targetWidth, targetHeight)
       try {
         resolve(canvas.toDataURL(mimeType))
       } catch {
@@ -1862,6 +1870,22 @@ async function normalizeCreatorImageAspect(output: string, requestedRatio: strin
     }
     image.src = output
   })
+}
+
+async function normalizeHistoricalImageWork(work: CreatorHistoryItem) {
+  if (work.imageCapability !== 'image2' || work.imageSizeMode === 'auto' || !/^\d+x\d+$/.test(work.outputSize || '') || !work.outputs.length) return
+  const requestedSize = work.outputSize || ''
+  const normalizedOutputs = await Promise.all(work.outputs.map(output => normalizeCreatorImageOutput(output, work.aspectRatio || '1:1', requestedSize)))
+  const changed = normalizedOutputs.some((output, index) => output !== work.outputs[index])
+  const hadActualSize = work.actualOutputSize === requestedSize
+  work.outputs = normalizedOutputs
+  work.actualOutputSize = requestedSize
+  if (changed || !hadActualSize) {
+    work.updatedAt = Date.now()
+    await persistWork(work)
+  }
+  historyItems.value = historyItems.value.map(item => item.id === work.id ? cloneWork(work) : item)
+  selectedWork.value = cloneWork(work)
 }
 
 function imageDataUrlDimensions(output: string) {
@@ -2088,6 +2112,7 @@ async function selectWork(work: CreatorHistoryItem) {
   selectedWork.value = work
   if (videoHistoryFeedback.value?.workId !== work.id) videoHistoryFeedback.value = null
   await restoreWorkSettings(work)
+  if (work.type === 'image') await normalizeHistoricalImageWork(work)
   const hasExpiredObjectUrl = work.outputs.some(output => output.startsWith('blob:'))
   const needsMergedVideo = isMultiShotVideo(work) && !work.mergedOutput
   if (work.type === 'video' && work.requestId && (work.status === 'pending' || hasExpiredObjectUrl || !work.outputs.length || needsMergedVideo)) {
@@ -2484,6 +2509,7 @@ function workResolutionLabel(work: CreatorHistoryItem) {
   if (work.type === 'image' && (work.imageCapability === 'grok' || /^grok-/i.test(work.model))) {
     return work.resolution === '2K' ? '2K · 2048' : '1K · 1024'
   }
+  if (work.actualOutputSize) return `${work.resolution} · ${work.actualOutputSize.replace('x', '×')}`
   if (work.outputSize) return `${work.resolution} · ${work.outputSize.replace('x', '×')}`
   return work.resolution
 }

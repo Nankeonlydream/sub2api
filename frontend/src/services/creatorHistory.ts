@@ -23,6 +23,8 @@ export interface CreatorHistoryItem {
   aspectRatio?: string
   resolution?: string
   outputSize?: string
+  /** Actual pixel dimensions after client-side normalization, when available. */
+  actualOutputSize?: string
   imageSizeMode?: 'auto' | 'ratio' | 'custom'
   quality?: string
   outputFormat?: string
