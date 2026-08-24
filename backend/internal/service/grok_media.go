@@ -1123,6 +1123,26 @@ func sanitizeGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conte
 		if err != nil {
 			return nil, "", fmt.Errorf("sanitize grok media size: %w", err)
 		}
+		// OpenAI-compatible clients commonly send fields outside xAI Imagine's
+		// schema. Preserve the normalized geometry above and remove the fields
+		// that xAI rejects with 422.
+		for _, field := range []string{
+			"quality",
+			"background",
+			"output_format",
+			"output_compression",
+			"image_size",
+			"moderation",
+			"user",
+		} {
+			if !gjson.GetBytes(out, field).Exists() {
+				continue
+			}
+			out, err = sjson.DeleteBytes(out, field)
+			if err != nil {
+				return nil, "", fmt.Errorf("sanitize grok media %s: %w", field, err)
+			}
+		}
 		return out, contentType, nil
 	default:
 		return body, contentType, nil
