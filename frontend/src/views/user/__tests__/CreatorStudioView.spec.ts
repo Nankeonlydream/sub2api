@@ -1421,6 +1421,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('#creator-resolution').exists()).toBe(false)
     expect(wrapper.get('#creator-output-size').text()).toContain('1K · 1024×1024')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形产品照片')
+    await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
 
@@ -1428,11 +1429,12 @@ describe('CreatorStudioView', () => {
       model: 'gpt-image-2',
       size: '1024x1024',
       protocol: 'openai',
-      responseFormat: 'b64_json',
+      background: 'transparent',
     }))
     const request = generateImage.mock.calls.at(-1)?.[1]
     expect(request).not.toHaveProperty('aspectRatio')
     expect(request).not.toHaveProperty('imageSize')
+    expect(request).not.toHaveProperty('responseFormat')
   })
 
   it('selects Image2 ratio sizes in a modal and uses the standard model for 4K', async () => {

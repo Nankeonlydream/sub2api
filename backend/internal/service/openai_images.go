@@ -670,6 +670,17 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	if err != nil {
 		return nil, err
 	}
+	// GPT Image models always return b64_json and reject the legacy
+	// response_format request field. Strip it before forwarding API-key
+	// requests so clients using the older Images API shape remain compatible.
+	forwardBody, forwardContentType, err = stripGPTImageResponseFormat(
+		forwardBody,
+		forwardContentType,
+		upstreamModel,
+	)
+	if err != nil {
+		return nil, err
+	}
 	// 生图是长耗时、上游侧已产生实际成本的操作：客户端中途断开不应连带取消上游请求。
 	// detachStreamUpstreamContext 在非流式时原样返回请求 context，于是客户端一断开
 	// 就把已经在出图的上游调用打断成 context canceled，网关记 502、不扣费，而上游那边
@@ -926,6 +937,64 @@ func rewriteOpenAIImagesMultipartModel(body []byte, contentType string, model st
 		if err := writer.WriteField("model", model); err != nil {
 			return nil, "", fmt.Errorf("append multipart model field: %w", err)
 		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, "", fmt.Errorf("finalize multipart body: %w", err)
+	}
+	return buffer.Bytes(), writer.FormDataContentType(), nil
+}
+
+func stripGPTImageResponseFormat(body []byte, contentType string, model string) ([]byte, string, error) {
+	if !IsGPTImageGenerationModel(model) {
+		return body, contentType, nil
+	}
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+		return stripGPTImageResponseFormatMultipart(body, contentType)
+	}
+	stripped, err := sjson.DeleteBytes(body, "response_format")
+	if err != nil {
+		return nil, "", fmt.Errorf("strip gpt image response_format: %w", err)
+	}
+	return stripped, contentType, nil
+}
+
+func stripGPTImageResponseFormatMultipart(body []byte, contentType string) ([]byte, string, error) {
+	_, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse multipart content-type: %w", err)
+	}
+	boundary := strings.TrimSpace(params["boundary"])
+	if boundary == "" {
+		return nil, "", fmt.Errorf("multipart boundary is required")
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	var buffer bytes.Buffer
+	writer := multipart.NewWriter(&buffer)
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, "", fmt.Errorf("read multipart body: %w", err)
+		}
+		formName := strings.TrimSpace(part.FormName())
+		if formName == "response_format" && part.FileName() == "" {
+			_ = part.Close()
+			continue
+		}
+		target, err := writer.CreatePart(cloneMultipartHeader(part.Header))
+		if err != nil {
+			_ = part.Close()
+			return nil, "", fmt.Errorf("create multipart part: %w", err)
+		}
+		if _, err := io.Copy(target, part); err != nil {
+			_ = part.Close()
+			return nil, "", fmt.Errorf("copy multipart part: %w", err)
+		}
+		_ = part.Close()
 	}
 	if err := writer.Close(); err != nil {
 		return nil, "", fmt.Errorf("finalize multipart body: %w", err)

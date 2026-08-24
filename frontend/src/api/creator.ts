@@ -199,6 +199,7 @@ function appendFormValue(form: FormData, name: string, value: unknown) {
 
 function buildOpenAIJSONPayload(input: ImageGenerationInput): Record<string, unknown> {
   const isGrokImagine = /^grok-imagine(?:-|$)/i.test(input.model.trim())
+  const isGPTImageModel = /^gpt-image-/i.test(input.model.trim())
   if (isGrokImagine) {
     return {
       ...input.extra,
@@ -223,7 +224,11 @@ function buildOpenAIJSONPayload(input: ImageGenerationInput): Record<string, unk
     ...(input.outputCompression !== undefined
       ? { output_compression: input.outputCompression }
       : {}),
-    ...(input.responseFormat ? { response_format: input.responseFormat } : {}),
+    // GPT Image models always return b64_json and reject the legacy
+    // response_format parameter. Keep it for DALL-E/compatible providers.
+    ...(input.responseFormat && !isGPTImageModel
+      ? { response_format: input.responseFormat }
+      : {}),
     ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
     ...(input.imageSize ? { image_size: input.imageSize } : {}),
     ...(input.moderation ? { moderation: input.moderation } : {}),

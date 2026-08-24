@@ -18,6 +18,8 @@ func TestClassifyImageBillingTier(t *testing.T) {
 		{name: "explicit 4k landscape", size: "3840x2160", wantTier: "4K", wantOK: true},
 		{name: "explicit 4k portrait", size: "2160x3840", wantTier: "4K", wantOK: true},
 		{name: "long edge 1k", size: "1024X768", wantTier: "1K", wantOK: true},
+		{name: "creator 1k landscape", size: "1536x1024", wantTier: "1K", wantOK: true},
+		{name: "creator 1k portrait", size: "864x1536", wantTier: "1K", wantOK: true},
 		{name: "long edge 2k", size: "1280x768", wantTier: "2K", wantOK: true},
 		{name: "long edge 4k", size: "2560x1600", wantTier: "4K", wantOK: true},
 		{name: "tier string 1k", size: "1k", wantTier: "1K", wantOK: true},
@@ -46,13 +48,22 @@ func TestResolveImageBillingSize(t *testing.T) {
 		wantBreakdown map[string]int
 	}{
 		{
-			name:          "output wins over input",
+			name:          "explicit input caps higher output",
 			inputSize:     "1024x1024",
 			outputSizes:   []string{"3840x2160"},
-			wantBilling:   "4K",
+			wantBilling:   "1K",
 			wantOutput:    "3840x2160",
-			wantSource:    ImageSizeSourceOutput,
+			wantSource:    ImageSizeSourceInput,
 			wantBreakdown: map[string]int{"4K": 1},
+		},
+		{
+			name:          "smaller output lowers explicit input tier",
+			inputSize:     "3840x2160",
+			outputSizes:   []string{"1672x941"},
+			wantBilling:   "2K",
+			wantOutput:    "1672x941",
+			wantSource:    ImageSizeSourceOutput,
+			wantBreakdown: map[string]int{"2K": 1},
 		},
 		{
 			name:        "input fallback",
@@ -82,9 +93,9 @@ func TestResolveImageBillingSize(t *testing.T) {
 			name:          "mixed output chooses highest tier",
 			inputSize:     "1024x1024",
 			outputSizes:   []string{"1024x1024", "3840x2160", "1280x720"},
-			wantBilling:   "4K",
+			wantBilling:   "1K",
 			wantOutput:    "1024x1024",
-			wantSource:    ImageSizeSourceOutput,
+			wantSource:    ImageSizeSourceInput,
 			wantBreakdown: map[string]int{"1K": 1, "2K": 1, "4K": 1},
 		},
 		{

@@ -52,6 +52,7 @@ describe('creator gateway API', () => {
       size: '1024x1024',
       aspectRatio: '1:1',
       outputFormat: 'webp',
+      responseFormat: 'b64_json',
     })
 
     expect(result).toEqual({
@@ -78,6 +79,7 @@ describe('creator gateway API', () => {
       aspect_ratio: '1:1',
       output_format: 'webp',
     })
+    expect(JSON.parse(String(init?.body))).not.toHaveProperty('response_format')
   })
 
   it('rejects a late image error envelope after an HTTP 200 heartbeat', async () => {
@@ -115,6 +117,7 @@ describe('creator gateway API', () => {
       prompt: 'change the background',
       quality: 'high',
       aspectRatio: '1:1',
+      responseFormat: 'b64_json',
       referenceImages: [first, second],
     })
 
@@ -128,6 +131,7 @@ describe('creator gateway API', () => {
     expect(form.get('prompt')).toBe('change the background')
     expect(form.get('quality')).toBe('high')
     expect(form.get('aspect_ratio')).toBe('1:1')
+    expect(form.get('response_format')).toBeNull()
     expect(form.getAll('image')).toHaveLength(2)
   })
 

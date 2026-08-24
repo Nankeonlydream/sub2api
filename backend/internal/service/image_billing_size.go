@@ -37,6 +37,8 @@ func ClassifyImageBillingTier(size string) (string, bool) {
 		return ImageBillingSize2K, true
 	case "4k":
 		return ImageBillingSize4K, true
+	case "1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536", "1360x1024", "1024x1360", "1536x656":
+		return ImageBillingSize1K, true
 	case "2048x2048", "2048x1152":
 		return ImageBillingSize2K, true
 	case "3840x2160", "2160x3840":
@@ -85,7 +87,8 @@ func ResolveImageBillingSize(inputSize string, outputSizes []string) ImageBillin
 			outputTier = tier
 		}
 	}
-	if outputTier != "" {
+	inputTier, hasInputTier := ClassifyImageBillingTier(inputSize)
+	if outputTier != "" && (!hasInputTier || imageTierRank(outputTier) < imageTierRank(inputTier)) {
 		return ImageBillingSizeResolution{
 			BillingSize: outputTier,
 			InputSize:   inputSize,
@@ -95,12 +98,16 @@ func ResolveImageBillingSize(inputSize string, outputSizes []string) ImageBillin
 		}
 	}
 
-	if tier, ok := ClassifyImageBillingTier(inputSize); ok {
+	if hasInputTier {
 		return ImageBillingSizeResolution{
-			BillingSize: tier,
+			// An explicit request is the maximum billable tier. Some upstreams
+			// normalize size controls to auto and return a larger raster; callers
+			// must not be charged for resolution they did not request.
+			BillingSize: inputTier,
 			InputSize:   inputSize,
 			OutputSize:  outputSize,
 			Source:      ImageSizeSourceInput,
+			Breakdown:   normalizeImageSizeBreakdown(breakdown),
 		}
 	}
 

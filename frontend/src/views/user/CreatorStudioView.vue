@@ -1760,7 +1760,11 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   const requestN = input.capability === 'image2' ? 1 : input.outputCount
   const isGeminiProtocol = input.platform === 'gemini' || input.platform === 'antigravity'
   const usesOpenAIImageSize = input.capability === 'image2'
-  const usesBase64Response = !isGeminiProtocol && (usesOpenAIImageSize || input.capability === 'grok')
+  const usesGptImageModel = /^gpt-image-/i.test(input.model.trim())
+  // GPT Image models return b64_json by default and reject response_format.
+  // Grok still needs the explicit response format so its temporary URLs are
+  // converted into self-contained data URLs by the gateway.
+  const usesBase64Response = !isGeminiProtocol && !usesGptImageModel && input.capability === 'grok'
   const outputs: string[] = []
   const generate = () => generateCreatorImage(input.apiKey, {
     model: input.model,
@@ -1770,9 +1774,9 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     quality: input.quality,
     outputFormat: input.outputFormat,
     background: input.background,
-    // Grok and Image2 may return temporary cross-origin URLs that browsers cannot
-    // save through the download attribute. Base64 keeps the result self-contained.
-    responseFormat: usesBase64Response ? 'b64_json' : undefined,
+    // Grok may return temporary cross-origin URLs that browsers cannot save
+    // through the download attribute. Base64 keeps the result self-contained.
+    ...(usesBase64Response ? { responseFormat: 'b64_json' } : {}),
     referenceImages: input.referenceFiles,
     protocol: isGeminiProtocol ? 'gemini' : 'openai',
     ...(!usesOpenAIImageSize ? {
