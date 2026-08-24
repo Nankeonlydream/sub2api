@@ -58,8 +58,9 @@ type GrokMediaRequestInfo struct {
 	Prompt          string
 	N               int
 	Size            string
-	AspectRatio     string
 	SizeTier        string
+	AspectRatio     string
+	ImageResolution string
 	Resolution      string
 	DurationSeconds int
 	InputImageURLs  []string
@@ -127,8 +128,9 @@ func ParseGrokMediaRequest(contentType string, body []byte) GrokMediaRequestInfo
 	info.Model = strings.TrimSpace(info.Model)
 	info.Prompt = strings.TrimSpace(info.Prompt)
 	info.Size = strings.TrimSpace(info.Size)
-	info.AspectRatio = strings.TrimSpace(info.AspectRatio)
 	info.SizeTier = NormalizeImageBillingTierOrDefault(info.Size)
+	info.AspectRatio = strings.TrimSpace(info.AspectRatio)
+	info.ImageResolution = grokImagineImageResolution(info.ImageResolution)
 	info.Resolution = NormalizeVideoBillingResolutionOrDefault(info.Resolution)
 	info.DurationSeconds = NormalizeVideoBillingDurationSecondsOrDefault(info.DurationSeconds)
 	if info.N <= 0 {
@@ -145,7 +147,7 @@ func parseGrokMediaJSONRequest(body []byte, info *GrokMediaRequestInfo) {
 	info.Prompt = strings.TrimSpace(gjson.GetBytes(body, "prompt").String())
 	info.Size = strings.TrimSpace(gjson.GetBytes(body, "size").String())
 	info.AspectRatio = strings.TrimSpace(gjson.GetBytes(body, "aspect_ratio").String())
-	info.Resolution = strings.TrimSpace(gjson.GetBytes(body, "resolution").String())
+	assignGrokMediaResolution(strings.TrimSpace(gjson.GetBytes(body, "resolution").String()), info)
 	if duration := gjson.GetBytes(body, "duration"); duration.Exists() && duration.Type == gjson.Number {
 		info.DurationSeconds = int(duration.Int())
 	}
@@ -261,7 +263,7 @@ func parseGrokMediaMultipartRequest(contentType string, body []byte, info *GrokM
 		case "aspect_ratio":
 			info.AspectRatio = value
 		case "resolution":
-			info.Resolution = value
+			assignGrokMediaResolution(value, info)
 		case "duration":
 			if duration, err := strconv.Atoi(value); err == nil {
 				info.DurationSeconds = duration
@@ -939,6 +941,9 @@ func prepareGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conten
 	if info.Size != "" {
 		payload["size"] = info.Size
 	}
+	if info.ImageResolution != "" {
+		payload["resolution"] = info.ImageResolution
+	}
 	if info.AspectRatio != "" {
 		payload["aspect_ratio"] = info.AspectRatio
 	}
@@ -1114,28 +1119,9 @@ func sanitizeGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conte
 	}
 	switch endpoint {
 	case GrokMediaEndpointImagesGenerations, GrokMediaEndpointImagesEdits:
-		// xAI Imagine has its own image schema. OpenAI-compatible clients often
-		// include fields that xAI rejects with 422 (size, quality, background,
-		// output_format, output_compression, image_size, and moderation).
-		out := body
-		for _, field := range []string{
-			"size",
-			"quality",
-			"background",
-			"output_format",
-			"output_compression",
-			"image_size",
-			"moderation",
-			"user",
-		} {
-			if !gjson.GetBytes(out, field).Exists() {
-				continue
-			}
-			var err error
-			out, err = sjson.DeleteBytes(out, field)
-			if err != nil {
-				return nil, "", fmt.Errorf("sanitize grok media %s: %w", field, err)
-			}
+		out, err := applyGrokImagineImageGeometry(body)
+		if err != nil {
+			return nil, "", fmt.Errorf("sanitize grok media size: %w", err)
 		}
 		return out, contentType, nil
 	default:
@@ -1312,11 +1298,16 @@ func (s *OpenAIGatewayService) handleGrokMediaErrorResponse(
 		Detail:             upstreamDetail,
 	})
 	if kind == "failover" {
+		retryable, retryDelay, retryDeadline, retryMax := grokSameAccountRetryMetadata(account, resp.StatusCode, body)
 		return nil, &UpstreamFailoverError{
-			StatusCode:             resp.StatusCode,
-			ResponseBody:           body,
-			ResponseHeaders:        resp.Header.Clone(),
-			RetryableOnSameAccount: account.IsPoolMode() && account.IsPoolModeRetryableStatus(resp.StatusCode),
+			StatusCode:               resp.StatusCode,
+			ResponseBody:             body,
+			ResponseHeaders:          resp.Header.Clone(),
+			RetryableOnSameAccount:   retryable,
+			RequestScopedTransient:   retryable && resp.StatusCode == http.StatusTooManyRequests,
+			SameAccountRetryDelay:    retryDelay,
+			SameAccountRetryDeadline: retryDeadline,
+			SameAccountRetryMax:      retryMax,
 		}
 	}
 
