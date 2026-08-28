@@ -94,7 +94,7 @@ func (r *Runner) worker(ctx context.Context, workerID int) {
 		case <-ticker.C:
 			r.runtime.heartbeatNS.Store(r.clock.Now().UnixNano())
 			cfg, ok := r.config.Active()
-			if !ok || !cfg.RiskControlEnabled || !cfg.Enabled || workerID >= cfg.WorkerCount {
+			if !ok || !cfg.RiskControlEnabled || cfg.EffectiveMode() != ModeAsync || workerID >= cfg.WorkerCount {
 				continue
 			}
 			for {

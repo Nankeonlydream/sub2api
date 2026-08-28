@@ -513,6 +513,55 @@ func TestWorkerPanicLeaseLossAndLifecycleAreContained(t *testing.T) {
 	})
 }
 
+func TestWorkerClaimsJobsOnlyInAsyncMode(t *testing.T) {
+	tests := []struct {
+		name      string
+		blocking  bool
+		wantClaim bool
+	}{
+		{name: "async claims queued jobs", wantClaim: true},
+		{name: "blocking leaves queued jobs untouched", blocking: true, wantClaim: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := asyncConfig()
+			cfg.BlockingEnabled = tt.blocking
+			job := workerJob(1, 3)
+			repo := &fakeJobRepository{claimQueue: []*Job{job}}
+			payload := &fakePayloadStore{values: map[int64]string{job.ID: "benign input"}}
+			runner := NewRunner(
+				&fakeConfigStore{cfg: cfg, active: true},
+				repo,
+				payload,
+				PromptScannerFunc(func(context.Context, ActiveEndpoint, string, []string) (*NormalizedResult, error) {
+					return integrationResult(EventPass), nil
+				}),
+				NewAtomicMetrics(),
+			)
+
+			require.NoError(t, runner.Start(context.Background()))
+			if tt.wantClaim {
+				require.Eventually(t, func() bool {
+					repo.mu.Lock()
+					defer repo.mu.Unlock()
+					return len(repo.claimQueue) == 0 && repo.completeCount == 1
+				}, time.Second, 10*time.Millisecond)
+			} else {
+				require.Never(t, func() bool {
+					repo.mu.Lock()
+					defer repo.mu.Unlock()
+					return len(repo.claimQueue) == 0 || repo.completeCount > 0
+				}, 650*time.Millisecond, 10*time.Millisecond)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, runner.Shutdown(ctx))
+		})
+	}
+}
+
 func TestPromptAuditSyntheticAsyncBaseline(t *testing.T) {
 	const totalRequests = 100
 	cfg := asyncConfig()
