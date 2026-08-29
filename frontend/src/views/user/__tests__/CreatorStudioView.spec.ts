@@ -183,7 +183,7 @@ describe('CreatorStudioView', () => {
     expect(showError).not.toHaveBeenCalled()
   })
 
-  it('uses compact labels for Grok image models', async () => {
+  it('shows canonical IDs for Grok image models', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([
       { id: 'grok-imagine-image' },
@@ -198,16 +198,17 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.findAll('.capability-switch .online-dot')).toHaveLength(3)
     expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
-      'Grok 标准版生图',
-      'Grok 高质量版生图',
+      'grok-imagine-image',
+      'grok-imagine-image-quality',
     ])
     expect(wrapper.get<HTMLSelectElement>('#creator-aspect').findAll('option').map(option => option.attributes('value'))).toEqual([
       '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '2:1', '1:2', '19.5:9', '9:19.5', '20:9', '9:20', 'auto',
     ])
     expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.text())).toEqual([
-      '1K · 1024',
-      '2K · 2048',
+      '1K · 快速',
+      '2K · 超清',
     ])
+    expect(wrapper.get<HTMLSelectElement>('#creator-resolution').findAll('option').map(option => option.attributes('value'))).not.toContain('4K')
   })
 
   it('shows all supported Banana ratios and labelled resolution tiers', async () => {
@@ -410,6 +411,7 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     expect(wrapper.get('.history-item-actions').findAll('button')).toHaveLength(2)
+    expect(wrapper.get('.history-preview img').attributes()).toMatchObject({ loading: 'lazy', decoding: 'async' })
     await wrapper.get('.history-item-hitbox').trigger('click')
     expect(wrapper.get('.history-item').classes()).toContain('active')
     expect(wrapper.text()).toContain('本次创作')
@@ -787,7 +789,45 @@ describe('CreatorStudioView', () => {
     const video = wrapper.get<HTMLVideoElement>('.result-media.video')
     expect(video.attributes('src')).toBe('blob:creator-video')
     expect(video.attributes('style')).toContain('aspect-ratio: 16 / 9')
+    Object.defineProperties(video.element, {
+      videoWidth: { configurable: true, value: 1080 },
+      videoHeight: { configurable: true, value: 1920 },
+    })
+    await video.trigger('loadedmetadata')
+    await flushPromises()
+    expect(video.attributes('style')).toContain('aspect-ratio: 1080 / 1920')
     expect(showError).not.toHaveBeenCalled()
+  })
+
+  it('enables 1080p only for the Grok Imagine 1.5 video model', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'grok-imagine-video' },
+      { id: 'grok-imagine-video-1.5' },
+    ])
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+
+    const resolution = wrapper.get<HTMLSelectElement>('#video-resolution')
+    const option1080p = resolution.find('option[value="1080p"]')
+    expect(option1080p.exists()).toBe(false)
+
+    await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video-1.5')
+    await flushPromises()
+    expect(resolution.find('option[value="1080p"]').exists()).toBe(true)
+
+    await resolution.setValue('1080p')
+    await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video')
+    await flushPromises()
+    expect(resolution.element.value).toBe('720p')
+    wrapper.unmount()
   })
 
   it('restores the historical video generation method, model, ratio, and reference count', async () => {
@@ -804,7 +844,7 @@ describe('CreatorStudioView', () => {
       updatedAt: Date.now(),
       outputs: ['blob:reference-video'],
       aspectRatio: '2:3',
-      resolution: '720p',
+      resolution: '1080p',
       requestedDuration: 10,
       referenceCount: 3,
       videoGenerationMethod: 'reference',
@@ -830,6 +870,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('reference')
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video-1.5')
     expect(wrapper.get<HTMLSelectElement>('#video-aspect').element.value).toBe('2:3')
+    expect(wrapper.get<HTMLSelectElement>('#video-resolution').element.value).toBe('1080p')
     expect(wrapper.get('.reference-field').text()).toContain('当时使用了 3 张参考图')
     wrapper.unmount()
   })
@@ -1091,6 +1132,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLAnchorElement>('.complete-video-card footer a').attributes('download')).toBe('creator-complete-multi-shot-video.mp4')
     expect(wrapper.findAll('.result-segment-grid .result-card')).toHaveLength(2)
     expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['森林推进', '城市跟拍'])
+    expect(wrapper.get('.result-parameter-details').attributes('open')).toBeUndefined()
     expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 1：森林推进')
     expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 2：城市跟拍')
   })
@@ -1206,11 +1248,11 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
-      'Grok Imagine 视频 · 标准版',
-      'Grok Imagine 1.5 视频 · 图生版',
+      'grok-imagine-video',
+      'grok-imagine-video-1.5',
     ])
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video')
-    expect(wrapper.get('#creator-model').text()).not.toContain('grok-imagine-video')
+    expect(wrapper.get('#creator-model').text()).toContain('grok-imagine-video')
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('text')
     expect(wrapper.find('.reference-field').exists()).toBe(false)
     expect(wrapper.get<HTMLSelectElement>('#video-aspect').findAll('option').map(option => option.element.value)).toEqual([
@@ -1494,7 +1536,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('#creator-output-size').text()).toContain('4K · 3840×2160')
     expect(wrapper.get('.field-block .stepper').text()).toContain('3 张')
     expect(wrapper.get('.field-block .stepper button:last-child').attributes('disabled')).toBeUndefined()
-    expect(wrapper.text()).toContain('4K 使用 gpt-image-2 逐张提交')
+    expect(wrapper.text()).not.toContain('4K 使用 gpt-image-2 逐张提交')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({

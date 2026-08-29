@@ -76,8 +76,8 @@
               @click="selectWork(work)"
             ></button>
             <span class="history-preview">
-              <img v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" alt="" />
-              <video v-else-if="work.type === 'video' && work.outputs[0]" :src="work.outputs[0]" muted />
+              <img v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" alt="" loading="lazy" decoding="async" />
+              <video v-else-if="work.type === 'video' && work.outputs[0]" :src="work.outputs[0]" muted preload="none" />
               <Icon v-else :name="work.type === 'image' ? 'sparkles' : 'play'" size="sm" />
               <span v-if="work.status === 'pending'" class="history-status pending"></span>
               <span v-else-if="work.status === 'failed'" class="history-status failed"></span>
@@ -193,6 +193,7 @@
                 playsinline
                 preload="metadata"
                 @error="handleVideoPlaybackError(selectedWork)"
+                @loadedmetadata="handleVideoMetadata($event, selectedWork)"
               ></video>
               <footer>
                 <div>
@@ -233,7 +234,7 @@
               >
                 <img :src="output" :alt="`生成图片 ${index + 1}`" />
               </button>
-              <video v-else class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)"></video>
+              <video v-else class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)" @loadedmetadata="handleVideoMetadata($event, selectedWork)"></video>
               <div class="result-actions">
                 <div class="result-description">
                   <strong>{{ selectedWork.type === 'video' ? `镜头 ${index + 1}` : selectedWork.provider }}</strong>
@@ -269,7 +270,7 @@
           <div v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="result-grid result-segment-grid">
             <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-segment-${index}`" class="result-card">
               <span class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
-              <video class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)"></video>
+              <video class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)" @loadedmetadata="handleVideoMetadata($event, selectedWork)"></video>
               <div class="result-actions">
                 <div class="result-description">
                   <strong>镜头 {{ index + 1 }}</strong>
@@ -285,7 +286,7 @@
             </article>
           </div>
 
-          <div v-if="selectedWork.status !== 'failed' && !selectedWork.outputs.length" class="result-error muted">
+          <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
             <Icon :name="checkingVideoHistory ? 'refresh' : 'clock'" size="lg" :class="{ 'status-check-icon': checkingVideoHistory }" />
             <strong>{{ checkingVideoHistory ? '正在检查任务状态' : '任务仍在处理中' }}</strong>
             <p>{{ checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
@@ -320,7 +321,7 @@
               <article><span>版本</span><strong>{{ selectedWork.version || 'v1' }}</strong></article>
               <article><span>来源</span><strong>{{ selectedWork.source || '初版作品' }}</strong></article>
             </div>
-            <details class="result-parameter-details" open>
+            <details class="result-parameter-details">
               <summary>
                 <span>查看完整提示词与参数</span>
                 <Icon name="chevronDown" size="xs" />
@@ -511,7 +512,7 @@
             >
               <option v-if="loadingModels && !modelOptions.length" value="">正在读取可用模型...</option>
               <option v-else-if="!modelOptions.length" value="">请先创建 Key</option>
-              <option v-for="model in modelOptions" :key="model" :value="model">{{ modelLabel(model) }}</option>
+              <option v-for="model in modelOptions" :key="model" :value="model">{{ model }}</option>
             </select>
           </div>
 
@@ -662,7 +663,7 @@
                 </select>
               </div>
               <div class="field-block">
-                <label for="creator-resolution">分辨率</label>
+                <label for="creator-resolution">{{ imageCapability === 'grok' ? '清晰度' : '分辨率' }}</label>
                 <select id="creator-resolution" v-model="imageResolution" class="studio-input">
                   <option v-for="resolution in imageResolutionOptions" :key="resolution" :value="resolution">{{ imageResolutionLabel(resolution) }}</option>
                 </select>
@@ -693,7 +694,6 @@
                 <strong>{{ outputCount }} 张</strong>
                 <button type="button" title="增加数量" :disabled="outputCount >= maxOutputCount" @click="outputCount++"><Icon name="plus" size="sm" /></button>
               </div>
-              <small v-if="imageCapability === 'image2' && imageResolution === '4K'" class="creator-field-hint">4K 使用 gpt-image-2 逐张提交，最多可连续生成 4 张。</small>
             </div>
           </template>
 
@@ -716,6 +716,7 @@
                 <select id="video-resolution" v-model="videoResolution" class="studio-input">
                   <option value="480p">480p</option>
                   <option value="720p">720p</option>
+                  <option v-if="videoSupports1080p" value="1080p">1080p</option>
                 </select>
               </div>
             </div>
@@ -1135,6 +1136,8 @@ const imageResolutionOptions = computed(() => {
   }
   return ['1K', '2K']
 })
+const videoSupports1080p = computed(() => /grok-imagine-video-1\.5(?:$|-)/i.test(selectedModel.value))
+const videoResolutionOptions = computed(() => (videoSupports1080p.value ? ['480p', '720p', '1080p'] : ['480p', '720p']))
 const aspectOptions = computed(() => {
   if (studioMode.value === 'image' && imageCapability.value === 'image2') {
     return image2SizeOptions[imageResolution.value] || image2SizeOptions['1K']
@@ -1500,7 +1503,7 @@ function clearReferenceImages() {
 
 function imageResolutionLabel(resolution: string) {
   if (imageCapability.value === 'grok') {
-    return resolution === '2K' ? '2K · 2048' : '1K · 1024'
+    return resolution === '2K' ? '2K · 超清' : '1K · 快速'
   }
   if (imageCapability.value === 'banner') {
     if (resolution === '4K') return '4K · 超清'
@@ -2281,6 +2284,7 @@ async function removeWork(work: CreatorHistoryItem) {
 
 async function restoreWorkSettings(work: CreatorHistoryItem) {
   restoringWorkSettings = true
+  const historicalVideoResolution = work.type === 'video' ? work.resolution || '720p' : ''
   try {
     if (studioMode.value !== work.type) {
       studioMode.value = work.type
@@ -2301,7 +2305,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       transparentBackground.value = work.background === 'transparent'
     } else {
       aspectRatio.value = work.aspectRatio || '16:9'
-      videoResolution.value = work.resolution || '720p'
+      videoResolution.value = historicalVideoResolution
       videoGenerationMethod.value = work.videoGenerationMethod
         || (work.referenceCount ? 'image' : 'text')
     }
@@ -2335,6 +2339,11 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     if (work.model) {
       if (!modelOptions.value.includes(work.model)) modelOptions.value = [work.model, ...modelOptions.value]
       selectedModel.value = work.model
+    }
+    if (work.type === 'video') {
+      videoResolution.value = historicalVideoResolution === '1080p' && !videoSupports1080p.value
+        ? '720p'
+        : historicalVideoResolution
     }
   } finally {
     restoringWorkSettings = false
@@ -2519,6 +2528,12 @@ function workResolutionLabel(work: CreatorHistoryItem) {
 }
 
 function resultAspectRatio(work: CreatorHistoryItem) {
+  if (work.type === 'video') {
+    const dimensions = /^(\d+)x(\d+)$/.exec(work.actualOutputSize || '')
+    if (dimensions && Number(dimensions[1]) > 0 && Number(dimensions[2]) > 0) {
+      return `${dimensions[1]} / ${dimensions[2]}`
+    }
+  }
   const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(work.aspectRatio || '')
   return match ? `${match[1]} / ${match[2]}` : work.type === 'video' ? '16 / 9' : '1 / 1'
 }
@@ -2532,6 +2547,16 @@ function resultMediaStyle(work: CreatorHistoryItem) {
   return work.type === 'video' || resultIsLandscape(work)
     ? { aspectRatio: resultAspectRatio(work) }
     : undefined
+}
+
+function handleVideoMetadata(event: Event, work: CreatorHistoryItem) {
+  const video = event.currentTarget as HTMLVideoElement
+  if (work.type !== 'video' || !video.videoWidth || !video.videoHeight) return
+
+  const dimensions = `${video.videoWidth}x${video.videoHeight}`
+  if (work.actualOutputSize === dimensions) return
+  work.actualOutputSize = dimensions
+  void persistWork(work)
 }
 
 function formatCompletionDuration(work: CreatorHistoryItem) {
@@ -2647,22 +2672,6 @@ function handleVideoPlaybackError(work: CreatorHistoryItem) {
   void refreshVideoWork(work, true)
 }
 
-function modelLabel(model: string) {
-  const videoLabels: Record<string, string> = {
-    'grok-imagine-video': 'Grok Imagine 视频 · 标准版',
-    'grok-imagine-video-1.5': 'Grok Imagine 1.5 视频 · 图生版',
-  }
-  if (videoLabels[model]) return videoLabels[model]
-
-  const grokImageLabels: Record<string, string> = {
-    'grok-imagine-image': 'Grok 标准版生图',
-    'grok-imagine-image-quality': 'Grok 高质量版生图',
-  }
-  if (grokImageLabels[model]) return grokImageLabels[model]
-
-  return model
-}
-
 function maskedKey(key: string) {
   if (!key) return '已启用'
   if (key.length <= 10) return `${key.slice(0, 3)}...`
@@ -2732,6 +2741,10 @@ watch(imageResolution, resolution => {
   if (resolution === '4K' && !image2StandardModel()) imageResolution.value = '2K'
 })
 
+watch(videoResolutionOptions, options => {
+  if (!options.includes(videoResolution.value)) videoResolution.value = '720p'
+})
+
 watch(aspectOptions, options => {
   if (studioMode.value === 'image' && imageCapability.value === 'image2') return
   if (!options.some(option => option.value === aspectRatio.value)) {
@@ -2772,6 +2785,9 @@ onBeforeUnmount(() => {
   --creator-radius: 12px;
   --creator-radius-inner: 12px;
   --creator-radius-large: 12px;
+  --creator-surface-radius: 16px;
+  --creator-workspace-gutter: 2rem;
+  --creator-workspace-width: calc(100% - 4rem);
   position: relative;
   display: flex;
   height: calc(100vh - 8rem);
@@ -2917,13 +2933,13 @@ onBeforeUnmount(() => {
 .studio-grid {
   position: relative;
   display: grid;
-  grid-template-columns: 260px minmax(430px, 1fr) 370px;
+  grid-template-columns: clamp(17rem, 19vw, 20rem) minmax(0, 1fr) clamp(22rem, 23vw, 26rem);
   min-height: 0;
   flex: 1 1 auto;
   overflow: hidden;
   background: #f3f8f7;
 }
-.studio-grid.history-collapsed { grid-template-columns: minmax(430px, 1fr) 370px; }
+.studio-grid.history-collapsed { grid-template-columns: minmax(0, 1fr) clamp(22rem, 23vw, 26rem); }
 .history-panel,
 .settings-panel { min-width: 0; height: 100%; background: #fff; }
 .history-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--creator-line); }
@@ -2942,11 +2958,12 @@ onBeforeUnmount(() => {
 .history-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; border-radius: 6px; color: #8090a6; font-size: 12px; font-weight: 650; }
 .history-tabs button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 2px 8px rgb(30 72 67 / 8%); }
 
-.history-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 12px 18px; scrollbar-color: #b7d5d0 transparent; scrollbar-width: thin; }
+.history-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 12px 18px; scrollbar-color: #c5cbd1 transparent; scrollbar-width: thin; }
 .history-list::-webkit-scrollbar { width: 8px; }
 .history-list::-webkit-scrollbar-track { background: transparent; }
-.history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #b7d5d0; }
-.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; min-height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: 8px; text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); transition: border-color 150ms ease, background-color 150ms ease, box-shadow 150ms ease; }
+.history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
+.history-list::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
+.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; min-height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: 8px; text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
 .history-item:hover { border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
 .history-item.active { border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
 .history-item-hitbox { position: absolute; z-index: 1; inset: 0; border-radius: inherit; }
@@ -2957,21 +2974,18 @@ onBeforeUnmount(() => {
 .history-status { position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; }
 .history-status.pending { background: #f0a63a; }
 .history-status.failed { background: #d84b4b; }
-.history-copy { min-width: 0; align-self: center; transition: padding-right 150ms ease; }
+.history-copy { min-width: 0; padding-right: 48px; align-self: center; }
 .history-copy strong,
 .history-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-copy strong { color: #344054; font-size: 12px; font-weight: 700; }
 .history-copy small { margin-top: 5px; color: #95a1b2; font-size: 10px; }
 .history-preview,
 .history-copy { pointer-events: none; }
-.history-item-actions { position: absolute; z-index: 2; top: 50%; right: 8px; display: flex; align-items: center; justify-content: flex-end; gap: 1px; opacity: 0; transform: translate(4px, -50%); pointer-events: none; transition: opacity 150ms ease, transform 150ms ease; }
-.history-item:hover .history-copy,
-.history-item:focus-within .history-copy,
-.history-item.active .history-copy { padding-right: 48px; }
+.history-item-actions { position: absolute; z-index: 2; top: 50%; right: 8px; display: flex; align-items: center; justify-content: flex-end; gap: 1px; opacity: 0; transform: translateY(-50%); pointer-events: none; transition: opacity 160ms ease; }
 .history-item:hover .history-item-actions,
 .history-item:focus-within .history-item-actions,
-.history-item.active .history-item-actions { opacity: 1; transform: translate(0, -50%); pointer-events: auto; }
-.history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: 6px; color: #8295a4; transition: color 130ms ease, background-color 130ms ease; }
+.history-item.active .history-item-actions { opacity: 1; pointer-events: auto; }
+.history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: 6px; color: #8295a4; }
 .history-item-actions button:hover { color: var(--creator-accent-strong); background: rgb(255 255 255 / 78%); }
 .history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
 .history-empty { display: grid; justify-items: center; padding: 90px 22px 30px; text-align: center; color: #92a0b3; }
@@ -3001,11 +3015,15 @@ onBeforeUnmount(() => {
 .inspiration-workspace,
 .generation-state,
 .result-workspace,
-.professional-workspace { width: min(100% - 48px, 880px); margin: auto; }
-.inspiration-workspace { padding: 46px 0 64px; }
+.professional-workspace {
+  width: var(--creator-workspace-width);
+  margin-block: auto;
+  margin-inline: var(--creator-workspace-gutter);
+}
+.inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 64px; }
 .inspiration-intro { text-align: center; }
 .inspiration-mark,
-.generation-orbit { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: 8px; color: var(--creator-accent-strong); background: #e8fbf7; }
+.generation-orbit { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: 20px; color: var(--creator-accent-strong); background: #e8fbf7; }
 .eyebrow { margin: 18px 0 10px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: 0; }
 .inspiration-intro h2,
 .generation-state h2,
@@ -3013,13 +3031,13 @@ onBeforeUnmount(() => {
 .inspiration-intro > p:last-child,
 .generation-state > p:not(.eyebrow) { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
 
-.featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: 8px; color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
+.featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-surface-radius); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
 .brief-topline { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; min-height: 60px; margin: 0 24px; border-bottom: 1px solid #2b3e3b; color: #9db3af; font-size: 11px; font-weight: 700; }
 .brief-topline > span:first-child { display: flex; align-items: center; gap: 6px; color: #b5d8d1; }
 .brief-topline > div { display: flex; gap: 7px; }
 .brief-topline button { width: 32px; height: 32px; border-color: #334b47; color: #b9cbc7; background: #182825; }
-.brief-stage { min-height: 212px; }
-.brief-body { display: grid; grid-template-columns: .9fr 1.2fr; min-height: 212px; padding: 24px; }
+.brief-stage { min-height: 208px; }
+.brief-body { display: grid; grid-template-columns: .88fr 1.12fr; min-height: 208px; padding: 24px; }
 .brief-summary { padding-right: 24px; border-right: 1px solid #33423f; }
 .brief-summary > span { display: inline-flex; padding: 5px 9px; border: 1px solid #9a7744; border-radius: 6px; color: #d6b374; background: #28251e; font-size: 10px; }
 .brief-summary h3 { margin: 16px 0 7px; color: #fff; font-size: 28px; font-weight: 760; }
@@ -3057,7 +3075,7 @@ onBeforeUnmount(() => {
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--creator-accent-strong); transition: width .6s ease; }
 .progress-track.indeterminate span { width: 34%; animation: creatorProgress 1.7s ease-in-out infinite; }
 .generation-note { margin-top: 12px; color: #8798ac; font-size: 12px; font-weight: 500; line-height: 1.5; }
-.result-workspace { padding: 32px 0 64px; }
+.result-workspace { padding: 32px 0 24px; }
 .result-heading { align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
 .result-heading > div { min-width: 0; }
 .result-heading .eyebrow { margin: 0 0 8px; }
@@ -3091,7 +3109,7 @@ onBeforeUnmount(() => {
 .segment-heading > span { color: #8593a5; font-size: 11px; }
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .result-grid.single { grid-template-columns: minmax(0, 1fr); }
-.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; border-radius: 8px; background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
+.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; border-radius: var(--creator-surface-radius); background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
 .result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: 6px; color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
 .result-media {
   position: relative;
@@ -3111,12 +3129,13 @@ onBeforeUnmount(() => {
   height: 100%;
   object-fit: contain;
 }
+.result-media.landscape img { object-fit: cover; }
 .result-media.video { display: block; width: 100%; height: auto; object-fit: contain; }
-.result-actions { justify-content: space-between; gap: 16px; min-height: 66px; padding: 9px 10px 9px 14px; color: #8b98aa; font-size: 11px; }
+.result-actions { justify-content: space-between; gap: 16px; min-height: 76px; padding: 11px 10px 11px 14px; color: #64748b; font-size: 13px; }
 .result-description { min-width: 0; flex: 1; }
-.result-description strong { color: var(--creator-accent-strong); font-size: 11px; }
-.result-description span { margin-left: 5px; color: #91a0b2; font-size: 9px; }
-.result-description p { overflow: hidden; margin: 5px 0 0; color: #68778b; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.result-description strong { color: var(--creator-accent-strong); font-size: 14px; }
+.result-description span { margin-left: 6px; color: #718096; font-size: 12px; }
+.result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
 .result-segment-grid .result-description p { display: -webkit-box; line-height: 1.45; text-overflow: initial; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
@@ -3134,24 +3153,24 @@ onBeforeUnmount(() => {
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { margin-top: 14px; }
 .result-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.result-stat-grid article { min-width: 0; min-height: 66px; padding: 12px; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
+.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
 .result-stat-grid span,
-.result-parameter-details div > span { display: block; color: #91a0b2; font-size: 9px; }
-.result-stat-grid strong { display: block; overflow: hidden; margin-top: 7px; color: #334155; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.result-parameter-details div > span { display: block; color: #64748b; font-size: 12px; }
+.result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .result-parameter-details { margin-top: 9px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
-.result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 42px; padding: 0 13px; color: #78879a; font-size: 10px; cursor: pointer; list-style: none; }
+.result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 16px; color: #526176; font-size: 13px; cursor: pointer; list-style: none; }
 .result-parameter-details summary::-webkit-details-marker { display: none; }
 .result-parameter-details summary svg { color: var(--creator-accent-strong); transition: transform 160ms ease; }
 .result-parameter-details[open] summary svg { transform: rotate(180deg); }
 .result-parameter-details[open] summary { border-bottom: 1px solid #e2e9e8; }
-.result-parameter-details > div { padding: 12px 13px 0; }
-.result-parameter-details > div:last-child { padding-bottom: 14px; }
-.result-parameter-details p { margin: 6px 0 0; color: #435267; font-size: 10px; line-height: 1.7; }
+.result-parameter-details > div { padding: 15px 16px 0; }
+.result-parameter-details > div:last-child { padding-bottom: 17px; }
+.result-parameter-details p { margin: 7px 0 0; color: #334155; font-size: 13px; line-height: 1.75; }
 .result-parameter-details .full-prompt { white-space: pre-wrap; }
 .secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: 7px; background: #fff; font-size: 12px; font-weight: 700; }
 .canvas-footnote { flex: 0 0 auto; gap: 6px; margin: 0 24px 14px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #9aa8b8; font-size: 10px; }
 
-.professional-workspace { align-self: flex-start; margin-top: 28px; margin-bottom: 70px; padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
+.professional-workspace { align-self: stretch; margin-top: 28px; margin-bottom: 70px; padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
 .sequence-shot { cursor: pointer; }
 .sequence-shot.active { border-color: #55d4c2; background: #f0fcf9; box-shadow: 0 7px 18px rgb(24 138 121 / 10%); }
 .sequence-shot:focus-visible { outline: 2px solid #39b9a5; outline-offset: 2px; }
@@ -3381,8 +3400,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .history-tabs,
 .history-item,
 .history-empty > span,
-.featured-brief,
-.result-card,
 .result-error,
 .capability-switch,
 .studio-input,
@@ -3426,8 +3443,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .settings-heading > svg { width: 16px; height: 16px; }
 
 .modal-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 58%); backdrop-filter: blur(5px); }
-.image-preview { z-index: 80; }
-.image-preview img { max-width: min(1200px, calc(100vw - 64px)); max-height: calc(100vh - 64px); object-fit: contain; }
+.image-preview { z-index: 80; background: rgb(15 23 42 / 80%); }
+.image-preview img { max-width: calc(100vw - 96px); max-height: calc(100vh - 96px); object-fit: contain; }
 .preview-close { position: fixed; top: 18px; right: 18px; border-color: rgb(255 255 255 / 30%); color: #fff; background: rgb(17 24 39 / 75%); }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
@@ -3515,12 +3532,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .prompt-page-actions button { border-color: #354643; color: #c3cfcc; background: #172321; }
 
 @media (max-width: 1380px) {
-  .studio-grid { grid-template-columns: 220px minmax(390px, 1fr) 350px; }
-  .studio-grid.history-collapsed { grid-template-columns: minmax(390px, 1fr) 350px; }
-  .inspiration-workspace,
-  .generation-state,
-  .result-workspace,
-  .professional-workspace { width: min(100% - 34px, 780px); }
+  .studio-grid { grid-template-columns: 17rem minmax(390px, 1fr) 21rem; }
+  .studio-grid.history-collapsed { grid-template-columns: minmax(390px, 1fr) 21rem; }
 }
 
 @media (max-width: 1120px) {
@@ -3543,10 +3556,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .settings-panel { order: 1; height: auto; border-bottom: 1px solid var(--creator-line); border-left: 0; }
   .settings-scroll { height: auto; max-height: none; padding: 18px 16px 22px; scrollbar-gutter: auto; }
   .canvas-panel { order: 2; height: auto; min-height: 610px; overflow: visible; }
-  .inspiration-workspace,
-  .generation-state,
-  .result-workspace,
-  .professional-workspace { width: calc(100% - 24px); }
   .inspiration-workspace { padding-top: 30px; }
   .professional-workspace { margin-top: 16px; padding: 13px; }
   .sequence-header { grid-template-columns: minmax(0, 1fr) 38px; }
@@ -3586,7 +3595,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 }
 
 @media (hover: none) {
-  .history-copy { padding-right: 48px; }
-  .history-item-actions { opacity: 1; transform: translate(0, -50%); pointer-events: auto; }
+  .history-item-actions { opacity: 1; pointer-events: auto; }
 }
 </style>
