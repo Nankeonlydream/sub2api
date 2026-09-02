@@ -18,6 +18,7 @@ const {
   createVideo,
   getVideoStatus,
   getVideoContent,
+  downloadImage,
   showError,
   showInfo,
   showSuccess,
@@ -33,6 +34,7 @@ const {
   createVideo: vi.fn(),
   getVideoStatus: vi.fn(),
   getVideoContent: vi.fn(),
+  downloadImage: vi.fn(),
   showError: vi.fn(),
   showInfo: vi.fn(),
   showSuccess: vi.fn(),
@@ -57,6 +59,7 @@ vi.mock('@/api/creator', () => ({
   createCreatorVideo: createVideo,
   getCreatorVideoStatus: getVideoStatus,
   getCreatorVideoContent: getVideoContent,
+  downloadCreatorImage: downloadImage,
 }))
 
 vi.mock('@/services/creatorHistory', () => ({
@@ -154,6 +157,7 @@ describe('CreatorStudioView', () => {
       url: '/v1/videos/video-task-1/content',
     })
     getVideoContent.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
+    downloadImage.mockResolvedValue(new Blob(['image'], { type: 'image/png' }))
     vi.stubGlobal('URL', {
       ...URL,
       createObjectURL: vi.fn(() => 'blob:creator-video'),
@@ -167,6 +171,9 @@ describe('CreatorStudioView', () => {
         stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
       },
     })
+    await flushPromises()
+    expect(wrapper.findAll('.capability-switch button')[0].classes()).toContain('active')
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
 
     expect(wrapper.text()).toContain('需要创建 Key')
@@ -195,8 +202,15 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
 
     expect(wrapper.findAll('.capability-switch .online-dot')).toHaveLength(3)
+    expect(wrapper.findAll('.capability-switch button').map(button => button.text().trim())).toEqual([
+      'Image2 生图',
+      'Grok 生图',
+      'Banner 生图',
+    ])
     expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
       'grok-imagine-image',
       'grok-imagine-image-quality',
@@ -268,9 +282,11 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-image')
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await wrapper.vm.$nextTick()
 
     const loadingSelect = wrapper.get<HTMLSelectElement>('#creator-model')
@@ -375,13 +391,13 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     const oversized = new File(['oversized'], 'large-reference.png', { type: 'image/png' })
-    Object.defineProperty(oversized, 'size', { value: 5 * 1024 * 1024 + 1 })
+    Object.defineProperty(oversized, 'size', { value: 10 * 1024 * 1024 + 1 })
     const input = wrapper.get<HTMLInputElement>('input[type="file"]')
     Object.defineProperty(input.element, 'files', { configurable: true, value: [oversized] })
     await input.trigger('change')
 
     expect(showError).toHaveBeenCalledTimes(1)
-    expect(showError).toHaveBeenCalledWith('large-reference.png 超过 5MB')
+    expect(showError).toHaveBeenCalledWith('large-reference.png 超过 10MB')
     expect(wrapper.find('.reference-item').exists()).toBe(false)
     wrapper.unmount()
   })
@@ -654,11 +670,11 @@ describe('CreatorStudioView', () => {
       outputCount: 1,
     } as const
     listHistory.mockResolvedValue([work])
-    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
-    let resolveFetch: ((value: unknown) => void) | undefined
-    const fetchMock = vi.fn().mockReturnValue(new Promise(resolve => { resolveFetch = resolve }))
-    vi.stubGlobal('fetch', fetchMock)
+    let resolveDownload: ((value: Blob) => void) | undefined
+    downloadImage.mockReturnValue(new Promise(resolve => { resolveDownload = resolve }))
 
     const wrapper = mount(CreatorStudioView, {
       global: {
@@ -672,14 +688,11 @@ describe('CreatorStudioView', () => {
     await button.trigger('click')
     await button.trigger('click')
 
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(downloadImage).toHaveBeenCalledTimes(1)
+    expect(downloadImage).toHaveBeenCalledWith(image2Key.key, output)
     expect(button.attributes('disabled')).toBeDefined()
 
-    resolveFetch?.({
-      ok: true,
-      status: 200,
-      blob: vi.fn().mockResolvedValue(new Blob(['image'], { type: 'image/png' })),
-    })
+    resolveDownload?.(new Blob(['image'], { type: 'image/png' }))
     await flushPromises()
     expect(wrapper.findAll('.reference-item')).toHaveLength(1)
   })
@@ -720,7 +733,7 @@ describe('CreatorStudioView', () => {
     anchorClick.mockRestore()
   })
 
-  it('downloads a legacy cross-origin image through a local blob URL', async () => {
+  it('downloads a cross-origin image through the authenticated same-origin proxy', async () => {
     const work = {
       id: 'legacy-image-download-1',
       type: 'image',
@@ -734,16 +747,17 @@ describe('CreatorStudioView', () => {
       outputs: ['https://image.example.test/tmp/result.png'],
     } as const
     listHistory.mockResolvedValue([work])
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     const imageBlob = new Blob(['image'], { type: 'image/png' })
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      status: 200,
-      blob: vi.fn().mockResolvedValue(imageBlob),
-    })
-    vi.stubGlobal('fetch', fetchMock)
+    let resolveDownload: ((value: Blob) => void) | undefined
+    downloadImage.mockReturnValue(new Promise(resolve => { resolveDownload = resolve }))
     let downloaded: { href: string; filename: string } | undefined
     const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
-      downloaded = { href: this.href, filename: this.download }
+      downloaded = {
+        href: this.href,
+        filename: this.download,
+      }
     })
 
     const wrapper = mount(CreatorStudioView, {
@@ -753,10 +767,16 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
     await wrapper.get('.history-item-hitbox').trigger('click')
-    await wrapper.findAll('.result-media-actions button')[1].trigger('click')
+    const downloadButton = wrapper.findAll('.result-media-actions button')[1]
+    await downloadButton.trigger('click')
+    await downloadButton.trigger('click')
+
+    expect(downloadImage).toHaveBeenCalledTimes(1)
+    expect(downloadButton.attributes('disabled')).toBeDefined()
+    resolveDownload?.(imageBlob)
     await flushPromises()
 
-    expect(fetchMock).toHaveBeenCalledWith(work.outputs[0])
+    expect(downloadImage).toHaveBeenCalledWith(image2Key.key, work.outputs[0])
     expect(URL.createObjectURL).toHaveBeenCalledWith(imageBlob)
     expect(downloaded?.href).toBe('blob:creator-video')
     expect(downloaded?.filename).toMatch(/^creator-\d+-1\.png$/)
@@ -1406,6 +1426,8 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形森林肖像')
     await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('1:1')
@@ -1432,6 +1454,8 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏海底晚宴')
     await wrapper.get<HTMLSelectElement>('#creator-aspect').setValue('16:9')
@@ -1454,7 +1478,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     const modelSelect = wrapper.get<HTMLSelectElement>('#creator-model')
     expect(modelSelect.element.value).toBe('gpt-image-2')
@@ -1490,7 +1514,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
 
@@ -1572,7 +1596,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('自定义尺寸产品图')
     await wrapper.get('#creator-output-size').trigger('click')
@@ -1608,7 +1632,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
     await wrapper.get('#creator-output-size').trigger('click')
@@ -1642,7 +1666,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('测试兼容账号提示')
     await wrapper.get('.generate-button').trigger('click')
@@ -1664,7 +1688,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('测试固定 4K 映射提示')
     await wrapper.get('.generate-button').trigger('click')
@@ -1686,7 +1710,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('测试单图限制提示')
     await wrapper.get('.generate-button').trigger('click')
@@ -1708,6 +1732,8 @@ describe('CreatorStudioView', () => {
         stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
       },
     })
+    await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('高质量方形产品图')
@@ -1735,6 +1761,8 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
+    await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('参数错误不应重试')
     await wrapper.get('.generate-button').trigger('click')
@@ -1759,6 +1787,8 @@ describe('CreatorStudioView', () => {
         stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
       },
     })
+    await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一张方形产品图')
@@ -1822,6 +1852,8 @@ describe('CreatorStudioView', () => {
         stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
       },
     })
+    await flushPromises()
+    await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一张正在生成的图片')

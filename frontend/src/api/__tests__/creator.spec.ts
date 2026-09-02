@@ -310,6 +310,28 @@ describe('creator gateway API', () => {
     )
   })
 
+  it('downloads a cross-origin creator image through the gateway', async () => {
+    const imageBlob = new Blob(['image'], { type: 'image/png' })
+    vi.mocked(fetch).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'image/png' }),
+      blob: vi.fn().mockResolvedValue(imageBlob),
+    } as unknown as Response)
+    const { downloadCreatorImage } = await import('@/api/creator')
+
+    await expect(downloadCreatorImage('sk-image', 'https://cdn.example/result.png')).resolves.toBe(imageBlob)
+
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toMatch(/\/v1\/images\/download$/)
+    expect(init?.method).toBe('POST')
+    expect(init?.headers).toMatchObject({
+      Authorization: 'Bearer sk-image',
+      'Content-Type': 'application/json',
+    })
+    expect(JSON.parse(String(init?.body))).toEqual({ url: 'https://cdn.example/result.png' })
+  })
+
   it('normalizes generic binary video content to MP4', async () => {
     const genericBlob = new Blob(['video'], { type: 'application/octet-stream' })
     vi.mocked(fetch).mockResolvedValueOnce({

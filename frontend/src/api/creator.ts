@@ -454,6 +454,20 @@ export async function getCreatorVideoContent(apiKey: string, requestId: string):
   return blob.type.startsWith('video/') ? blob : blob.slice(0, blob.size, 'video/mp4')
 }
 
+export async function downloadCreatorImage(apiKey: string, url: string): Promise<Blob> {
+  const response = await fetch(buildGatewayUrl('/v1/images/download'), {
+    method: 'POST',
+    headers: authHeaders(apiKey, { 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ url }),
+  })
+  if (!response.ok) throw await parseCreatorError(response)
+  const blob = await response.blob()
+  if (!blob.size || !blob.type.startsWith('image/')) {
+    throw new Error('图片下载接口返回了无效内容，请稍后重试')
+  }
+  return blob
+}
+
 export function isCreatorVideoComplete(status: string): boolean {
   return VIDEO_COMPLETE_STATUSES.has(status.trim().toLowerCase())
 }

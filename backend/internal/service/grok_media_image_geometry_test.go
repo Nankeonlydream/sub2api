@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -47,8 +48,53 @@ func TestParseGrokMediaRequestKeepsImageResolutionOutOfVideoNormalize(t *testing
 
 	info := ParseGrokMediaRequest("application/json", []byte(`{"model":"grok-imagine-image-2.0","resolution":"2K","aspect_ratio":"16:9"}`))
 	require.Equal(t, "2k", info.ImageResolution)
+	require.Equal(t, ImageBillingSize2K, info.SizeTier)
+	require.Equal(t, "2k", info.imageBillingInputSize())
+	require.True(t, info.hasAuthoritativeImageBillingInput())
 	require.Equal(t, "16:9", info.AspectRatio)
 	require.Equal(t, VideoBillingResolution480P, info.Resolution)
+}
+
+func TestGrokMediaImageBillingUsesExplicitResolution(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		resolution      string
+		outputSize      string
+		wantBillingSize string
+	}{
+		{name: "selected 1K ignores larger response metadata", resolution: "1K", outputSize: "2048x2048", wantBillingSize: ImageBillingSize1K},
+		{name: "selected 2K ignores smaller response metadata", resolution: "2K", outputSize: "1024x1024", wantBillingSize: ImageBillingSize2K},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			requestInfo := ParseGrokMediaRequest(
+				"application/json",
+				[]byte(`{"model":"grok-imagine-image-2.0","resolution":"`+tt.resolution+`","aspect_ratio":"1:1"}`),
+			)
+			meta := grokMediaUsageFromResponse(
+				GrokMediaEndpointImagesGenerations,
+				requestInfo,
+				[]byte(`{"data":[{"url":"https://images.test/result.png","size":"`+tt.outputSize+`"}]}`),
+			)
+			result := &OpenAIForwardResult{
+				ImageCount:                  meta.ImageCount,
+				ImageSize:                   meta.ImageSize,
+				ImageInputSize:              meta.ImageInputSize,
+				ImageOutputSizes:            meta.ImageOutputSizes,
+				ImageInputSizeAuthoritative: meta.ImageInputSizeAuthoritative,
+			}
+
+			ApplyOpenAIImageBillingResolution(result)
+
+			require.Equal(t, tt.wantBillingSize, result.ImageSize)
+			require.Equal(t, strings.ToLower(tt.resolution), result.ImageInputSize)
+			require.Equal(t, tt.outputSize, result.ImageOutputSize)
+			require.Equal(t, ImageSizeSourceInput, result.ImageSizeSource)
+		})
+	}
 }
 
 func TestGrokImagineAspectRatioFromSize(t *testing.T) {

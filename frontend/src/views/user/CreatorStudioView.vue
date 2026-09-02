@@ -140,7 +140,7 @@
           >
             <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
           </div>
-          <small class="generation-note">{{ generationMode === 'video' ? '生成完成后会自动加载并保存到本地历史' : '作品生成完成后会自动保存到本地历史' }}</small>
+          <small class="generation-note">创作过程中请勿离开当前页面，以免影响生成结果。</small>
         </div>
 
         <div v-else-if="selectedWork" class="result-workspace">
@@ -245,7 +245,13 @@
                   <button type="button" class="icon-action" :title="selectedWork.type === 'image' ? '预览作品' : '播放视频'" @click="previewResult(output, selectedWork.type, index)">
                     <Icon :name="selectedWork.type === 'image' ? 'eye' : 'play'" size="sm" />
                   </button>
-                  <button type="button" class="icon-action" title="下载作品" @click="downloadOutput(output, selectedWork, index)">
+                  <button
+                    type="button"
+                    class="icon-action"
+                    :title="downloadingOutputKey === `${selectedWork.id}:${index}` ? '正在下载' : '下载作品'"
+                    :disabled="Boolean(downloadingOutputKey)"
+                    @click="downloadOutput(output, selectedWork, index)"
+                  >
                     <Icon name="download" size="sm" />
                   </button>
                   <button
@@ -279,7 +285,13 @@
                 </div>
                 <div class="result-media-actions">
                   <button type="button" class="icon-action" title="播放镜头" @click="previewResult(output, selectedWork.type, index)"><Icon name="play" size="sm" /></button>
-                  <button type="button" class="icon-action" title="下载镜头" @click="downloadOutput(output, selectedWork, index)"><Icon name="download" size="sm" /></button>
+                  <button
+                    type="button"
+                    class="icon-action"
+                    :title="downloadingOutputKey === `${selectedWork.id}:${index}` ? '正在下载' : '下载镜头'"
+                    :disabled="Boolean(downloadingOutputKey)"
+                    @click="downloadOutput(output, selectedWork, index)"
+                  ><Icon name="download" size="sm" /></button>
                   <button type="button" class="icon-action" title="继续创作" @click="continueCreating"><Icon name="plus" size="sm" /></button>
                 </div>
               </div>
@@ -851,6 +863,7 @@ import { keysAPI } from '@/api/keys'
 import { userGroupsAPI } from '@/api/groups'
 import {
   createCreatorVideo,
+  downloadCreatorImage,
   generateCreatorImage,
   getCreatorVideoContent,
   getCreatorVideoStatus,
@@ -868,6 +881,9 @@ type ImageCapability = 'grok' | 'image2' | 'banner'
 type GenerationPhase = 'submitting' | 'generating'
 type ImageSizeMode = 'auto' | 'ratio' | 'custom'
 type VideoGenerationMethod = 'text' | 'image' | 'reference'
+
+const MAX_REFERENCE_IMAGE_SIZE_MB = 10
+const MAX_REFERENCE_IMAGE_SIZE_BYTES = MAX_REFERENCE_IMAGE_SIZE_MB * 1024 * 1024
 
 interface PromptTemplate {
   title: string
@@ -957,8 +973,8 @@ const videoTemplates: PromptTemplate[] = [
 ]
 
 const imageCapabilities: Array<{ id: ImageCapability; label: string }> = [
-  { id: 'grok', label: 'Grok 生图' },
   { id: 'image2', label: 'Image2 生图' },
+  { id: 'grok', label: 'Grok 生图' },
   { id: 'banner', label: 'Banner 生图' },
 ]
 
@@ -1053,7 +1069,7 @@ const imageSizeModes: Array<{ value: ImageSizeMode; label: string }> = [
 const appStore = useAppStore()
 const studioMode = ref<StudioMode>('image')
 const historyFilter = ref<StudioMode>('image')
-const imageCapability = ref<ImageCapability>('grok')
+const imageCapability = ref<ImageCapability>('image2')
 const historyCollapsed = ref(false)
 const groups = ref<Group[]>([])
 const apiKeys = ref<ApiKey[]>([])
@@ -1086,6 +1102,7 @@ const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
 const referencingOutputKey = ref('')
+const downloadingOutputKey = ref('')
 const activeTemplateIndex = ref(0)
 const bootstrapping = ref(false)
 const loadingModels = ref(false)
@@ -1181,7 +1198,7 @@ const referenceUploadDescription = computed(() => {
     : studioMode.value === 'video'
       ? '用于保持主体和风格一致'
       : ''
-  return ['PNG / JPG / WEBP', '单张不超过 5MB', usage].filter(Boolean).join(' · ')
+  return ['PNG / JPG / WEBP', `单张不超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB`, usage].filter(Boolean).join(' · ')
 })
 const videoGenerationMethodLabel = computed(() => ({
   text: '文生',
@@ -1477,8 +1494,8 @@ function addReferenceFiles(files: File[]) {
       appStore.showError(`${file.name} 不是支持的图片格式`)
       continue
     }
-    if (file.size > 5 * 1024 * 1024) {
-      appStore.showError(`${file.name} 超过 5MB`)
+    if (file.size > MAX_REFERENCE_IMAGE_SIZE_BYTES) {
+      appStore.showError(`${file.name} 超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB`)
       continue
     }
     validFiles.push(file)
@@ -2417,11 +2434,20 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
   if (referencingOutputKey.value) return
   referencingOutputKey.value = `${work.id}:${index}`
   try {
-    const blob = output.startsWith('data:')
-      ? imageDataUrlToBlob(output)
-      : await fetchImageBlob(output)
+    let blob: Blob
+    if (output.startsWith('data:')) {
+      blob = imageDataUrlToBlob(output)
+    } else if (isCrossOriginHttpURL(output)) {
+      const key = findKeyForWork(work)
+      if (!key) throw new Error('未找到图片对应的可用 Key')
+      blob = await downloadCreatorImage(key.key, output)
+    } else {
+      blob = await fetchImageBlob(output)
+    }
     if (!blob.size) throw new Error('图片内容为空')
-    if (blob.size > 5 * 1024 * 1024) throw new Error('图片超过 5MB，无法作为参考图上传')
+    if (blob.size > MAX_REFERENCE_IMAGE_SIZE_BYTES) {
+      throw new Error(`图片超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB，无法作为参考图上传`)
+    }
     const extension = imageFileExtension(output)
     const mimeType = blob.type.startsWith('image/') ? blob.type : `image/${extension === 'jpg' ? 'jpeg' : extension}`
     const file = new File([blob], `creator-reference-${work.id}-${index + 1}.${extension}`, { type: mimeType })
@@ -2631,16 +2657,25 @@ function moveShot(index: number, direction: -1 | 1) {
 }
 
 async function downloadOutput(url: string, work: CreatorHistoryItem, index: number) {
+  if (downloadingOutputKey.value) return
+  const outputKey = `${work.id}:${index}`
+  downloadingOutputKey.value = outputKey
   try {
     const extension = work.type === 'video' ? 'mp4' : imageFileExtension(url)
     const filename = `creator-${Date.now()}-${index + 1}.${extension}`
     let downloadUrl = url
     let temporaryUrl = ''
+    const crossOriginDownload = work.type === 'image' && isCrossOriginHttpURL(url)
     if (work.type === 'video' && work.requestId) {
       const key = findKeyForWork(work)
       const requestId = work.requestId.split(',').map(id => id.trim()).filter(Boolean)[index]
       if (!key || !requestId) throw new Error('未找到视频对应的可用 Key 或任务 ID')
       temporaryUrl = URL.createObjectURL(await getCreatorVideoContent(key.key, requestId))
+      downloadUrl = temporaryUrl
+    } else if (crossOriginDownload) {
+      const key = findKeyForWork(work)
+      if (!key) throw new Error('未找到图片对应的可用 Key')
+      temporaryUrl = URL.createObjectURL(await downloadCreatorImage(key.key, url))
       downloadUrl = temporaryUrl
     } else if (!url.startsWith('blob:') && !url.startsWith('data:')) {
       const response = await fetch(url)
@@ -2656,8 +2691,18 @@ async function downloadOutput(url: string, work: CreatorHistoryItem, index: numb
     anchor.remove()
     if (temporaryUrl) window.setTimeout(() => URL.revokeObjectURL(temporaryUrl), 1000)
   } catch (error) {
-    appStore.showError(errorMessage(error, '作品下载失败'))
+    const message = errorMessage(error, '作品下载失败')
+    appStore.showError(/failed to fetch|network error/i.test(message) ? '下载连接失败，请稍后重试' : message)
+  } finally {
+    if (downloadingOutputKey.value === outputKey) downloadingOutputKey.value = ''
   }
+}
+
+function isCrossOriginHttpURL(url: string) {
+  if (!/^https?:\/\//i.test(url) || typeof window === 'undefined') return false
+  const link = document.createElement('a')
+  link.href = url
+  return link.origin !== window.location.origin
 }
 
 function imageFileExtension(url: string) {
@@ -2986,6 +3031,7 @@ onBeforeUnmount(() => {
 .history-item:focus-within .history-item-actions,
 .history-item.active .history-item-actions { opacity: 1; pointer-events: auto; }
 .history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: 6px; color: #8295a4; }
+.history-item-actions .history-delete { width: 28px; height: 28px; border-radius: 50%; }
 .history-item-actions button:hover { color: var(--creator-accent-strong); background: rgb(255 255 255 / 78%); }
 .history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
 .history-empty { display: grid; justify-items: center; padding: 90px 22px 30px; text-align: center; color: #92a0b3; }
@@ -3155,17 +3201,17 @@ onBeforeUnmount(() => {
 .result-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
 .result-stat-grid span,
-.result-parameter-details div > span { display: block; color: #64748b; font-size: 12px; }
-.result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.result-parameter-details div > span { display: block; color: #64748b; font-size: 10px; }
+.result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .result-parameter-details { margin-top: 9px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
-.result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 16px; color: #526176; font-size: 13px; cursor: pointer; list-style: none; }
+.result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 16px; color: #526176; font-size: 12px; cursor: pointer; list-style: none; }
 .result-parameter-details summary::-webkit-details-marker { display: none; }
 .result-parameter-details summary svg { color: var(--creator-accent-strong); transition: transform 160ms ease; }
 .result-parameter-details[open] summary svg { transform: rotate(180deg); }
 .result-parameter-details[open] summary { border-bottom: 1px solid #e2e9e8; }
 .result-parameter-details > div { padding: 15px 16px 0; }
 .result-parameter-details > div:last-child { padding-bottom: 17px; }
-.result-parameter-details p { margin: 7px 0 0; color: #334155; font-size: 13px; line-height: 1.75; }
+.result-parameter-details p { margin: 7px 0 0; color: #334155; font-size: 12px; line-height: 1.75; }
 .result-parameter-details .full-prompt { white-space: pre-wrap; }
 .secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: 7px; background: #fff; font-size: 12px; font-weight: 700; }
 .canvas-footnote { flex: 0 0 auto; gap: 6px; margin: 0 24px 14px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #9aa8b8; font-size: 10px; }

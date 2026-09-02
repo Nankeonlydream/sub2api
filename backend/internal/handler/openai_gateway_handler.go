@@ -44,6 +44,7 @@ type OpenAIGatewayHandler struct {
 	opsService                 *service.OpsService
 	concurrencyHelper          *ConcurrencyHelper
 	imageLimiter               *imageConcurrencyLimiter
+	creatorImageDownloader     *service.CreatorImageDownloader
 	maxAccountSwitches         int
 	cfg                        *config.Config
 }
@@ -324,11 +325,13 @@ func NewOpenAIGatewayHandler(
 ) *OpenAIGatewayHandler {
 	pingInterval := time.Duration(0)
 	maxAccountSwitches := 3
+	creatorImageDownloadMaxBytes := int64(0)
 	if cfg != nil {
 		pingInterval = time.Duration(cfg.Concurrency.PingInterval) * time.Second
 		if cfg.Gateway.MaxAccountSwitches > 0 {
 			maxAccountSwitches = cfg.Gateway.MaxAccountSwitches
 		}
+		creatorImageDownloadMaxBytes = cfg.ImageStorage.MaxDownloadByte
 	}
 	return &OpenAIGatewayHandler{
 		gatewayService:           gatewayService,
@@ -340,6 +343,7 @@ func NewOpenAIGatewayHandler(
 		opsService:               opsService,
 		concurrencyHelper:        NewConcurrencyHelper(concurrencyService, SSEPingFormatComment, pingInterval),
 		imageLimiter:             &imageConcurrencyLimiter{},
+		creatorImageDownloader:   service.NewCreatorImageDownloader(nil, creatorImageDownloadMaxBytes),
 		maxAccountSwitches:       maxAccountSwitches,
 		cfg:                      cfg,
 	}

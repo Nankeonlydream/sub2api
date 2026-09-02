@@ -119,6 +119,15 @@ func ResolveImageBillingSize(inputSize string, outputSizes []string) ImageBillin
 	}
 }
 
+func resolveAuthoritativeImageBillingSize(inputSize string, outputSizes []string) ImageBillingSizeResolution {
+	resolved := ResolveImageBillingSize(inputSize, outputSizes)
+	if inputTier, ok := ClassifyImageBillingTier(inputSize); ok {
+		resolved.BillingSize = inputTier
+		resolved.Source = ImageSizeSourceInput
+	}
+	return resolved
+}
+
 func ApplyOpenAIImageBillingResolution(result *OpenAIForwardResult) {
 	if result == nil || result.ImageCount <= 0 {
 		return
@@ -132,6 +141,9 @@ func ApplyOpenAIImageBillingResolution(result *OpenAIForwardResult) {
 		outputSizes = []string{result.ImageOutputSize}
 	}
 	resolved := ResolveImageBillingSize(inputSize, outputSizes)
+	if result.ImageInputSizeAuthoritative {
+		resolved = resolveAuthoritativeImageBillingSize(inputSize, outputSizes)
+	}
 	applyImageBillingResolution(
 		&result.ImageSize,
 		&result.ImageInputSize,

@@ -2097,6 +2097,62 @@ func TestOpenAIGatewayServiceRecordUsage_ExplicitImageSizeCapsBillingAndPersists
 	require.InDelta(t, 0.11, usageRepo.lastLog.ActualCost, 1e-12)
 }
 
+func TestOpenAIGatewayServiceRecordUsage_GrokExplicitResolutionDeterminesBilling(t *testing.T) {
+	imagePrice1K := 0.11
+	imagePrice2K := 0.22
+	groupID := int64(1203)
+	tests := []struct {
+		name            string
+		inputSize       string
+		outputSize      string
+		wantBillingSize string
+		wantActualCost  float64
+	}{
+		{name: "selected 1K", inputSize: "1k", outputSize: "2048x2048", wantBillingSize: ImageBillingSize1K, wantActualCost: imagePrice1K},
+		{name: "selected 2K", inputSize: "2k", outputSize: "1024x1024", wantBillingSize: ImageBillingSize2K, wantActualCost: imagePrice2K},
+	}
+
+	for index, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usageRepo := &openAIRecordUsageLogRepoStub{inserted: true}
+			svc := newOpenAIRecordUsageServiceForTest(usageRepo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+
+			err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+				Result: &OpenAIForwardResult{
+					RequestID:                   "resp_grok_resolution_" + tt.inputSize,
+					Model:                       "grok-imagine-image-2.0",
+					ImageCount:                  1,
+					ImageInputSize:              tt.inputSize,
+					ImageOutputSizes:            []string{tt.outputSize},
+					ImageInputSizeAuthoritative: true,
+					Duration:                    time.Second,
+				},
+				APIKey: &APIKey{
+					ID:      11203 + int64(index),
+					GroupID: i64p(groupID),
+					Group: &Group{
+						ID:             groupID,
+						RateMultiplier: 1.0,
+						ImagePrice1K:   &imagePrice1K,
+						ImagePrice2K:   &imagePrice2K,
+					},
+				},
+				User:    &User{ID: 21203 + int64(index)},
+				Account: &Account{ID: 31203 + int64(index), Platform: PlatformGrok},
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, usageRepo.lastLog)
+			require.NotNil(t, usageRepo.lastLog.ImageSize)
+			require.Equal(t, tt.wantBillingSize, *usageRepo.lastLog.ImageSize)
+			require.NotNil(t, usageRepo.lastLog.ImageSizeSource)
+			require.Equal(t, ImageSizeSourceInput, *usageRepo.lastLog.ImageSizeSource)
+			require.InDelta(t, tt.wantActualCost, usageRepo.lastLog.TotalCost, 1e-12)
+			require.InDelta(t, tt.wantActualCost, usageRepo.lastLog.ActualCost, 1e-12)
+		})
+	}
+}
+
 func TestOpenAIGatewayServiceRecordUsage_ImageUsesPerImageBillingEvenWithUsageTokens(t *testing.T) {
 	imagePrice := 0.02
 	groupID := int64(12)

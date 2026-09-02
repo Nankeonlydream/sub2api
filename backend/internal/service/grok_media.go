@@ -128,15 +128,27 @@ func ParseGrokMediaRequest(contentType string, body []byte) GrokMediaRequestInfo
 	info.Model = strings.TrimSpace(info.Model)
 	info.Prompt = strings.TrimSpace(info.Prompt)
 	info.Size = strings.TrimSpace(info.Size)
-	info.SizeTier = NormalizeImageBillingTierOrDefault(info.Size)
 	info.AspectRatio = strings.TrimSpace(info.AspectRatio)
 	info.ImageResolution = grokImagineImageResolution(info.ImageResolution)
+	info.SizeTier = NormalizeImageBillingTierOrDefault(info.imageBillingInputSize())
 	info.Resolution = NormalizeVideoBillingResolutionOrDefault(info.Resolution)
 	info.DurationSeconds = NormalizeVideoBillingDurationSecondsOrDefault(info.DurationSeconds)
 	if info.N <= 0 {
 		info.N = 1
 	}
 	return info
+}
+
+func (r GrokMediaRequestInfo) imageBillingInputSize() string {
+	if resolution := strings.TrimSpace(r.ImageResolution); resolution != "" {
+		return resolution
+	}
+	return strings.TrimSpace(r.Size)
+}
+
+func (r GrokMediaRequestInfo) hasAuthoritativeImageBillingInput() bool {
+	_, ok := ClassifyImageBillingTier(r.imageBillingInputSize())
+	return ok
 }
 
 func parseGrokMediaJSONRequest(body []byte, info *GrokMediaRequestInfo) {
@@ -738,21 +750,22 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 		}
 	}
 	return &OpenAIForwardResult{
-		RequestID:            requestIDHeader,
-		ResponseID:           usage.ResponseID,
-		Usage:                usage.Usage,
-		Model:                resultModel,
-		BillingModel:         resultBillingModel,
-		UpstreamModel:        upstreamModel,
-		ResponseHeaders:      resp.Header.Clone(),
-		Duration:             time.Since(startTime),
-		ImageCount:           usage.ImageCount,
-		ImageSize:            usage.ImageSize,
-		ImageInputSize:       usage.ImageInputSize,
-		ImageOutputSizes:     usage.ImageOutputSizes,
-		VideoCount:           usage.VideoCount,
-		VideoResolution:      usage.VideoResolution,
-		VideoDurationSeconds: usage.VideoDurationSeconds,
+		RequestID:                   requestIDHeader,
+		ResponseID:                  usage.ResponseID,
+		Usage:                       usage.Usage,
+		Model:                       resultModel,
+		BillingModel:                resultBillingModel,
+		UpstreamModel:               upstreamModel,
+		ResponseHeaders:             resp.Header.Clone(),
+		Duration:                    time.Since(startTime),
+		ImageCount:                  usage.ImageCount,
+		ImageSize:                   usage.ImageSize,
+		ImageInputSize:              usage.ImageInputSize,
+		ImageOutputSizes:            usage.ImageOutputSizes,
+		ImageInputSizeAuthoritative: usage.ImageInputSizeAuthoritative,
+		VideoCount:                  usage.VideoCount,
+		VideoResolution:             usage.VideoResolution,
+		VideoDurationSeconds:        usage.VideoDurationSeconds,
 	}, nil
 }
 
@@ -1173,17 +1186,18 @@ func NormalizeGrokMediaModelForEndpoint(endpoint GrokMediaEndpoint, model string
 }
 
 type grokMediaUsageMetadata struct {
-	ResponseID           string
-	Usage                OpenAIUsage
-	Model                string
-	BillingModel         string
-	ImageCount           int
-	ImageSize            string
-	ImageInputSize       string
-	ImageOutputSizes     []string
-	VideoCount           int
-	VideoResolution      string
-	VideoDurationSeconds int
+	ResponseID                  string
+	Usage                       OpenAIUsage
+	Model                       string
+	BillingModel                string
+	ImageCount                  int
+	ImageSize                   string
+	ImageInputSize              string
+	ImageOutputSizes            []string
+	ImageInputSizeAuthoritative bool
+	VideoCount                  int
+	VideoResolution             string
+	VideoDurationSeconds        int
 }
 
 func grokMediaUsageFromResponse(endpoint GrokMediaEndpoint, requestInfo GrokMediaRequestInfo, responseBody []byte) grokMediaUsageMetadata {
@@ -1193,8 +1207,9 @@ func grokMediaUsageFromResponse(endpoint GrokMediaEndpoint, requestInfo GrokMedi
 	case GrokMediaEndpointImagesGenerations, GrokMediaEndpointImagesEdits:
 		meta.ImageCount = countOpenAIResponseImageOutputsFromJSONBytes(responseBody)
 		meta.ImageSize = requestInfo.SizeTier
-		meta.ImageInputSize = requestInfo.Size
+		meta.ImageInputSize = requestInfo.imageBillingInputSize()
 		meta.ImageOutputSizes = collectOpenAIResponseImageOutputSizesFromJSONBytes(responseBody)
+		meta.ImageInputSizeAuthoritative = requestInfo.hasAuthoritativeImageBillingInput()
 	case GrokMediaEndpointVideosGenerations, GrokMediaEndpointVideosEdits, GrokMediaEndpointVideosExtensions:
 		// Async video: capture request_id + create-time pricing params only.
 		// Billable VideoCount is set later when status polling observes video.url.
