@@ -132,6 +132,8 @@ docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.build.yml u
 
 This builds the current working tree, including uncommitted changes, into `sub2api-local:latest`. It updates only the application and preserves the existing database, Redis, data volumes, and environment configuration. The explicit file list avoids loading unrelated settings from `docker-compose.override.yml`.
 
+> **Layered Compose safety:** an override file is not a standalone deployment file. Never run `docker compose -f <override-file> ...` by itself: explicitly include the base file first and every required override after it, using the same ordered `-f` list for `config`, `pull`, `up`, `logs`, and rollback. Before recreating a production container, inspect the rendered configuration and verify its container name, published ports, volumes, image, and external database/Redis addresses. The CatBee three-node procedure and the 2026-09-06 incident review are documented in [`docs/UPGRADE_RUNBOOK_CN.md`](../docs/UPGRADE_RUNBOOK_CN.md).
+
 If the existing deployment uses `docker-compose.local.yml`, use that as the first `-f` file instead; keep the same base file and Compose project to retain the original data volumes. For a first-time deployment, omit `--no-deps` to start PostgreSQL and Redis too. Reload the browser after the application becomes healthy.
 
 ### Deployment Version Comparison
