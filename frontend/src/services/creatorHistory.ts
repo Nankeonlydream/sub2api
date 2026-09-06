@@ -13,9 +13,17 @@ export interface CreatorHistoryItem {
   createdAt: number
   updatedAt: number
   outputs: string[]
+  /** Browser-persisted video payloads used to rebuild temporary blob URLs after refresh. */
+  videoBlobs?: Blob[]
   mergedOutput?: string
+  mergedVideoBlob?: Blob
   shotPrompts?: string[]
   shotDurations?: number[]
+  shotAspectRatios?: string[]
+  shotResolutions?: string[]
+  shotGenerationMethods?: CreatorVideoGenerationMethod[]
+  shotReferenceCounts?: number[]
+  shotActualOutputSizes?: string[]
   mergeError?: string
   groupId?: number
   apiKeyId?: number
@@ -55,8 +63,14 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...item,
     outputs: [...item.outputs],
+    videoBlobs: item.videoBlobs ? [...item.videoBlobs] : undefined,
     shotPrompts: item.shotPrompts ? [...item.shotPrompts] : undefined,
     shotDurations: item.shotDurations ? [...item.shotDurations] : undefined,
+    shotAspectRatios: item.shotAspectRatios ? [...item.shotAspectRatios] : undefined,
+    shotResolutions: item.shotResolutions ? [...item.shotResolutions] : undefined,
+    shotGenerationMethods: item.shotGenerationMethods ? [...item.shotGenerationMethods] : undefined,
+    shotReferenceCounts: item.shotReferenceCounts ? [...item.shotReferenceCounts] : undefined,
+    shotActualOutputSizes: item.shotActualOutputSizes ? [...item.shotActualOutputSizes] : undefined,
   }
 }
 

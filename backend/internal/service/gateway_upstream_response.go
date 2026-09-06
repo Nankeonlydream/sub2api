@@ -298,13 +298,24 @@ func extractUpstreamErrorMessage(body []byte) string {
 		return m
 	}
 
+	// xAI media API validation errors can use a top-level string:
+	// {"error":"reference image dimensions are invalid"}
+	if e := strings.TrimSpace(gjson.GetBytes(body, "error").String()); e != "" {
+		if strings.HasPrefix(e, "{") {
+			if innerMsg := strings.TrimSpace(extractUpstreamErrorMessage([]byte(e))); innerMsg != "" {
+				return innerMsg
+			}
+		}
+		return e
+	}
+
 	// ChatGPT 内部 API 风格：{"detail":"..."}
-	if d := gjson.GetBytes(body, "detail").String(); strings.TrimSpace(d) != "" {
+	if d := strings.TrimSpace(gjson.GetBytes(body, "detail").String()); d != "" {
 		return d
 	}
 
 	// 兜底：尝试顶层 message
-	return gjson.GetBytes(body, "message").String()
+	return strings.TrimSpace(gjson.GetBytes(body, "message").String())
 }
 
 func extractUpstreamErrorCode(body []byte) string {

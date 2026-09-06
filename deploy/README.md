@@ -16,6 +16,7 @@ This directory contains files for deploying Sub2API on Linux servers and Apple-s
 |------|-------------|
 | `docker-compose.yml` | Docker Compose configuration (named volumes) |
 | `docker-compose.local.yml` | Docker Compose configuration (local directories, easy migration) |
+| `docker-compose.build.yml` | Source-build override for updating an existing Compose deployment |
 | `docker-deploy.sh` | **One-click Docker deployment script (recommended)** |
 | `apple-container.sh` | Native Apple `container` lifecycle script |
 | `APPLE_CONTAINER.md` | Apple `container` deployment and operations guide |
@@ -118,6 +119,20 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 # Access Web UI
 # http://localhost:8080
 ```
+
+### Updating a Local Source Build
+
+The Docker application embeds the compiled frontend in its Go binary. Editing files in `frontend/src` or restarting the existing container does not update the page served on port 8080; rebuild the image and recreate the application container.
+
+For an existing named-volume deployment, run from the repository root:
+
+```bash
+docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.build.yml up -d --build --no-deps sub2api
+```
+
+This builds the current working tree, including uncommitted changes, into `sub2api-local:latest`. It updates only the application and preserves the existing database, Redis, data volumes, and environment configuration. The explicit file list avoids loading unrelated settings from `docker-compose.override.yml`.
+
+If the existing deployment uses `docker-compose.local.yml`, use that as the first `-f` file instead; keep the same base file and Compose project to retain the original data volumes. For a first-time deployment, omit `--no-deps` to start PostgreSQL and Redis too. Reload the browser after the application becomes healthy.
 
 ### Deployment Version Comparison
 

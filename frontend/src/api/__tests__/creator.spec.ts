@@ -246,7 +246,7 @@ describe('creator gateway API', () => {
     const references = Array.from({ length: 7 }, (_, index) => `data:image/png;base64,REF${index + 1}`)
 
     await createCreatorVideo('sk-video', {
-      model: 'grok-imagine-video',
+      model: 'grok-imagine-video-1.5',
       prompt: 'keep the same person and outfit',
       duration: 10,
       aspectRatio: '3:2',
@@ -256,7 +256,7 @@ describe('creator gateway API', () => {
 
     const [, init] = vi.mocked(fetch).mock.calls[0]
     expect(JSON.parse(String(init?.body))).toEqual({
-      model: 'grok-imagine-video',
+      model: 'grok-imagine-video-1.5',
       prompt: 'keep the same person and outfit',
       duration: 10,
       aspect_ratio: '3:2',
@@ -280,6 +280,12 @@ describe('creator gateway API', () => {
       prompt: 'too many references',
       referenceImageDataUrls: Array.from({ length: 8 }, (_, index) => `data:image/png;base64,REF${index}`),
     })).rejects.toThrow('最多支持 7 张参考图')
+
+    await expect(createCreatorVideo('sk-video', {
+      model: 'grok-imagine-video',
+      prompt: 'legacy model with references',
+      referenceImageDataUrls: ['data:image/png;base64,REF'],
+    })).rejects.toThrow('仅支持 Grok Imagine Video 1.5 模型')
     expect(fetch).not.toHaveBeenCalled()
   })
 

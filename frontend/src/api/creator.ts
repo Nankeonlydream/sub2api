@@ -361,6 +361,10 @@ export async function createCreatorVideo(
   if (referenceImageDataUrls.length > 7) {
     throw new Error('参考图生视频最多支持 7 张参考图')
   }
+  const normalizedModel = input.model.trim().replace(/^models\//i, '')
+  if (referenceImageDataUrls.length && !/^grok-imagine-video-1\.5(?:$|-)/i.test(normalizedModel)) {
+    throw new Error('参考图生视频仅支持 Grok Imagine Video 1.5 模型')
+  }
   const payload = {
     ...input.extra,
     model: input.model,

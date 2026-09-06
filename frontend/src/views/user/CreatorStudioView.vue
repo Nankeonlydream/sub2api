@@ -5,6 +5,21 @@
       <div class="studio-title">
         <span class="studio-title-icon"><Icon name="sparkles" size="sm" /></span>
         <span>创作中心</span>
+        <button
+          v-if="historyCollapsed"
+          type="button"
+          class="history-reopen playground-history-reopen-button"
+          title="展开历史记录"
+          aria-label="展开历史记录"
+          aria-controls="creator-history-panel"
+          :aria-expanded="!historyCollapsed"
+          @click="historyCollapsed = false"
+        >
+          <span class="playground-history-reopen-icon">
+            <Icon name="inbox" size="sm" />
+          </span>
+          <span>历史记录</span>
+        </button>
       </div>
 
       <div class="mode-switch" role="tablist" aria-label="创作类型">
@@ -41,7 +56,7 @@
     </header>
 
     <div class="studio-grid" :class="{ 'history-collapsed': historyCollapsed }">
-      <aside class="history-panel" aria-label="作品历史">
+      <aside id="creator-history-panel" class="history-panel" aria-label="作品历史">
         <div class="history-heading">
           <div>
             <h2>{{ historyFilter === 'image' ? '图片历史' : '视频历史' }}</h2>
@@ -110,16 +125,6 @@
         </div>
       </aside>
 
-      <button
-        v-if="historyCollapsed"
-        type="button"
-        class="history-reopen"
-        title="展开作品历史"
-        @click="historyCollapsed = false"
-      >
-        <Icon name="chevronRight" size="sm" />
-      </button>
-
       <main class="canvas-panel">
         <div v-if="generating && generationMode === studioMode" class="generation-state">
           <span class="generation-orbit"><Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="lg" /></span>
@@ -152,7 +157,7 @@
             </div>
             <div class="result-heading-actions">
               <span v-if="selectedWork.status === 'completed'" class="result-count-pill">
-                {{ isMultiShotVideo(selectedWork) ? `完整成片 + ${selectedWork.outputs.length} 段` : `${selectedWork.outputs.length} ${selectedWork.type === 'image' ? '张' : '段'}` }}
+                {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
               </span>
               <button v-if="selectedWork.status === 'completed'" type="button" class="secondary-command" @click="continueCreating">继续创作</button>
               <button
@@ -175,6 +180,47 @@
             <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
           </div>
 
+          <div
+            v-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && loadingVideoWorkId === selectedWork.id"
+            class="result-grid single video-loading-grid"
+          >
+            <article class="result-card video-loading-card">
+              <span class="result-index">01</span>
+              <div class="result-media video-loading-media" :style="resultMediaStyle(selectedWork)" role="status" aria-live="polite">
+                <div class="video-loading-content">
+                  <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
+                  <strong>正在加载视频</strong>
+                  <p>视频已生成，正在准备播放，请稍候。</p>
+                </div>
+              </div>
+              <div class="result-actions video-loading-actions">
+                <div class="result-description">
+                  <strong>{{ isMultiShotVideo(selectedWork) ? '完整成片' : '视频结果' }}</strong>
+                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
+                  <p>{{ resultDescription(selectedWork, 0) }}</p>
+                </div>
+              </div>
+            </article>
+          </div>
+
+          <div
+            v-else-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone === 'error'"
+            class="result-error muted"
+          >
+            <Icon name="exclamationTriangle" size="lg" />
+            <strong>视频加载失败</strong>
+            <p>{{ selectedVideoHistoryFeedback.message }}</p>
+            <button
+              type="button"
+              class="secondary-command primary-soft status-check-command"
+              :disabled="checkingVideoHistory"
+              @click="refreshVideoWork(selectedWork)"
+            >
+              <Icon name="refresh" size="xs" />
+              {{ checkingVideoHistory ? '正在重试...' : '重新加载视频' }}
+            </button>
+          </div>
+
           <section v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="complete-video-card">
             <header>
               <div>
@@ -185,16 +231,24 @@
               <span>{{ selectedWork.outputs.length }} 个镜头 · {{ selectedWork.requestedDuration || 0 }} 秒</span>
             </header>
             <template v-if="selectedWork.mergedOutput">
-              <video
-                class="complete-video-media"
-                :style="resultMediaStyle(selectedWork)"
-                :src="selectedWork.mergedOutput"
-                controls
-                playsinline
-                preload="metadata"
-                @error="handleVideoPlaybackError(selectedWork)"
-                @loadedmetadata="handleVideoMetadata($event, selectedWork)"
-              ></video>
+              <div class="complete-video-frame" :style="resultMediaStyle(selectedWork)">
+                <video
+                  class="complete-video-media"
+                  :class="{ 'video-ready': isVideoReady(selectedWork, 0, 'complete') }"
+                  :src="selectedWork.mergedOutput"
+                  controls
+                  playsinline
+                  preload="metadata"
+                  @loadstart="markVideoLoading(selectedWork, 0, 'complete')"
+                  @error="handleVideoPlaybackError(selectedWork, 0, 'complete')"
+                  @loadedmetadata="handleVideoLoadedMetadata($event, selectedWork, 0, 'complete')"
+                ></video>
+                <div v-if="!isVideoReady(selectedWork, 0, 'complete')" class="video-loading-overlay" role="status" aria-live="polite">
+                  <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
+                  <strong>正在加载视频</strong>
+                  <p>正在准备完整成片，请稍候。</p>
+                </div>
+              </div>
               <footer>
                 <div>
                   <strong>完整视频</strong>
@@ -234,11 +288,29 @@
               >
                 <img :src="output" :alt="`生成图片 ${index + 1}`" />
               </button>
-              <video v-else class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)" @loadedmetadata="handleVideoMetadata($event, selectedWork)"></video>
+              <div v-else class="video-result-frame" :style="resultMediaStyle(selectedWork, index)">
+                <video
+                  class="result-media video result-segment-video"
+                  :class="{ 'video-ready': isVideoReady(selectedWork, index) }"
+                  :style="resultMediaStyle(selectedWork, index)"
+                  :src="output"
+                  controls
+                  playsinline
+                  preload="metadata"
+                  @loadstart="markVideoLoading(selectedWork, index)"
+                  @error="handleVideoPlaybackError(selectedWork, index)"
+                  @loadedmetadata="handleVideoLoadedMetadata($event, selectedWork, index)"
+                ></video>
+                <div v-if="!isVideoReady(selectedWork, index)" class="video-loading-overlay" role="status" aria-live="polite">
+                  <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
+                  <strong>正在加载视频</strong>
+                  <p>正在准备播放，请稍候。</p>
+                </div>
+              </div>
               <div class="result-actions">
                 <div class="result-description">
                   <strong>{{ selectedWork.type === 'video' ? `镜头 ${index + 1}` : selectedWork.provider }}</strong>
-                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
+                  <span>{{ selectedWork.model }} · {{ workAspectRatio(selectedWork, index) }} · {{ workResolutionLabel(selectedWork, index) }}</span>
                   <p>{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -276,11 +348,29 @@
           <div v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="result-grid result-segment-grid">
             <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-segment-${index}`" class="result-card">
               <span class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
-              <video class="result-media video result-segment-video" :style="resultMediaStyle(selectedWork)" :src="output" controls playsinline preload="metadata" @error="handleVideoPlaybackError(selectedWork)" @loadedmetadata="handleVideoMetadata($event, selectedWork)"></video>
+              <div class="video-result-frame" :style="resultMediaStyle(selectedWork, index)">
+                <video
+                  class="result-media video result-segment-video"
+                  :class="{ 'video-ready': isVideoReady(selectedWork, index) }"
+                  :style="resultMediaStyle(selectedWork, index)"
+                  :src="output"
+                  controls
+                  playsinline
+                  preload="metadata"
+                  @loadstart="markVideoLoading(selectedWork, index)"
+                  @error="handleVideoPlaybackError(selectedWork, index)"
+                  @loadedmetadata="handleVideoLoadedMetadata($event, selectedWork, index)"
+                ></video>
+                <div v-if="!isVideoReady(selectedWork, index)" class="video-loading-overlay" role="status" aria-live="polite">
+                  <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
+                  <strong>正在加载视频</strong>
+                  <p>正在准备播放，请稍候。</p>
+                </div>
+              </div>
               <div class="result-actions">
                 <div class="result-description">
                   <strong>镜头 {{ index + 1 }}</strong>
-                  <span>{{ shotDurationLabel(selectedWork, index) }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
+                  <span>{{ shotDurationLabel(selectedWork, index) }} · {{ workAspectRatio(selectedWork, index) }} · {{ workResolutionLabel(selectedWork, index) }} · {{ shotGenerationMeta(selectedWork, index) }}</span>
                   <p>{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -324,12 +414,12 @@
             </div>
           </div>
 
-          <section v-if="selectedWork.status === 'completed' && selectedWork.outputs.length" class="result-parameters" aria-label="作品参数">
+          <section v-if="shouldShowResultParameters(selectedWork)" class="result-parameters" aria-label="作品参数">
             <div class="result-stat-grid">
               <article><span>完成耗时</span><strong>{{ formatCompletionDuration(selectedWork) }}</strong></article>
               <article><span>生成时间</span><strong>{{ formatResultTime(selectedWork.completedAt || selectedWork.updatedAt) }}</strong></article>
               <article><span>参考图</span><strong>{{ selectedWork.referenceCount || 0 }} 张</strong></article>
-              <article><span>生成数量</span><strong>{{ selectedWork.outputs.length }} {{ selectedWork.type === 'image' ? '张' : '段' }}</strong></article>
+              <article><span>生成数量</span><strong>{{ resultOutputCount(selectedWork) }} {{ selectedWork.type === 'image' ? '张' : '段' }}</strong></article>
               <article><span>版本</span><strong>{{ selectedWork.version || 'v1' }}</strong></article>
               <article><span>来源</span><strong>{{ selectedWork.source || '初版作品' }}</strong></article>
             </div>
@@ -388,16 +478,19 @@
                   <strong>SHOT {{ String(index + 1).padStart(2, '0') }}</strong>
                   <span><i></i> 待生成</span>
                   <div>
-                    <button type="button" title="向前移动镜头" :disabled="index === 0" @click="moveShot(index, -1)"><Icon name="chevronLeft" size="xs" /></button>
-                    <button type="button" title="向后移动镜头" :disabled="index === videoShots.length - 1" @click="moveShot(index, 1)"><Icon name="chevronRight" size="xs" /></button>
-                    <button type="button" title="删除镜头" :disabled="videoShots.length === 1" @click="removeShot(index)"><Icon name="x" size="xs" /></button>
+                    <button type="button" title="向上移动镜头" :disabled="index === 0" @click="moveShot(index, -1)"><Icon name="chevronUp" size="xs" /></button>
+                    <button type="button" title="向下移动镜头" :disabled="index === videoShots.length - 1" @click="moveShot(index, 1)"><Icon name="chevronDown" size="xs" /></button>
+                    <button type="button" title="删除镜头" :disabled="videoShots.length === 1 || processingReferenceImages" @click="removeShot(index)"><Icon name="x" size="xs" /></button>
                   </div>
                 </header>
                 <textarea v-model="shot.prompt" maxlength="8000" placeholder="描述这个镜头的画面、动作与运镜"></textarea>
                 <footer>
-                  <span>{{ videoGenerationMethodLabel }}</span>
-                  <span>{{ aspectRatio }}</span>
-                  <span>{{ videoResolution }}</span>
+                  <span>
+                    {{ videoGenerationMethodLabelFor(shot.generationMethod) }}
+                    <template v-if="shot.referenceImages.length"> · {{ shot.referenceImages.length }} 张参考图</template>
+                  </span>
+                  <span>{{ shot.aspectRatio }}</span>
+                  <span>{{ shot.resolution }}</span>
                   <label title="调整镜头时长">
                     <input v-model.number="shot.duration" type="range" min="1" max="15" />
                     <strong>{{ shot.duration }} 秒</strong>
@@ -519,13 +612,15 @@
               v-model="selectedModel"
               class="studio-input model-input"
               :class="{ 'is-loading': loadingModels }"
-              :disabled="loadingModels || !selectedApiKey"
+              :disabled="loadingModels || !selectedApiKey || referenceVideoModelUnavailable"
               :aria-busy="loadingModels"
             >
-              <option v-if="loadingModels && !modelOptions.length" value="">正在读取可用模型...</option>
-              <option v-else-if="!modelOptions.length" value="">请先创建 Key</option>
-              <option v-for="model in modelOptions" :key="model" :value="model">{{ model }}</option>
+              <option v-if="loadingModels && !selectableModelOptions.length" value="">正在读取可用模型...</option>
+              <option v-else-if="referenceVideoModelUnavailable" value="">没有可用的 1.5 视频模型</option>
+              <option v-else-if="!selectableModelOptions.length" value="">请先创建 Key</option>
+              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ model }}</option>
             </select>
+            <small v-if="referenceVideoModelUnavailable" class="model-compatibility-error">当前分组没有 Grok Imagine Video 1.5，无法使用参考图生视频</small>
           </div>
 
           <div v-if="selectedApiKey" class="key-ready">
@@ -604,7 +699,7 @@
 
           <div v-if="studioMode === 'video'" class="field-block">
             <label for="video-generation-method">生成方式</label>
-            <select id="video-generation-method" v-model="videoGenerationMethod" class="studio-input">
+            <select id="video-generation-method" v-model="activeVideoGenerationMethod" class="studio-input" :disabled="processingReferenceImages">
               <option value="text">文生视频 · 只用提示词</option>
               <option value="image">图生视频 · 1 张源图</option>
               <option value="reference">参考图生视频 · 最多 7 张</option>
@@ -614,13 +709,14 @@
           <div v-if="referenceFieldVisible" class="field-block reference-field">
             <div class="field-row">
               <div><label>{{ referenceFieldLabel }}</label><small>{{ referenceHint }}</small></div>
-              <button type="button" class="inline-command" @click="openFilePicker"><Icon name="upload" size="sm" /> 添加</button>
+              <button type="button" class="inline-command" :disabled="processingReferenceImages" @click="openFilePicker"><Icon name="upload" size="sm" /> 添加</button>
             </div>
-            <input ref="fileInput" type="file" class="sr-only" accept="image/png,image/jpeg,image/webp" :multiple="maxReferenceImages > 1" @change="handleFileInput" />
+            <input ref="fileInput" type="file" class="sr-only" accept="image/png,image/jpeg,image/webp" :multiple="maxReferenceImages > 1" :disabled="processingReferenceImages" @change="handleFileInput" />
             <button
               type="button"
               class="upload-zone"
               :class="{ dragging: isDragging }"
+              :disabled="processingReferenceImages"
               @click="openFilePicker"
               @dragenter.prevent="isDragging = true"
               @dragover.prevent="isDragging = true"
@@ -628,11 +724,11 @@
               @drop.prevent="handleDrop"
             >
               <Icon name="upload" size="lg" />
-              <strong>拖入、粘贴或选择图片</strong>
+              <strong>{{ processingReferenceImages ? '正在优化图片...' : '拖入、粘贴或选择图片' }}</strong>
               <span>{{ referenceUploadDescription }}</span>
             </button>
-            <div v-if="referenceImages.length" class="reference-list">
-              <div v-for="(reference, index) in referenceImages" :key="reference.url" class="reference-item">
+            <div v-if="activeReferenceImages.length" class="reference-list">
+              <div v-for="(reference, index) in activeReferenceImages" :key="reference.url" class="reference-item">
                 <img :src="reference.url" :alt="`参考图 ${index + 1}`" />
                 <button type="button" title="移除参考图" @click="removeReference(index)"><Icon name="x" size="xs" /></button>
               </div>
@@ -713,7 +809,7 @@
             <div class="two-column-fields">
               <div class="field-block">
                 <label for="video-aspect">视频比例</label>
-                <select id="video-aspect" v-model="aspectRatio" class="studio-input">
+                <select id="video-aspect" v-model="activeVideoAspectRatio" class="studio-input">
                   <option value="1:1">1:1 方形</option>
                   <option value="16:9">16:9 横屏</option>
                   <option value="9:16">9:16 竖屏</option>
@@ -725,7 +821,7 @@
               </div>
               <div class="field-block">
                 <label for="video-resolution">清晰度</label>
-                <select id="video-resolution" v-model="videoResolution" class="studio-input">
+                <select id="video-resolution" v-model="activeVideoResolution" class="studio-input">
                   <option value="480p">480p</option>
                   <option value="720p">720p</option>
                   <option v-if="videoSupports1080p" value="1080p">1080p</option>
@@ -759,6 +855,7 @@
             <span v-else class="button-spinner"></span>
             {{ generating ? '正在生成...' : '开始生成' }}
           </button>
+          <p v-if="professionalVideoReferenceError" class="generation-requirement">{{ professionalVideoReferenceError }}</p>
         </div>
       </aside>
     </div>
@@ -873,6 +970,13 @@ import {
   creatorHistory,
   type CreatorHistoryItem,
 } from '@/services/creatorHistory'
+import {
+  MAX_VIDEO_REFERENCE_SOURCE_BYTES,
+  MAX_VIDEO_REFERENCE_SOURCE_MB,
+  MAX_VIDEO_REFERENCE_TOTAL_BYTES,
+  MAX_VIDEO_REFERENCE_TOTAL_MB,
+  optimizeVideoReferenceImage,
+} from '@/services/videoReferenceImage'
 import { useAppStore } from '@/stores/app'
 import type { ApiKey, Group } from '@/types'
 
@@ -884,6 +988,7 @@ type VideoGenerationMethod = 'text' | 'image' | 'reference'
 
 const MAX_REFERENCE_IMAGE_SIZE_MB = 10
 const MAX_REFERENCE_IMAGE_SIZE_BYTES = MAX_REFERENCE_IMAGE_SIZE_MB * 1024 * 1024
+const VIDEO_SUBMISSION_RETRY_DELAYS_MS = [2000, 5000] as const
 
 interface PromptTemplate {
   title: string
@@ -901,6 +1006,10 @@ interface VideoShot {
   id: string
   prompt: string
   duration: number
+  generationMethod: VideoGenerationMethod
+  referenceImages: ReferenceImage[]
+  aspectRatio: string
+  resolution: string
 }
 
 interface ImageGenerationSnapshot {
@@ -923,11 +1032,14 @@ interface ImageGenerationSnapshot {
 interface VideoGenerationSnapshot {
   apiKey: string
   model: string
-  shots: Array<{ prompt: string; duration: number }>
-  resolution: string
-  aspectRatio: string
-  generationMethod: VideoGenerationMethod
-  referenceFiles: File[]
+  shots: Array<{
+    prompt: string
+    duration: number
+    resolution: string
+    aspectRatio: string
+    generationMethod: VideoGenerationMethod
+    referenceFiles: File[]
+  }>
 }
 
 const imageTemplates: PromptTemplate[] = [
@@ -1097,7 +1209,15 @@ const transparentBackground = ref(false)
 const outputCount = ref(1)
 const videoDuration = ref(8)
 const professionalVideo = ref(false)
-const videoShots = ref<VideoShot[]>([{ id: crypto.randomUUID(), prompt: '', duration: 8 }])
+const videoShots = ref<VideoShot[]>([{
+  id: crypto.randomUUID(),
+  prompt: '',
+  duration: 8,
+  generationMethod: 'text',
+  referenceImages: [],
+  aspectRatio: '16:9',
+  resolution: '720p',
+}])
 const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
@@ -1108,6 +1228,7 @@ const bootstrapping = ref(false)
 const loadingModels = ref(false)
 const creatingKey = ref(false)
 const generating = ref(false)
+const processingReferenceImages = ref(false)
 const regeneratingWorkId = ref('')
 const generationMode = ref<StudioMode | null>(null)
 const generationProgress = ref('正在提交生成任务...')
@@ -1118,13 +1239,16 @@ const generationStartedAt = ref(0)
 const generationClock = ref(Date.now())
 const checkingVideoHistory = ref(false)
 const videoHistoryFeedback = ref<{ workId: string; tone: 'pending' | 'error'; message: string } | null>(null)
+const loadingVideoWorkId = ref('')
 const composingWorkId = ref('')
 const previewUrl = ref('')
+const videoReadyKeys = ref<Record<string, boolean>>({})
 const promptToolExpanded = ref(false)
 const promptTemplatePage = ref(0)
 const fileInput = ref<HTMLInputElement | null>(null)
 const isDragging = ref(false)
 let modelRequestSequence = 0
+let referenceUploadSequence = 0
 let disposed = false
 let generationTimer: number | undefined
 let templateAutoplayTimer: number | undefined
@@ -1176,35 +1300,74 @@ const imageSizeDraftResult = computed(() => {
   }
   return image2SizeFor(imageSizeDraftResolution.value, imageSizeDraftRatio.value)
 })
+const selectedShotIndex = computed(() => Math.max(0, videoShots.value.findIndex(shot => shot.id === selectedShotId.value)))
+const selectedShot = computed(() => videoShots.value[selectedShotIndex.value] || videoShots.value[0] || null)
+const activeVideoGenerationMethod = computed<VideoGenerationMethod>({
+  get: () => professionalVideo.value
+    ? selectedShot.value?.generationMethod || 'text'
+    : videoGenerationMethod.value,
+  set: value => {
+    if (professionalVideo.value && selectedShot.value) selectedShot.value.generationMethod = value
+    else videoGenerationMethod.value = value
+  },
+})
+const activeVideoAspectRatio = computed({
+  get: () => professionalVideo.value
+    ? selectedShot.value?.aspectRatio || '16:9'
+    : aspectRatio.value,
+  set: value => {
+    if (professionalVideo.value && selectedShot.value) selectedShot.value.aspectRatio = value
+    else aspectRatio.value = value
+  },
+})
+const activeVideoResolution = computed({
+  get: () => professionalVideo.value
+    ? selectedShot.value?.resolution || '720p'
+    : videoResolution.value,
+  set: value => {
+    if (professionalVideo.value && selectedShot.value) selectedShot.value.resolution = value
+    else videoResolution.value = value
+  },
+})
+const activeReferenceImages = computed<ReferenceImage[]>({
+  get: () => studioMode.value === 'video' && professionalVideo.value
+    ? selectedShot.value?.referenceImages || []
+    : referenceImages.value,
+  set: value => {
+    if (studioMode.value === 'video' && professionalVideo.value && selectedShot.value) {
+      selectedShot.value.referenceImages = value
+    } else {
+      referenceImages.value = value
+    }
+  },
+})
 const maxReferenceImages = computed(() => {
   if (studioMode.value === 'video') {
-    if (videoGenerationMethod.value === 'text') return 0
-    return videoGenerationMethod.value === 'image' ? 1 : 7
+    if (activeVideoGenerationMethod.value === 'text') return 0
+    return activeVideoGenerationMethod.value === 'image' ? 1 : 7
   }
   if (imageCapability.value === 'image2') return 16
   return 3
 })
 const maxOutputCount = computed(() => isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
-const referenceFieldVisible = computed(() => studioMode.value === 'image' || videoGenerationMethod.value !== 'text')
-const referenceFieldLabel = computed(() => studioMode.value === 'video' && videoGenerationMethod.value === 'image' ? '源图' : '参考图')
+const referenceFieldVisible = computed(() => studioMode.value === 'image' || activeVideoGenerationMethod.value !== 'text')
+const referenceFieldLabel = computed(() => studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image' ? '源图' : '参考图')
 const referenceHint = computed(() => {
-  if (studioMode.value === 'video' && videoGenerationMethod.value === 'image') return '必选，仅 1 张，作为视频首帧'
-  if (studioMode.value === 'video') return '必选，最多 7 张，仅用于主体与风格参考'
+  if (studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image') return '必选，仅 1 张，作为当前镜头首帧'
+  if (studioMode.value === 'video') return '必选，最多 7 张，仅支持 Grok Imagine Video 1.5'
   return `可选，最多 ${maxReferenceImages.value} 张`
 })
 const referenceUploadDescription = computed(() => {
-  const usage = studioMode.value === 'video' && videoGenerationMethod.value === 'image'
-    ? '将作为视频首帧'
+  const usage = studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image'
+    ? professionalVideo.value ? '仅用于当前镜头首帧' : '将作为视频首帧'
     : studioMode.value === 'video'
       ? '用于保持主体和风格一致'
       : ''
-  return ['PNG / JPG / WEBP', `单张不超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB`, usage].filter(Boolean).join(' · ')
+  const limits = studioMode.value === 'video'
+    ? `原图 ≤ ${MAX_VIDEO_REFERENCE_SOURCE_MB}MB · 自动缩至长边 ≤ 2048px / 3MB · 合计 ≤ ${MAX_VIDEO_REFERENCE_TOTAL_MB}MB`
+    : `单张不超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB`
+  return ['PNG / JPG / WEBP', limits, usage].filter(Boolean).join(' · ')
 })
-const videoGenerationMethodLabel = computed(() => ({
-  text: '文生',
-  image: '首帧图生',
-  reference: '参考图生',
-})[videoGenerationMethod.value])
 const selectedGroup = computed(() => groups.value.find(group => group.id === selectedGroupId.value) || null)
 const selectedApiKey = computed(() => apiKeys.value.find(key => key.status === 'active' && key.group_id === selectedGroupId.value) || null)
 const availableGroups = computed(() => groups.value.filter(group => groupMatchesCurrentCapability(group)))
@@ -1212,8 +1375,6 @@ const imageHistoryCount = computed(() => historyItems.value.filter(item => item.
 const videoHistoryCount = computed(() => historyItems.value.filter(item => item.type === 'video').length)
 const visibleHistory = computed(() => historyItems.value.filter(item => item.type === historyFilter.value))
 const totalShotDuration = computed(() => videoShots.value.reduce((sum, shot) => sum + Number(shot.duration || 0), 0))
-const selectedShotIndex = computed(() => Math.max(0, videoShots.value.findIndex(shot => shot.id === selectedShotId.value)))
-const selectedShot = computed(() => videoShots.value[selectedShotIndex.value] || videoShots.value[0] || null)
 const editorPrompt = computed({
   get: () => studioMode.value === 'video' && professionalVideo.value
     ? selectedShot.value?.prompt || ''
@@ -1237,13 +1398,45 @@ const effectivePrompt = computed(() => {
   }
   return prompt.value.trim()
 })
+const referenceVideoModelOptions = computed(() => modelOptions.value.filter(isGrokVideo15Model))
+const requiresReferenceVideo15 = computed(() => (
+  studioMode.value === 'video'
+  && (professionalVideo.value
+    ? videoShots.value.some(shot => shot.generationMethod === 'reference')
+    : videoGenerationMethod.value === 'reference')
+))
+const selectableModelOptions = computed(() => (
+  requiresReferenceVideo15.value
+    ? referenceVideoModelOptions.value
+    : modelOptions.value
+))
+const referenceVideoModelUnavailable = computed(() => (
+  requiresReferenceVideo15.value
+  && !loadingModels.value
+  && referenceVideoModelOptions.value.length === 0
+))
 const canGenerate = computed(() => {
-  if (generating.value || !selectedApiKey.value || !selectedModel.value || !effectivePrompt.value || effectivePrompt.value.length > promptLimit.value) return false
-  if (studioMode.value === 'video' && videoGenerationMethod.value !== 'text' && !referenceImages.value.length) return false
+  if (generating.value || processingReferenceImages.value || !selectedApiKey.value || !selectedModel.value || !effectivePrompt.value || effectivePrompt.value.length > promptLimit.value) return false
+  if (requiresReferenceVideo15.value && !isGrokVideo15Model(selectedModel.value)) return false
   if (studioMode.value === 'video' && professionalVideo.value) {
-    return totalShotDuration.value <= 60 && videoShots.value.length > 0 && videoShots.value.every(shot => shot.prompt.trim() && shot.prompt.length <= 8000)
+    return totalShotDuration.value <= 60
+      && videoShots.value.length > 0
+      && videoShots.value.every(shot => (
+        shot.prompt.trim()
+        && shot.prompt.length <= 8000
+        && (shot.generationMethod === 'text' || shot.referenceImages.length > 0)
+      ))
   }
+  if (studioMode.value === 'video' && videoGenerationMethod.value !== 'text' && !referenceImages.value.length) return false
   return true
+})
+const professionalVideoReferenceError = computed(() => {
+  if (studioMode.value !== 'video' || !professionalVideo.value) return ''
+  const index = videoShots.value.findIndex(shot => shot.generationMethod !== 'text' && !shot.referenceImages.length)
+  if (index < 0) return ''
+  return videoShots.value[index].generationMethod === 'image'
+    ? `镜头 ${index + 1} 的图生视频需要 1 张源图`
+    : `镜头 ${index + 1} 的参考图生视频至少需要 1 张参考图`
 })
 const generationElapsedLabel = computed(() => {
   const elapsedSeconds = generationStartedAt.value
@@ -1272,6 +1465,33 @@ function fallbackModels() {
   if (imageCapability.value === 'grok') return ['grok-imagine-image', 'grok-imagine-image-quality']
   if (imageCapability.value === 'image2') return ['gpt-image-2']
   return ['gemini-3-pro-image-preview', 'gemini-2.5-flash-image']
+}
+
+function isGrokVideo15Model(model: string) {
+  return /^grok-imagine-video-1\.5(?:$|-)/i.test(model.trim().replace(/^models\//i, ''))
+}
+
+function videoGenerationMethodLabelFor(method: VideoGenerationMethod) {
+  return {
+    text: '文生',
+    image: '图生',
+    reference: '参考图生',
+  }[method]
+}
+
+function syncVideoModelForGenerationMethod() {
+  if (studioMode.value !== 'video') return
+  if (requiresReferenceVideo15.value) {
+    selectedModel.value = referenceVideoModelOptions.value.find(model => /^grok-imagine-video-1\.5$/i.test(model))
+      || referenceVideoModelOptions.value[0]
+      || ''
+    return
+  }
+  if (!selectedModel.value || !modelOptions.value.includes(selectedModel.value)) {
+    selectedModel.value = modelOptions.value.includes(preferredModel())
+      ? preferredModel()
+      : modelOptions.value[0] || ''
+  }
 }
 
 function preferredModel() {
@@ -1334,6 +1554,7 @@ async function loadModels() {
       : nextModels[0] || ''
     modelOptions.value = nextModels
     selectedModel.value = nextModel
+    syncVideoModelForGenerationMethod()
   } catch (error) {
     if (sequence !== modelRequestSequence) return
     const nextModels = fallbackModels()
@@ -1342,6 +1563,7 @@ async function loadModels() {
       : nextModels[0] || ''
     modelOptions.value = nextModels
     selectedModel.value = nextModel
+    syncVideoModelForGenerationMethod()
   } finally {
     if (sequence === modelRequestSequence) loadingModels.value = false
   }
@@ -1353,7 +1575,7 @@ async function refreshStudio() {
   try {
     const [available, activeKeys, works] = await Promise.all([
       userGroupsAPI.getAvailable(),
-      loadAllActiveKeys(),
+      loadAllUserKeys(),
       creatorHistory.list(),
     ])
     groups.value = available
@@ -1368,8 +1590,11 @@ async function refreshStudio() {
   }
 }
 
-async function loadAllActiveKeys() {
-  const filters = { status: 'active', sort_by: 'created_at', sort_order: 'desc' as const }
+async function loadAllUserKeys() {
+  // Historical video queries are allowed for expired/quota-exhausted keys.
+  // Keep those credentials available for task recovery after a page refresh;
+  // creation controls still select active keys only.
+  const filters = { sort_by: 'created_at', sort_order: 'desc' as const }
   const firstPage = await keysAPI.list(1, 100, filters)
   if (firstPage.pages <= 1) return firstPage.items || []
   const remainingPages = await Promise.all(
@@ -1463,29 +1688,33 @@ function nextPromptPage() {
 }
 
 function openFilePicker() {
+  if (processingReferenceImages.value) return
   fileInput.value?.click()
 }
 
 function handleFileInput(event: Event) {
   const input = event.target as HTMLInputElement
-  addReferenceFiles(Array.from(input.files || []))
+  void addReferenceFiles(Array.from(input.files || []))
   input.value = ''
 }
 
 function handleDrop(event: DragEvent) {
   isDragging.value = false
-  addReferenceFiles(Array.from(event.dataTransfer?.files || []))
+  void addReferenceFiles(Array.from(event.dataTransfer?.files || []))
 }
 
 function handlePaste(event: ClipboardEvent) {
   const files = Array.from(event.clipboardData?.files || []).filter(file => file.type.startsWith('image/'))
-  if (files.length) addReferenceFiles(files)
+  if (files.length) void addReferenceFiles(files)
 }
 
-function addReferenceFiles(files: File[]) {
-  const remaining = maxReferenceImages.value - referenceImages.value.length
+async function addReferenceFiles(files: File[]) {
+  if (processingReferenceImages.value) return
+  const targetReferences = activeReferenceImages.value
+  const targetMaximum = maxReferenceImages.value
+  const remaining = targetMaximum - targetReferences.length
   if (remaining <= 0) {
-    appStore.showError(`最多添加 ${maxReferenceImages.value} 张参考图`)
+    appStore.showError(`最多添加 ${targetMaximum} 张参考图`)
     return
   }
   const validFiles: File[] = []
@@ -1494,28 +1723,69 @@ function addReferenceFiles(files: File[]) {
       appStore.showError(`${file.name} 不是支持的图片格式`)
       continue
     }
-    if (file.size > MAX_REFERENCE_IMAGE_SIZE_BYTES) {
-      appStore.showError(`${file.name} 超过 ${MAX_REFERENCE_IMAGE_SIZE_MB}MB`)
+    const sourceLimit = studioMode.value === 'video' ? MAX_VIDEO_REFERENCE_SOURCE_BYTES : MAX_REFERENCE_IMAGE_SIZE_BYTES
+    const sourceLimitMB = studioMode.value === 'video' ? MAX_VIDEO_REFERENCE_SOURCE_MB : MAX_REFERENCE_IMAGE_SIZE_MB
+    if (file.size > sourceLimit) {
+      appStore.showError(`${file.name} 超过 ${sourceLimitMB}MB`)
       continue
     }
     validFiles.push(file)
   }
 
-  const accepted = validFiles
-    .slice(0, remaining)
-    .map(file => ({ file, url: URL.createObjectURL(file) }))
-  referenceImages.value.push(...accepted)
-  if (validFiles.length > remaining) appStore.showError(`已保留前 ${maxReferenceImages.value} 张有效参考图`)
+  if (studioMode.value !== 'video') {
+    const accepted = validFiles
+      .slice(0, remaining)
+      .map(file => ({ file, url: URL.createObjectURL(file) }))
+    targetReferences.push(...accepted)
+    if (validFiles.length > remaining) appStore.showError(`已保留前 ${targetMaximum} 张有效参考图`)
+    return
+  }
+
+  const uploadSequence = ++referenceUploadSequence
+  processingReferenceImages.value = true
+  let capacityExceeded = false
+  try {
+    for (let index = 0; index < validFiles.length; index++) {
+      if (targetReferences.length >= targetMaximum) {
+        capacityExceeded = true
+        break
+      }
+      const sourceFile = validFiles[index]
+      try {
+        const optimized = await optimizeVideoReferenceImage(sourceFile)
+        if (uploadSequence !== referenceUploadSequence) return
+        const currentTotal = targetReferences.reduce((sum, reference) => sum + reference.file.size, 0)
+        if (currentTotal + optimized.file.size > MAX_VIDEO_REFERENCE_TOTAL_BYTES) {
+          appStore.showError(`参考图压缩后合计不能超过 ${MAX_VIDEO_REFERENCE_TOTAL_MB}MB，${sourceFile.name} 未添加`)
+          continue
+        }
+        targetReferences.push({ file: optimized.file, url: URL.createObjectURL(optimized.file) })
+      } catch (error) {
+        if (uploadSequence !== referenceUploadSequence) return
+        appStore.showError(errorMessage(error, `${sourceFile.name} 无法作为视频参考图`))
+      }
+    }
+    if (capacityExceeded) appStore.showError(`已保留前 ${targetMaximum} 张有效参考图`)
+  } finally {
+    if (uploadSequence === referenceUploadSequence) processingReferenceImages.value = false
+  }
 }
 
 function removeReference(index: number) {
-  const [removed] = referenceImages.value.splice(index, 1)
+  const [removed] = activeReferenceImages.value.splice(index, 1)
   if (removed) URL.revokeObjectURL(removed.url)
 }
 
 function clearReferenceImages() {
-  referenceImages.value.forEach(reference => URL.revokeObjectURL(reference.url))
+  referenceUploadSequence++
+  processingReferenceImages.value = false
+  const allReferences = [
+    ...referenceImages.value,
+    ...videoShots.value.flatMap(shot => shot.referenceImages),
+  ]
+  new Set(allReferences.map(reference => reference.url)).forEach(url => URL.revokeObjectURL(url))
   referenceImages.value = []
+  videoShots.value.forEach(shot => { shot.referenceImages = [] })
 }
 
 function imageResolutionLabel(resolution: string) {
@@ -1663,8 +1933,29 @@ async function generateFromCurrentSettings(source: string) {
   const taskPrompt = taskProfessionalVideo
     ? videoShots.value.map((shot, index) => `镜头 ${index + 1}：${videoShotPrompt(shot.prompt)}`).join('\n')
     : effectivePrompt.value
-  const taskAspectRatio = aspectRatio.value
-  const taskReferenceCount = referenceImages.value.length
+  const videoShotSnapshots = taskMode === 'video'
+    ? taskProfessionalVideo
+      ? videoShots.value.map(shot => ({
+          prompt: videoShotPrompt(shot.prompt),
+          duration: Number(shot.duration),
+          resolution: shot.resolution,
+          aspectRatio: shot.aspectRatio,
+          generationMethod: shot.generationMethod,
+          referenceFiles: shot.referenceImages.map(reference => reference.file),
+        }))
+      : [{
+          prompt: taskPrompt,
+          duration: videoDuration.value,
+          resolution: videoResolution.value,
+          aspectRatio: aspectRatio.value,
+          generationMethod: videoGenerationMethod.value,
+          referenceFiles: referenceImages.value.map(reference => reference.file),
+        }]
+    : []
+  const taskAspectRatio = taskMode === 'video' ? videoShotSnapshots[0]?.aspectRatio || '16:9' : aspectRatio.value
+  const taskReferenceCount = taskMode === 'video'
+    ? videoShotSnapshots.reduce((sum, shot) => sum + shot.referenceFiles.length, 0)
+    : referenceImages.value.length
   const imageSnapshot: ImageGenerationSnapshot | null = taskMode === 'image'
     ? {
         apiKey: taskApiKey,
@@ -1687,13 +1978,7 @@ async function generateFromCurrentSettings(source: string) {
     ? {
         apiKey: taskApiKey,
         model: taskModel,
-        shots: taskProfessionalVideo
-          ? videoShots.value.map(shot => ({ prompt: videoShotPrompt(shot.prompt), duration: Number(shot.duration) }))
-          : [{ prompt: taskPrompt, duration: videoDuration.value }],
-        resolution: videoResolution.value,
-        aspectRatio: taskAspectRatio,
-        generationMethod: videoGenerationMethod.value,
-        referenceFiles: referenceImages.value.map(reference => reference.file),
+        shots: videoShotSnapshots,
       }
     : null
   generating.value = true
@@ -1723,19 +2008,23 @@ async function generateFromCurrentSettings(source: string) {
     outputs: [],
     imageCapability: taskMode === 'image' ? imageSnapshot?.capability : undefined,
     aspectRatio: taskAspectRatio,
-    resolution: taskMode === 'image' ? imageSnapshot?.resolution : videoSnapshot?.resolution,
+    resolution: taskMode === 'image' ? imageSnapshot?.resolution : videoSnapshot?.shots[0]?.resolution,
     outputSize: taskMode === 'image' && imageSnapshot?.capability === 'image2' ? imageSnapshot.size : undefined,
     imageSizeMode: taskMode === 'image' && imageSnapshot?.capability === 'image2' ? imageSnapshot.sizeMode : undefined,
     quality: taskMode === 'image' ? imageSnapshot?.quality : undefined,
     outputFormat: taskMode === 'image' ? imageSnapshot?.outputFormat : undefined,
     background: taskMode === 'image' ? imageSnapshot?.background : undefined,
     referenceCount: taskReferenceCount,
-    videoGenerationMethod: taskMode === 'video' ? videoSnapshot?.generationMethod : undefined,
+    videoGenerationMethod: taskMode === 'video' ? videoSnapshot?.shots[0]?.generationMethod : undefined,
     outputCount: taskMode === 'image' ? imageSnapshot?.outputCount : videoSnapshot?.shots.length,
     requestedDuration: taskMode === 'video' ? videoSnapshot?.shots.reduce((sum, shot) => sum + shot.duration, 0) : undefined,
     shotCount: taskMode === 'video' ? videoSnapshot?.shots.length : undefined,
     shotPrompts: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.prompt) : undefined,
     shotDurations: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.duration) : undefined,
+    shotAspectRatios: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.aspectRatio) : undefined,
+    shotResolutions: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.resolution) : undefined,
+    shotGenerationMethods: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.generationMethod) : undefined,
+    shotReferenceCounts: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.referenceFiles.length) : undefined,
     version: 'v1',
     source,
   }
@@ -1758,7 +2047,7 @@ async function generateFromCurrentSettings(source: string) {
   } catch (error) {
     work.status = 'failed'
     work.updatedAt = Date.now()
-    work.error = creatorGenerationErrorMessage(error)
+    work.error = creatorGenerationErrorMessage(error, taskMode)
     await persistWork(work)
     const failedWork = cloneWork(work)
     if (studioMode.value === work.type) selectedWork.value = failedWork
@@ -1812,7 +2101,7 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     try {
       result = await generate()
     } catch (error) {
-      if (input.capability !== 'grok' || !isRetryableGrokImageError(error)) throw error
+      if (input.capability !== 'grok' || !isRetryableGrokTransientError(error)) throw error
       generationProgress.value = 'Grok 上游暂时不可用，2 秒后自动重试（1/1）'
       await delay(2000)
       generationProgress.value = requestCount > 1
@@ -1927,8 +2216,14 @@ function imageDataUrlDimensions(output: string) {
   }
 }
 
-function creatorGenerationErrorMessage(error: unknown) {
+function creatorGenerationErrorMessage(error: unknown, mode: StudioMode = studioMode.value) {
   const message = errorMessage(error, '生成失败')
+  if (isRetryableGrokTransientError(error)) {
+    return mode === 'video'
+      ? `Grok 视频上游暂时不可用，系统已自动重试 ${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length} 次。请稍后带回参数重试；如果频繁出现，请为当前分组增加可用 Grok 账号。`
+      : 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
+  }
+  if (mode === 'video') return message
   if (/fixed\s+4K\s+SKU.*size\s+requests/i.test(message)) {
     return '当前创作分组把请求路由到了固定 4K 图片模型，但所选尺寸不是 4K。请重试，或切换创作分组/输出尺寸。'
   }
@@ -1944,16 +2239,13 @@ function creatorGenerationErrorMessage(error: unknown) {
   if (/(?:size|resolution).*(?:not supported|unsupported|invalid)|unsupported.*(?:size|resolution)/i.test(message)) {
     return '当前 gpt-image-2 图片通道不支持所选 4K 尺寸，请切换创作分组或改用 1K / 2K。'
   }
-  if (/upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway/i.test(message)) {
-    return 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
-  }
   if (/timeout|timed out|deadline exceeded|network|upstream request failed|gateway timeout|连接|超时|网络/i.test(message)) {
     return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“带回参数重试”，不要连续重复提交。'
   }
   return message
 }
 
-function isRetryableGrokImageError(error: unknown) {
+function isRetryableGrokTransientError(error: unknown) {
   const candidate = typeof error === 'object' && error
     ? error as { status?: number; code?: string | number; message?: string; error?: { message?: string } }
     : {}
@@ -1966,28 +2258,47 @@ function isRetryableGrokImageError(error: unknown) {
 
 async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot) {
   const key = input.apiKey
-  const imageDataUrls = await Promise.all(input.referenceFiles.map(fileToDataUrl))
-  const imageDataUrl = input.generationMethod === 'image' ? imageDataUrls[0] : undefined
-  const referenceImageDataUrls = input.generationMethod === 'reference' ? imageDataUrls : undefined
   const shots = input.shots
   const outputs: string[] = []
   const outputBlobs: Blob[] = []
   const requestIds: string[] = []
   for (let index = 0; index < shots.length; index++) {
     const shot = shots[index]
+    const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
+    const imageDataUrl = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
+    const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
     generationPhase.value = 'submitting'
     generationHasExactProgress.value = false
     generationProgress.value = shots.length > 1 ? `正在提交镜头 ${index + 1} / ${shots.length}` : '正在提交视频任务，请稍候'
     generationPercent.value = Math.max(generationPercent.value, Math.round(index / shots.length * 100))
-    const created = await createCreatorVideo(key, {
+    const request = {
       model: input.model,
       prompt: shot.prompt,
       duration: shot.duration,
-      resolution: input.resolution,
-      aspectRatio: input.aspectRatio,
+      resolution: shot.resolution,
+      aspectRatio: shot.aspectRatio,
       imageDataUrl,
       referenceImageDataUrls,
-    })
+    }
+    let created: Awaited<ReturnType<typeof createCreatorVideo>>
+    for (let attempt = 0; ; attempt++) {
+      try {
+        created = await createCreatorVideo(key, request)
+        break
+      } catch (error) {
+        if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
+        const retryNumber = attempt + 1
+        const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
+        const delaySeconds = retryDelay / 1000
+        generationProgress.value = shots.length > 1
+          ? `镜头 ${index + 1} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+          : `Grok 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+        await delay(retryDelay)
+        generationProgress.value = shots.length > 1
+          ? `正在重新提交镜头 ${index + 1} / ${shots.length}`
+          : '正在重新提交视频任务'
+      }
+    }
     if (!created.id) throw new Error('视频接口没有返回任务 ID')
     // Receiving an ID only means the task entered the provider queue. Keep the
     // percentage hidden until polling confirms that rendering has started.
@@ -2005,6 +2316,7 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
     outputBlobs.push(videoBlob)
     outputs.push(createTrackedObjectUrl(videoBlob))
     work.outputs = [...outputs]
+    work.videoBlobs = [...outputBlobs]
     work.updatedAt = Date.now()
     await persistWork(work)
   }
@@ -2084,6 +2396,7 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
 }
 
 async function persistWork(work: CreatorHistoryItem) {
+  if (work.type === 'video') await captureVideoBlobsForPersistence(work)
   await creatorHistory.put({
     ...work,
     outputs: work.outputs.filter(output => !output.startsWith('blob:')),
@@ -2095,33 +2408,76 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...work,
     outputs: [...work.outputs],
+    videoBlobs: work.videoBlobs ? [...work.videoBlobs] : undefined,
     shotPrompts: work.shotPrompts ? [...work.shotPrompts] : undefined,
     shotDurations: work.shotDurations ? [...work.shotDurations] : undefined,
+    shotAspectRatios: work.shotAspectRatios ? [...work.shotAspectRatios] : undefined,
+    shotResolutions: work.shotResolutions ? [...work.shotResolutions] : undefined,
+    shotGenerationMethods: work.shotGenerationMethods ? [...work.shotGenerationMethods] : undefined,
+    shotReferenceCounts: work.shotReferenceCounts ? [...work.shotReferenceCounts] : undefined,
+    shotActualOutputSizes: work.shotActualOutputSizes ? [...work.shotActualOutputSizes] : undefined,
+  }
+}
+
+async function captureVideoBlobsForPersistence(work: CreatorHistoryItem) {
+  if (work.outputs.length && work.videoBlobs?.length !== work.outputs.length) {
+    const blobs = await Promise.all(work.outputs.map(async (output, index) => {
+      if (!output.startsWith('blob:')) return work.videoBlobs?.[index]
+      try {
+        const response = await fetch(output)
+        return response.ok ? await response.blob() : undefined
+      } catch {
+        return undefined
+      }
+    }))
+    if (blobs.every((blob): blob is Blob => blob instanceof Blob)) work.videoBlobs = blobs
+  }
+  if (work.mergedOutput?.startsWith('blob:') && !work.mergedVideoBlob) {
+    try {
+      const response = await fetch(work.mergedOutput)
+      if (response.ok) work.mergedVideoBlob = await response.blob()
+    } catch {
+      // The merged video can be recreated from its persisted segments.
+    }
+  }
+}
+
+function restorePersistedVideoOutputs(work: CreatorHistoryItem) {
+  if (work.type !== 'video') return
+  if (!work.outputs.length && work.videoBlobs?.length) {
+    work.outputs = work.videoBlobs.map(createTrackedObjectUrl)
+  }
+  if (!work.mergedOutput && work.mergedVideoBlob) {
+    work.mergedOutput = createTrackedObjectUrl(work.mergedVideoBlob)
   }
 }
 
 function findKeyForWork(work: CreatorHistoryItem) {
-  const activeKeys = apiKeys.value.filter(key => key.status === 'active')
+  const recoveryKeys = apiKeys.value.filter(key => ['active', 'quota_exhausted', 'expired'].includes(key.status))
+  const exactKeys = recoveryKeys.filter(key => key.id === work.apiKeyId)
   if (work.apiKeyId) {
-    const exactKey = activeKeys.find(key => key.id === work.apiKeyId)
+    const exactKey = exactKeys.find(key => key.status === 'active') || exactKeys[0]
     if (exactKey) return exactKey
   }
   if (work.groupId) {
-    const groupKey = activeKeys.find(key => key.group_id === work.groupId)
+    const groupKey = recoveryKeys.find(key => key.group_id === work.groupId && key.status === 'active')
+      || recoveryKeys.find(key => key.group_id === work.groupId)
     if (groupKey) return groupKey
   }
   const namedGroup = groups.value.find(item => item.name === work.groupName)
   if (namedGroup) {
-    const namedGroupKey = activeKeys.find(key => key.group_id === namedGroup.id)
+    const namedGroupKey = recoveryKeys.find(key => key.group_id === namedGroup.id && key.status === 'active')
+      || recoveryKeys.find(key => key.group_id === namedGroup.id)
     if (namedGroupKey) return namedGroupKey
   }
-  const namedKey = activeKeys.find(key => key.group?.name === work.groupName)
+  const namedKey = recoveryKeys.find(key => key.group?.name === work.groupName && key.status === 'active')
+    || recoveryKeys.find(key => key.group?.name === work.groupName)
   if (namedKey) return namedKey
 
   // Creator history from versions before groupId/apiKeyId cannot survive a
   // group rename. Only fall back when the restored group has one unambiguous
   // active key; the video request is still authorized by that user key.
-  const selectedGroupKeys = activeKeys.filter(key => key.group_id === selectedGroupId.value)
+  const selectedGroupKeys = recoveryKeys.filter(key => key.group_id === selectedGroupId.value)
   if (selectedGroupKeys.length === 1) return selectedGroupKeys[0]
   return null
 }
@@ -2133,19 +2489,25 @@ function createTrackedObjectUrl(blob: Blob) {
 }
 
 async function selectWork(work: CreatorHistoryItem) {
+  restorePersistedVideoOutputs(work)
   selectedWork.value = work
   if (videoHistoryFeedback.value?.workId !== work.id) videoHistoryFeedback.value = null
+  const needsMergedVideo = isMultiShotVideo(work) && !work.mergedOutput
+  const shouldRefreshVideo = work.type === 'video'
+    && Boolean(work.requestId)
+    && (work.status === 'pending' || !work.outputs.length || needsMergedVideo)
+  if (shouldRefreshVideo) loadingVideoWorkId.value = work.id
   await restoreWorkSettings(work)
   if (work.type === 'image') await normalizeHistoricalImageWork(work)
-  const hasExpiredObjectUrl = work.outputs.some(output => output.startsWith('blob:'))
-  const needsMergedVideo = isMultiShotVideo(work) && !work.mergedOutput
-  if (work.type === 'video' && work.requestId && (work.status === 'pending' || hasExpiredObjectUrl || !work.outputs.length || needsMergedVideo)) {
-    await refreshVideoWork(work, true)
-  }
+  if (shouldRefreshVideo) await refreshVideoWork(work, true)
 }
 
 async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
-  if (checkingVideoHistory.value || !work.requestId) return
+  if (checkingVideoHistory.value || !work.requestId) {
+    if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
+    return
+  }
+  if (work.status === 'completed' && !work.outputs.length) loadingVideoWorkId.value = work.id
   const key = findKeyForWork(work)
   if (!key) {
     const message = '未找到该作品分组对应的可用 Key，暂时无法检查任务状态。'
@@ -2153,6 +2515,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
       && videoHistoryFeedback.value.tone === 'error'
       && videoHistoryFeedback.value.message === message
     videoHistoryFeedback.value = { workId: work.id, tone: 'error', message }
+    if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
     if (!quiet && !alreadyReported) appStore.showError(message)
     return
   }
@@ -2184,7 +2547,10 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
         pending = true
       }
     }
-    if (outputs.length) work.outputs = outputs
+    if (outputs.length) {
+      work.outputs = outputs
+      work.videoBlobs = outputBlobs
+    }
     if (work.status !== 'failed') work.status = pending ? 'pending' : 'completed'
     if (work.status === 'completed' && outputBlobs.length > 1) {
       await composeWorkVideo(work, outputBlobs, !quiet)
@@ -2224,6 +2590,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
     if (!quiet) appStore.showError(message)
   } finally {
     checkingVideoHistory.value = false
+    if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
   }
 }
 
@@ -2263,9 +2630,12 @@ async function composeWorkVideo(work: CreatorHistoryItem, blobs: Blob[], notifyF
   work.mergeError = undefined
   try {
     const { composeVideoSegments } = await import('@/services/videoComposer')
-    work.mergedOutput = createTrackedObjectUrl(await composeVideoSegments(blobs))
+    const mergedBlob = await composeVideoSegments(blobs)
+    work.mergedVideoBlob = mergedBlob
+    work.mergedOutput = createTrackedObjectUrl(mergedBlob)
   } catch (error) {
     work.mergedOutput = undefined
+    work.mergedVideoBlob = undefined
     work.mergeError = errorMessage(error, '分段素材已完成，但完整视频合成失败')
     if (notifyFailure) appStore.showWarning(work.mergeError)
   } finally {
@@ -2342,6 +2712,10 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
         id: crypto.randomUUID(),
         prompt: shotPrompt,
         duration: work.shotDurations?.[index] || Math.max(1, Math.round((work.requestedDuration || 8) / shotPrompts.length)),
+        generationMethod: work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text',
+        referenceImages: [],
+        aspectRatio: work.shotAspectRatios?.[index] || work.aspectRatio || '16:9',
+        resolution: work.shotResolutions?.[index] || historicalVideoResolution,
       }))
       selectedShotId.value = videoShots.value[0].id
       prompt.value = ''
@@ -2353,10 +2727,12 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
 
     await nextTick()
     await loadModels()
-    if (work.model) {
+    const restoringReferenceVideo = work.type === 'video' && requiresReferenceVideo15.value
+    if (work.model && !restoringReferenceVideo) {
       if (!modelOptions.value.includes(work.model)) modelOptions.value = [work.model, ...modelOptions.value]
       selectedModel.value = work.model
     }
+    if (restoringReferenceVideo) syncVideoModelForGenerationMethod()
     if (work.type === 'video') {
       videoResolution.value = historicalVideoResolution === '1080p' && !videoSupports1080p.value
         ? '720p'
@@ -2452,7 +2828,7 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     const mimeType = blob.type.startsWith('image/') ? blob.type : `image/${extension === 'jpg' ? 'jpeg' : extension}`
     const file = new File([blob], `creator-reference-${work.id}-${index + 1}.${extension}`, { type: mimeType })
     await restoreWorkSettings(work)
-    addReferenceFiles([file])
+    await addReferenceFiles([file])
     selectedWork.value = null
     await nextTick()
     document.getElementById('creator-prompt')?.focus()
@@ -2511,6 +2887,15 @@ function isMultiShotVideo(work: CreatorHistoryItem) {
   return work.type === 'video' && Math.max(work.shotCount || 0, work.outputs.length, workShotPrompts(work).length) > 1
 }
 
+function resultOutputCount(work: CreatorHistoryItem) {
+  return Math.max(1, work.outputCount || work.shotCount || work.outputs.length || 1)
+}
+
+function shouldShowResultParameters(work: CreatorHistoryItem) {
+  if (work.status === 'pending') return false
+  return work.outputs.length > 0 || (work.type === 'video' && Boolean(work.requestId))
+}
+
 function historyWorkTitle(work: CreatorHistoryItem) {
   const firstPrompt = workShotPrompts(work)[0] || work.prompt || '未命名作品'
   return isMultiShotVideo(work) ? `完整成片 · ${firstPrompt}` : firstPrompt
@@ -2535,6 +2920,20 @@ function shotDurationLabel(work: CreatorHistoryItem, index: number) {
   return duration ? `${duration} 秒` : '分段视频'
 }
 
+function workAspectRatio(work: CreatorHistoryItem, index?: number) {
+  return index === undefined
+    ? work.aspectRatio || '自动画幅'
+    : work.shotAspectRatios?.[index] || work.aspectRatio || '自动画幅'
+}
+
+function shotGenerationMeta(work: CreatorHistoryItem, index: number) {
+  const method = work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text'
+  const referenceCount = work.shotReferenceCounts?.[index] || 0
+  return referenceCount
+    ? `${videoGenerationMethodLabelFor(method)} · ${referenceCount} 张参考图`
+    : videoGenerationMethodLabelFor(method)
+}
+
 function mergedDownloadName(work: CreatorHistoryItem) {
   return `creator-complete-${work.id}.mp4`
 }
@@ -2543,24 +2942,31 @@ function resultMeta(work: CreatorHistoryItem) {
   return `${work.provider} · ${work.model} · ${work.aspectRatio || '自动画幅'} · ${workResolutionLabel(work)}`
 }
 
-function workResolutionLabel(work: CreatorHistoryItem) {
-  if (!work.resolution) return '默认清晰度'
+function workResolutionLabel(work: CreatorHistoryItem, index?: number) {
+  const resolution = index === undefined ? work.resolution : work.shotResolutions?.[index] || work.resolution
+  if (!resolution) return '默认清晰度'
   if (work.type === 'image' && (work.imageCapability === 'grok' || /^grok-/i.test(work.model))) {
-    return work.resolution === '2K' ? '2K · 2048' : '1K · 1024'
+    return resolution === '2K' ? '2K · 2048' : '1K · 1024'
   }
-  if (work.actualOutputSize) return `${work.resolution} · ${work.actualOutputSize.replace('x', '×')}`
-  if (work.outputSize) return `${work.resolution} · ${work.outputSize.replace('x', '×')}`
-  return work.resolution
+  const actualOutputSize = index === undefined || !isMultiShotVideo(work)
+    ? work.actualOutputSize
+    : work.shotActualOutputSizes?.[index]
+  if (actualOutputSize) return `${resolution} · ${actualOutputSize.replace('x', '×')}`
+  if (work.outputSize) return `${resolution} · ${work.outputSize.replace('x', '×')}`
+  return resolution
 }
 
-function resultAspectRatio(work: CreatorHistoryItem) {
+function resultAspectRatio(work: CreatorHistoryItem, index?: number) {
   if (work.type === 'video') {
-    const dimensions = /^(\d+)x(\d+)$/.exec(work.actualOutputSize || '')
+    const actualOutputSize = index === undefined || !isMultiShotVideo(work)
+      ? work.actualOutputSize
+      : work.shotActualOutputSizes?.[index]
+    const dimensions = /^(\d+)x(\d+)$/.exec(actualOutputSize || '')
     if (dimensions && Number(dimensions[1]) > 0 && Number(dimensions[2]) > 0) {
       return `${dimensions[1]} / ${dimensions[2]}`
     }
   }
-  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(work.aspectRatio || '')
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(workAspectRatio(work, index))
   return match ? `${match[1]} / ${match[2]}` : work.type === 'video' ? '16 / 9' : '1 / 1'
 }
 
@@ -2569,17 +2975,56 @@ function resultIsLandscape(work: CreatorHistoryItem) {
   return work.type === 'image' && !!match && Number(match[1]) > Number(match[2])
 }
 
-function resultMediaStyle(work: CreatorHistoryItem) {
-  return work.type === 'video' || resultIsLandscape(work)
-    ? { aspectRatio: resultAspectRatio(work) }
-    : undefined
+function resultMediaStyle(work: CreatorHistoryItem, index?: number) {
+  if (work.type === 'video') {
+    return {
+      aspectRatio: resultAspectRatio(work, index),
+      maxHeight: 'min(58vh, 620px)',
+    }
+  }
+  return resultIsLandscape(work) ? { aspectRatio: resultAspectRatio(work) } : undefined
 }
 
-function handleVideoMetadata(event: Event, work: CreatorHistoryItem) {
+function videoReadyKey(work: CreatorHistoryItem, index: number, scope = 'segment') {
+  return `${work.id}:${scope}:${index}`
+}
+
+function isVideoReady(work: CreatorHistoryItem, index: number, scope = 'segment') {
+  return Boolean(videoReadyKeys.value[videoReadyKey(work, index, scope)])
+}
+
+function markVideoLoading(work: CreatorHistoryItem, index: number, scope = 'segment') {
+  const key = videoReadyKey(work, index, scope)
+  if (!videoReadyKeys.value[key]) return
+  const next = { ...videoReadyKeys.value }
+  delete next[key]
+  videoReadyKeys.value = next
+}
+
+function markVideoReady(work: CreatorHistoryItem, index: number, scope = 'segment') {
+  const key = videoReadyKey(work, index, scope)
+  if (videoReadyKeys.value[key]) return
+  videoReadyKeys.value = { ...videoReadyKeys.value, [key]: true }
+}
+
+function handleVideoLoadedMetadata(event: Event, work: CreatorHistoryItem, index: number, scope = 'segment') {
+  markVideoReady(work, index, scope)
+  handleVideoMetadata(event, work, index, scope)
+}
+
+function handleVideoMetadata(event: Event, work: CreatorHistoryItem, index = 0, scope = 'segment') {
   const video = event.currentTarget as HTMLVideoElement
   if (work.type !== 'video' || !video.videoWidth || !video.videoHeight) return
 
   const dimensions = `${video.videoWidth}x${video.videoHeight}`
+  if (scope === 'segment' && isMultiShotVideo(work)) {
+    const shotSizes = [...(work.shotActualOutputSizes || [])]
+    if (shotSizes[index] === dimensions) return
+    shotSizes[index] = dimensions
+    work.shotActualOutputSizes = shotSizes
+    void persistWork(work)
+    return
+  }
   if (work.actualOutputSize === dimensions) return
   work.actualOutputSize = dimensions
   void persistWork(work)
@@ -2629,15 +3074,25 @@ function previewResult(output: string, type: StudioMode, index: number) {
 
 function addShot() {
   if (videoShots.value.length >= 6) return
-  const shot = { id: crypto.randomUUID(), prompt: '', duration: 8 }
+  const previous = selectedShot.value
+  const shot: VideoShot = {
+    id: crypto.randomUUID(),
+    prompt: '',
+    duration: 8,
+    generationMethod: previous?.generationMethod || videoGenerationMethod.value,
+    referenceImages: [],
+    aspectRatio: previous?.aspectRatio || aspectRatio.value || '16:9',
+    resolution: previous?.resolution || videoResolution.value,
+  }
   videoShots.value.push(shot)
   selectedShotId.value = shot.id
-  void nextTick(() => document.querySelector<HTMLElement>(`.sequence-shot[aria-label="选择镜头 ${videoShots.value.length}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' }))
+  void nextTick(() => document.querySelector<HTMLElement>(`.sequence-shot[aria-label="选择镜头 ${videoShots.value.length}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' }))
 }
 
 function removeShot(index: number) {
   if (videoShots.value.length <= 1) return
   const removed = videoShots.value[index]
+  removed?.referenceImages.forEach(reference => URL.revokeObjectURL(reference.url))
   videoShots.value.splice(index, 1)
   if (removed?.id === selectedShotId.value) {
     selectedShotId.value = videoShots.value[Math.min(index, videoShots.value.length - 1)]?.id || videoShots.value[0].id
@@ -2712,7 +3167,8 @@ function imageFileExtension(url: string) {
   return type === 'jpeg' ? 'jpg' : type
 }
 
-function handleVideoPlaybackError(work: CreatorHistoryItem) {
+function handleVideoPlaybackError(work: CreatorHistoryItem, index?: number, scope = 'segment') {
+  if (index !== undefined) markVideoLoading(work, index, scope)
   if (!work.requestId || checkingVideoHistory.value) return
   void refreshVideoWork(work, true)
 }
@@ -2766,7 +3222,12 @@ watch(selectedGroupId, () => {
 })
 
 watch(maxReferenceImages, maximum => {
-  while (referenceImages.value.length > maximum) removeReference(referenceImages.value.length - 1)
+  while (activeReferenceImages.value.length > maximum) removeReference(activeReferenceImages.value.length - 1)
+})
+
+watch(requiresReferenceVideo15, () => {
+  if (restoringWorkSettings) return
+  syncVideoModelForGenerationMethod()
 })
 
 watch(outputFormat, format => {
@@ -2788,6 +3249,9 @@ watch(imageResolution, resolution => {
 
 watch(videoResolutionOptions, options => {
   if (!options.includes(videoResolution.value)) videoResolution.value = '720p'
+  videoShots.value.forEach(shot => {
+    if (!options.includes(shot.resolution)) shot.resolution = '720p'
+  })
 })
 
 watch(aspectOptions, options => {
@@ -2815,7 +3279,11 @@ onBeforeUnmount(() => {
   window.removeEventListener('paste', handlePaste)
   if (generationTimer !== undefined) window.clearInterval(generationTimer)
   stopTemplateAutoplay()
-  referenceImages.value.forEach(reference => URL.revokeObjectURL(reference.url))
+  const referenceUrls = [
+    ...referenceImages.value,
+    ...videoShots.value.flatMap(shot => shot.referenceImages),
+  ].map(reference => reference.url)
+  new Set(referenceUrls).forEach(url => URL.revokeObjectURL(url))
   transientObjectUrls.forEach(url => URL.revokeObjectURL(url))
 })
 </script>
@@ -2829,8 +3297,8 @@ onBeforeUnmount(() => {
   --creator-muted: #738096;
   --creator-radius: 12px;
   --creator-radius-inner: 12px;
-  --creator-radius-large: 12px;
   --creator-surface-radius: 16px;
+  --creator-radius-large: var(--creator-surface-radius);
   --creator-workspace-gutter: 2rem;
   --creator-workspace-width: calc(100% - 4rem);
   position: relative;
@@ -2839,6 +3307,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex-direction: column;
   overflow: hidden;
+  border-radius: var(--creator-surface-radius);
   color: #142033;
 }
 
@@ -2989,7 +3458,22 @@ onBeforeUnmount(() => {
 .settings-panel { min-width: 0; height: 100%; background: #fff; }
 .history-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--creator-line); }
 .history-collapsed .history-panel { display: none; }
-.history-reopen { position: absolute; z-index: 4; top: 16px; left: 14px; }
+.playground-history-reopen-button {
+  width: auto;
+  height: 34px;
+  flex-shrink: 0;
+  gap: 6px;
+  padding: 0 10px;
+  border-color: #dbe5e4;
+  border-radius: 10px;
+  color: #64748b;
+  background: #fff;
+  font-size: 12px;
+  white-space: nowrap;
+}
+.playground-history-reopen-button:hover { border-color: #cce8e3; color: var(--creator-accent-strong); background: #edf9f7; }
+.playground-history-reopen-icon { display: inline-grid; width: 16px; height: 16px; place-items: center; }
+.playground-history-reopen-icon svg { width: 16px; height: 16px; }
 
 .history-heading { gap: 10px; padding: 22px 18px 14px; }
 .history-heading > div:first-child { min-width: 0; flex: 1; }
@@ -3066,6 +3550,10 @@ onBeforeUnmount(() => {
   margin-block: auto;
   margin-inline: var(--creator-workspace-gutter);
 }
+.result-workspace {
+  /* Historical results should start at the top of the scrollable canvas. */
+  margin-block: 0;
+}
 .inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 64px; }
 .inspiration-intro { text-align: center; }
 .inspiration-mark,
@@ -3136,7 +3624,28 @@ onBeforeUnmount(() => {
 .complete-video-card > header h3 { margin: 4px 0 0; color: #172033; font-size: 18px; }
 .complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 7px 0 0; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: 999px; color: #5d716d; background: #f7faf9; font-size: 10px; }
-.complete-video-media { display: block; width: 100%; max-height: min(58vh, 620px); background: #0f1717; object-fit: contain; }
+.complete-video-frame,
+.video-result-frame { position: relative; width: 100%; overflow: hidden; background: #101b1a; }
+.complete-video-frame { display: grid; max-height: min(58vh, 620px); }
+.complete-video-media { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: min(58vh, 620px); background: #0f1717; object-fit: contain; opacity: 0; transition: opacity 180ms ease; }
+.complete-video-media.video-ready { opacity: 1; }
+.video-result-frame { display: grid; max-height: min(58vh, 620px); }
+.video-result-frame > .result-media.video { position: relative; z-index: 1; height: 100%; opacity: 0; transition: opacity 180ms ease; }
+.video-result-frame > .result-media.video.video-ready { opacity: 1; }
+.video-loading-overlay,
+.video-loading-media { color: #dcebe8; background: #142321; }
+.video-loading-media { display: grid; height: auto; }
+.video-loading-overlay { position: absolute; z-index: 2; inset: 0; display: grid; justify-items: center; align-content: center; padding: 24px; text-align: center; }
+.video-loading-overlay strong,
+.video-loading-content strong { margin-top: 13px; color: #f1f8f6; font-size: 14px; font-weight: 700; }
+.video-loading-overlay p,
+.video-loading-content p { margin: 7px 0 0; color: #9bb4af; font-size: 11px; line-height: 1.5; }
+.video-loading-content { display: grid; justify-items: center; align-content: center; width: 100%; height: 100%; }
+.video-loading-spinner { display: inline-grid; width: 42px; height: 42px; place-items: center; border: 2px solid rgb(146 224 211 / 28%); border-top-color: #79dfd0; border-radius: 50%; color: #9cebe0; animation: creatorSpin 900ms linear infinite; }
+.video-loading-spinner svg { width: 18px; height: 18px; }
+.video-loading-grid { margin-bottom: 24px; }
+.video-loading-card { box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
+.video-loading-actions { min-height: 76px; }
 .complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 10px 12px 10px 18px; }
 .complete-video-card > footer div { min-width: 0; }
 .complete-video-card > footer strong,
@@ -3224,8 +3733,8 @@ onBeforeUnmount(() => {
 .sequence-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 38px; align-items: center; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid #dce8e5; }
 .sequence-eyebrow { display: flex; align-items: center; gap: 6px; margin: 0 0 7px; color: var(--creator-accent-strong); font-size: 8px; font-weight: 850; }
 .sequence-eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: #39d6bd; box-shadow: 0 0 0 4px #e0faf5; }
-.sequence-header h2 { margin: 0; color: #1f2d3d; font-size: 16px; font-weight: 780; }
-.sequence-header h2 span { margin-left: 7px; color: var(--creator-accent-strong); font-size: 10px; }
+.sequence-header h2 { display: flex; align-items: center; gap: 10px; margin: 0; color: #1f2d3d; font-size: 16px; font-weight: 780; }
+.sequence-header h2 span { display: inline-flex; min-height: 28px; align-items: center; padding: 0 10px; border: 1px solid #b9e1da; border-radius: 7px; color: var(--creator-accent-strong); background: #effbf8; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .sequence-header > div:first-child > p:last-child { margin: 5px 0 0; color: #8a98aa; font-size: 9px; }
 .sequence-header dl { display: flex; margin: 0; }
 .sequence-header dl > div { min-width: 76px; padding: 0 15px; border-left: 1px solid #dae5e3; }
@@ -3234,8 +3743,8 @@ onBeforeUnmount(() => {
 .sequence-add { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid #92e3d5; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #edfcf9; }
 .sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 8px; color: #8fa0b4; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .sequence-ruler i { height: 1px; background: repeating-linear-gradient(90deg, #b9d6d1 0 1px, transparent 1px 22%); border-bottom: 1px solid #d4e3e0; }
-.sequence-track { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 8px; scroll-snap-type: x proximity; scrollbar-color: #abd8d0 #e7f2f0; scrollbar-width: thin; }
-.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); flex: 0 0 310px; gap: 10px; min-height: 112px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; scroll-snap-align: start; }
+.sequence-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 2px 2px 8px; }
+.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 112px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
 .sequence-shot::before { position: absolute; top: 39px; bottom: 10px; left: 28px; width: 1px; background: #d9e8e5; content: ''; }
 .sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: 6px; color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
 .sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
@@ -3243,7 +3752,7 @@ onBeforeUnmount(() => {
 .sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 34px; height: 34px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
 .sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 7px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .sequence-shot-content { min-width: 0; }
-.sequence-shot-content > header { display: flex; align-items: center; gap: 5px; min-height: 24px; }
+.sequence-shot-content > header { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 24px; }
 .sequence-shot-content > header > strong { color: #64748b; font-size: 8px; }
 .sequence-shot-content > header > span { display: flex; align-items: center; gap: 3px; color: #91a0b2; font-size: 7px; }
 .sequence-shot-content > header > span i { width: 5px; height: 5px; border-radius: 50%; background: #c4d0d8; }
@@ -3253,12 +3762,12 @@ onBeforeUnmount(() => {
 .sequence-shot-content > header button:disabled { opacity: .25; }
 .sequence-shot-content textarea { width: 100%; height: 46px; padding: 5px 0; border: 0; outline: 0; resize: none; color: #344054; background: transparent; font-size: 10px; line-height: 1.45; }
 .sequence-shot-content textarea::placeholder { color: #a7b3c0; }
-.sequence-shot-content footer { display: flex; align-items: center; gap: 4px; }
+.sequence-shot-content footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
 .sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: 5px; color: #607b76; background: #f5faf9; font-size: 7px; }
 .sequence-shot-content footer label { display: flex; align-items: center; min-width: 58px; flex: 1; gap: 4px; margin-left: 2px; color: #8b98a8; font-size: 7px; }
 .sequence-shot-content footer input { min-width: 32px; flex: 1; accent-color: var(--creator-accent); }
 .sequence-shot-content footer strong { color: #536579; font-size: 7px; white-space: nowrap; }
-.sequence-inline-add { display: grid; flex: 0 0 94px; place-items: center; align-content: center; gap: 7px; min-height: 112px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; scroll-snap-align: start; }
+.sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; }
 .sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 8px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
 .sequence-footer strong { color: #6f8092; font-size: 8px; }
@@ -3309,6 +3818,7 @@ onBeforeUnmount(() => {
 .studio-input:disabled { cursor: not-allowed; color: #97a3b2; background: #f4f6f7; }
 .model-input { height: 42px; contain: layout; }
 .model-input.is-loading:disabled:not(:invalid) { color: #1b2638; background: #fff; }
+.model-compatibility-error { color: #b42318 !important; }
 textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-size-trigger { display: flex; align-items: center; justify-content: space-between; text-align: left; }
 .image-size-trigger svg { flex: 0 0 auto; color: #8c9aab; }
@@ -3369,6 +3879,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .generate-button:hover { background: var(--creator-accent-strong); }
 .key-needed > button:disabled,
 .generate-button:disabled { cursor: not-allowed; box-shadow: none; opacity: .45; }
+.generation-requirement { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #f2c14e; border-radius: 8px; color: #9a6200; background: #fffaf0; font-size: 11px; font-weight: 700; text-align: center; }
 .settings-scroll hr { margin: 17px 0; border: 0; border-top: 1px solid var(--creator-line); }
 .prompt-tool { display: block; width: 100%; margin-bottom: 18px; padding: 10px; border: 1px solid #d4e3e0; border-radius: 8px; text-align: left; background: #fbfdfd; }
 .prompt-tool > header { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 9px; }
@@ -3533,6 +4044,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .studio-input,
 :global(.dark) .stepper,
 :global(.dark) .stepper button { border-color: #354643; color: #c3cfcc; background: #172321; }
+:global(.dark) .playground-history-reopen-button { border-color: #354643; color: #9aafa9; background: #172321; }
+:global(.dark) .playground-history-reopen-button:hover { border-color: #354643; color: #83ddd0; background: #18332f; }
 :global(.dark) .studio-input { color: #ecf3f2; }
 :global(.dark) .image-size-mode-tabs,
 :global(.dark) .image-size-result { background: #172321; }
@@ -3570,6 +4083,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .sequence-shot-content textarea,
 :global(.dark) .result-stat-grid strong,
 :global(.dark) .result-parameter-details p { color: #dbe7e5; }
+:global(.dark) .sequence-header h2 span { border-color: #347a6f; color: #83ddd0; background: #15302c; }
 :global(.dark) .prompt-tool { background: #14211f; }
 :global(.dark) .prompt-tool > header { border-color: #334642; }
 :global(.dark) .prompt-tool header strong,
@@ -3606,7 +4120,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .professional-workspace { margin-top: 16px; padding: 13px; }
   .sequence-header { grid-template-columns: minmax(0, 1fr) 38px; }
   .sequence-header dl { display: none; }
-  .sequence-shot { flex-basis: min(310px, calc(100vw - 72px)); }
+  .sequence-track { grid-template-columns: minmax(0, 1fr); }
+  .sequence-shot { width: 100%; }
   .brief-body { grid-template-columns: 1fr; }
   .brief-summary { padding: 0 0 18px; border-right: 0; border-bottom: 1px solid #33423f; }
   .brief-copy { padding: 18px 0 0; }

@@ -69,6 +69,44 @@ describe('creatorHistory', () => {
     expect(secondRead[0].outputs).toEqual(['https://example.com/detached.png'])
   })
 
+  it('retains persisted video blobs in detached arrays', async () => {
+    const videoBlob = new Blob(['video'], { type: 'video/mp4' })
+    const item = createItem('persisted-video', 100, {
+      type: 'video',
+      outputs: [],
+      videoBlobs: [videoBlob],
+    })
+    await putCreatorHistory(item)
+    item.videoBlobs?.push(new Blob(['mutation'], { type: 'video/mp4' }))
+
+    const firstRead = await listCreatorHistory()
+    firstRead[0].videoBlobs?.push(new Blob(['read-mutation'], { type: 'video/mp4' }))
+    const secondRead = await listCreatorHistory()
+
+    expect(secondRead[0].videoBlobs).toEqual([videoBlob])
+  })
+
+  it('keeps per-shot video parameters in detached arrays', async () => {
+    const item = createItem('shot-settings', 100, {
+      type: 'video',
+      shotAspectRatios: ['9:16', '16:9'],
+      shotResolutions: ['720p', '1080p'],
+      shotGenerationMethods: ['image', 'reference'],
+      shotReferenceCounts: [1, 2],
+    })
+    await putCreatorHistory(item)
+
+    const firstRead = await listCreatorHistory()
+    firstRead[0].shotAspectRatios?.push('1:1')
+    firstRead[0].shotReferenceCounts?.fill(0)
+    const secondRead = await listCreatorHistory()
+
+    expect(secondRead[0].shotAspectRatios).toEqual(['9:16', '16:9'])
+    expect(secondRead[0].shotResolutions).toEqual(['720p', '1080p'])
+    expect(secondRead[0].shotGenerationMethods).toEqual(['image', 'reference'])
+    expect(secondRead[0].shotReferenceCounts).toEqual([1, 2])
+  })
+
   it('removes one work and clears all works', async () => {
     await putCreatorHistory(createItem('first', 100))
     await putCreatorHistory(createItem('second', 200))
