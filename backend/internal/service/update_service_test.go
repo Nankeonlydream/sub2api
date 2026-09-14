@@ -31,10 +31,11 @@ type updateServiceGitHubClientStub struct {
 	release        *GitHubRelease
 	recentReleases []*GitHubRelease
 	recentErr      error
+	latestErr      error
 }
 
 func (s *updateServiceGitHubClientStub) FetchLatestRelease(context.Context, string) (*GitHubRelease, error) {
-	return s.release, nil
+	return s.release, s.latestErr
 }
 
 func (s *updateServiceGitHubClientStub) FetchRecentReleases(context.Context, string, int) ([]*GitHubRelease, error) {
@@ -50,7 +51,7 @@ func (s *updateServiceGitHubClientStub) FetchChecksumFile(context.Context, strin
 }
 
 func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
-	svc := NewUpdateService(
+	svc := newLegacyUpdateTestService(
 		&updateServiceCacheStub{},
 		&updateServiceGitHubClientStub{
 			release: &GitHubRelease{
@@ -70,7 +71,7 @@ func TestUpdateServicePerformUpdateNoUpdateReturnsSentinel(t *testing.T) {
 }
 
 func newRollbackTestService(current string, releases []*GitHubRelease) *UpdateService {
-	return NewUpdateService(
+	return newLegacyUpdateTestService(
 		&updateServiceCacheStub{},
 		&updateServiceGitHubClientStub{recentReleases: releases},
 		current,
@@ -132,7 +133,7 @@ func TestUpdateServiceListRollbackVersionsEmptyWhenNoneOlder(t *testing.T) {
 }
 
 func TestUpdateServiceListRollbackVersionsPropagatesFetchError(t *testing.T) {
-	svc := NewUpdateService(
+	svc := newLegacyUpdateTestService(
 		&updateServiceCacheStub{},
 		&updateServiceGitHubClientStub{recentErr: errors.New("github unavailable")},
 		"0.1.147",
@@ -184,4 +185,52 @@ func TestUpdateServiceRollbackToVersionAcceptsVPrefix(t *testing.T) {
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrRollbackVersionNotAllowed)
 	require.Contains(t, err.Error(), "no compatible release found")
+}
+
+// Retain coverage of the upstream implementation without exposing an unsafe
+// runtime switch in the custom fork.
+func newLegacyUpdateTestService(cache UpdateCache, client GitHubReleaseClient, version, buildType string) *UpdateService {
+	svc := NewUpdateService(cache, client, version, buildType)
+	svc.customUpdates = false
+	return svc
+}
+
+func TestCustomBuildBlocksAllBinaryReplacementPaths(t *testing.T) {
+	svc := NewUpdateService(nil, nil, "0.2.4-creator.1", "release")
+	require.True(t, svc.UsesCustomUpdates())
+	require.ErrorIs(t, svc.PerformUpdate(context.Background()), ErrCustomUpdateRequired)
+	require.ErrorIs(t, svc.Rollback(), ErrCustomUpdateRequired)
+	require.ErrorIs(t, svc.RollbackToVersion(context.Background(), "0.2.3"), ErrCustomUpdateRequired)
+	require.ErrorIs(t, svc.applyReleaseAssets(context.Background(), nil), ErrCustomUpdateRequired)
+	versions, err := svc.ListRollbackVersions(context.Background())
+	require.NoError(t, err)
+	require.Empty(t, versions)
+}
+
+func TestCustomBuildPolicyOverridesLegacyCachedUpdateInfo(t *testing.T) {
+	svc := NewUpdateService(&updateServiceCacheStub{}, nil, "0.2.4", "release")
+	svc.saveToCache(context.Background(), &UpdateInfo{LatestVersion: "0.2.5"})
+	info, err := svc.CheckUpdate(context.Background(), false)
+	require.NoError(t, err)
+	require.Equal(t, "creator", info.UpdateMode)
+}
+
+func TestCheckUpdateFailureDoesNotInventOfficialVersion(t *testing.T) {
+	cache := &updateServiceCacheStub{}
+	svc := NewUpdateService(cache, &updateServiceGitHubClientStub{latestErr: errors.New("github unavailable")}, "0.2.4-creator.local.123", "release")
+	info, err := svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Empty(t, info.LatestVersion)
+	require.Nil(t, info.ReleaseInfo)
+	require.False(t, info.HasUpdate)
+	require.NotEmpty(t, info.Warning)
+	require.Equal(t, "creator", info.UpdateMode)
+
+	svc.saveToCache(context.Background(), &UpdateInfo{LatestVersion: "0.2.5", ReleaseInfo: &ReleaseInfo{Name: "Sub2API 0.2.5"}})
+	info, err = svc.CheckUpdate(context.Background(), true)
+	require.NoError(t, err)
+	require.Equal(t, "0.2.5", info.LatestVersion)
+	require.True(t, info.Cached)
+	require.True(t, info.HasUpdate)
+	require.NotEmpty(t, info.Warning)
 }

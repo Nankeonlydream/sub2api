@@ -1,0 +1,10 @@
+{
+  "repository": "/workspace/sub2api",
+  "work_dir": "/app/creator-builds",
+  "upstream_url": "https://github.com/Wei-Shaw/sub2api.git",
+  "upstream_ref": "refs/heads/main",
+  "pnpm": "/usr/local/bin/pnpm",
+  "include_working_tree": true,
+  "auto_deploy": true,
+  "supervisor_socket": "/app/creator-builds/supervisor.sock"
+}

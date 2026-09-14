@@ -1,0 +1,22 @@
+# Local Docker testing only. Always combine with the existing base Compose file
+# and docker-compose.build.yml, preserving the same project and data volumes.
+services:
+  sub2api:
+    image: sub2api-creator-local:latest
+    build:
+      target: creator-local
+      args:
+        VERSION: ${CREATOR_LOCAL_VERSION:-}
+    environment:
+      CREATOR_UPDATE_CONFIG: /app/creator-update.json
+    command: ["/app/creator-supervisor"]
+    stop_grace_period: 180s
+    volumes:
+      - ..:/workspace/sub2api:ro
+      - ./creator-update.docker.json:/app/creator-update.json:ro
+      - creator_update_builds:/app/creator-builds
+      - creator_update_home:/home/sub2api
+
+volumes:
+  creator_update_builds:
+  creator_update_home:

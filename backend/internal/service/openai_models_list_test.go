@@ -231,6 +231,26 @@ func TestFetchOpenAIModelsListEmptyAndMalformedResponses(t *testing.T) {
 	}
 }
 
+func TestOpenAIModelsRefreshReusesCacheFilledBeforeJoiningSingleflight(t *testing.T) {
+	s := &OpenAIGatewayService{}
+	request := openAIModelsRequest{url: "https://models.example/v1/models", standardModelsList: true}
+	key := buildOpenAIModelsCacheKey(request)
+	_, state := s.openAIModelsCache.get(key, time.Now())
+	require.Equal(t, openAIModelsCacheMiss, state)
+	// Simulate another request finishing between the initial lookup and joining
+	// singleflight; the late caller must observe the newly populated cache.
+	cached := &OpenAIModelsResponse{Body: []byte(`{"data":[{"id":"shared-model"}]}`)}
+	s.openAIModelsCache.set(key, cached, time.Now())
+	var calls atomic.Int32
+	result := <-s.refreshCachedOpenAIModels(key, request, func(context.Context, string) (*OpenAIModelsResponse, error) {
+		calls.Add(1)
+		return &OpenAIModelsResponse{Body: []byte(`{"data":[]}`)}, nil
+	})
+	require.NoError(t, result.Err)
+	require.Equal(t, cached, result.Val)
+	require.Zero(t, calls.Load())
+}
+
 func TestPinnedOpenAIModelsListMixedAccountsShareColdCacheAcrossGroups(t *testing.T) {
 	_, oauthCalls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"shared-model"},{"slug":"oauth-special"}]}`)
 	var apiCalls atomic.Int32

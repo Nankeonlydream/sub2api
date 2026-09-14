@@ -122,6 +122,8 @@ docker compose -f docker-compose.local.yml logs -f sub2api
 
 ### Updating a Local Source Build
 
+For custom forks, the version badge now uses a local merge/test/build task instead of replacing the application with an official binary. See [the custom update local testing guide](../docs/CREATOR_UPDATE_LOCAL_CN.md). Production CI publishing and rolling deployment are not enabled by this local mode.
+
 The Docker application embeds the compiled frontend in its Go binary. Editing files in `frontend/src` or restarting the existing container does not update the page served on port 8080; rebuild the image and recreate the application container.
 
 For an existing named-volume deployment, run from the repository root:

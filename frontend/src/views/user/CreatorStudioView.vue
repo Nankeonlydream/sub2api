@@ -225,7 +225,7 @@
             <header>
               <div>
                 <p class="eyebrow">完整成片</p>
-                <h3>所有镜头已按顺序合成</h3>
+                <h3>{{ selectedWork.mergedOutput ? '所有镜头已按顺序合成' : '镜头素材已完成，等待合成完整视频' }}</h3>
                 <p>{{ completeVideoDescription(selectedWork) }}</p>
               </div>
               <span>{{ selectedWork.outputs.length }} 个镜头 · {{ selectedWork.requestedDuration || 0 }} 秒</span>
@@ -445,7 +445,7 @@
             <div>
               <p class="sequence-eyebrow"><i></i> PRO EDITOR · SEQUENCE</p>
               <h2>镜头序列 <span>{{ videoShots.length }} / 6</span></h2>
-              <p>按时间顺序编排画面，点击镜头后可直接编辑参数</p>
+              <p>按时间顺序编排画面，点击镜头后在右侧编辑描述与参数</p>
             </div>
             <dl>
               <div><dt>总时长</dt><dd>{{ formatSequenceDuration(totalShotDuration) }}</dd></div>
@@ -483,7 +483,7 @@
                     <button type="button" title="删除镜头" :disabled="videoShots.length === 1 || processingReferenceImages" @click="removeShot(index)"><Icon name="x" size="xs" /></button>
                   </div>
                 </header>
-                <textarea v-model="shot.prompt" maxlength="8000" placeholder="描述这个镜头的画面、动作与运镜"></textarea>
+                <p class="sequence-shot-prompt" :class="{ empty: !shot.prompt }">{{ shot.prompt || '在右侧描述这个镜头的画面、动作与运镜' }}</p>
                 <footer>
                   <span>
                     {{ videoGenerationMethodLabelFor(shot.generationMethod) }}
@@ -491,10 +491,7 @@
                   </span>
                   <span>{{ shot.aspectRatio }}</span>
                   <span>{{ shot.resolution }}</span>
-                  <label title="调整镜头时长">
-                    <input v-model.number="shot.duration" type="range" min="1" max="15" />
-                    <strong>{{ shot.duration }} 秒</strong>
-                  </label>
+                  <span>{{ shot.duration }} 秒</span>
                 </footer>
               </div>
             </article>
@@ -788,11 +785,6 @@
                   <option value="high">高</option>
                 </select>
               </div>
-              <label class="toggle-row wide">
-                <span><strong>透明背景</strong><small>仅 PNG / WebP 可用</small></span>
-                <input v-model="transparentBackground" type="checkbox" :disabled="outputFormat === 'jpeg'" />
-                <i></i>
-              </label>
             </div>
 
             <div class="field-block">
@@ -831,22 +823,24 @@
 
             <div class="field-block">
               <label>{{ professionalVideo ? `镜头 ${selectedShotIndex + 1} 时长` : '视频时长' }}</label>
-              <div class="stepper">
+              <div class="stepper video-control-row">
                 <button type="button" title="减少时长" :disabled="configuredVideoDuration <= 1" @click="adjustVideoDuration(-1)"><Icon name="minus" size="sm" /></button>
                 <strong>{{ configuredVideoDuration }} 秒</strong>
                 <button type="button" title="增加时长" :disabled="configuredVideoDuration >= 15" @click="adjustVideoDuration(1)"><Icon name="plus" size="sm" /></button>
               </div>
             </div>
 
-            <div class="video-duration-estimate" aria-label="预计总时长">
+            <div class="video-duration-estimate video-control-row" aria-label="预计总时长">
               <span>预计总时长 <strong>{{ estimatedVideoDuration }} 秒</strong></span>
               <small>{{ estimatedVideoMode }}</small>
             </div>
 
-            <label class="toggle-row">
-              <span><strong>{{ professionalVideo ? '收起专业工作区' : '展开专业工作区' }}</strong><small>镜头编辑器会显示在主画布</small></span>
+            <label class="toggle-row professional-toggle video-control-row">
+              <span class="professional-toggle-icon"><Icon name="grid" size="sm" /></span>
+              <span class="professional-toggle-copy"><strong>{{ professionalVideo ? '收起专业工作区' : '展开专业工作区' }}</strong><small>主画布展示镜头序列，选中后在右侧编辑</small></span>
+              <span class="professional-toggle-hint" title="镜头、排序、逐镜头参考与重试">镜头、排序、逐镜头参考与重试</span>
               <input v-model="professionalVideo" type="checkbox" />
-              <i></i>
+              <span class="professional-toggle-chevron"><Icon name="chevronDown" size="sm" /></span>
             </label>
           </template>
 
@@ -1205,7 +1199,6 @@ const videoResolution = ref('720p')
 const videoGenerationMethod = ref<VideoGenerationMethod>('text')
 const imageQuality = ref('auto')
 const outputFormat = ref('png')
-const transparentBackground = ref(false)
 const outputCount = ref(1)
 const videoDuration = ref(8)
 const professionalVideo = ref(false)
@@ -1387,9 +1380,19 @@ const editorPrompt = computed({
     prompt.value = value
   },
 })
-const configuredVideoDuration = computed(() => professionalVideo.value
-  ? Number(selectedShot.value?.duration || 0)
-  : videoDuration.value)
+const configuredVideoDuration = computed({
+  get: () => professionalVideo.value
+    ? Number(selectedShot.value?.duration || 0)
+    : videoDuration.value,
+  set: (value: number) => {
+    const next = Math.max(1, Math.min(15, value))
+    if (professionalVideo.value && selectedShot.value) {
+      selectedShot.value.duration = next
+      return
+    }
+    videoDuration.value = next
+  },
+})
 const estimatedVideoDuration = computed(() => professionalVideo.value ? totalShotDuration.value : videoDuration.value)
 const estimatedVideoMode = computed(() => professionalVideo.value && videoShots.value.length > 1 ? '按镜头顺序拼接' : '单段视频')
 const effectivePrompt = computed(() => {
@@ -1523,8 +1526,10 @@ function image2StandardModel() {
 }
 
 function imageModelForGeneration() {
-  if (imageCapability.value !== 'image2') return selectedModel.value
-  return image2StandardModel() || selectedModel.value
+  if (imageCapability.value === 'image2' && isImage2FourKModel(selectedModel.value)) {
+    return image2StandardModel() || selectedModel.value
+  }
+  return selectedModel.value
 }
 
 function syncSelectedGroup() {
@@ -1640,12 +1645,7 @@ function useTemplate(template: PromptTemplate) {
 }
 
 function adjustVideoDuration(delta: -1 | 1) {
-  const next = Math.max(1, Math.min(15, configuredVideoDuration.value + delta))
-  if (professionalVideo.value && selectedShot.value) {
-    selectedShot.value.duration = next
-    return
-  }
-  videoDuration.value = next
+  configuredVideoDuration.value += delta
 }
 
 function previousTemplate() {
@@ -1967,7 +1967,7 @@ async function generateFromCurrentSettings(source: string) {
         size: sizeForImage(),
         quality: imageQuality.value,
         outputFormat: outputFormat.value,
-        background: transparentBackground.value && outputFormat.value !== 'jpeg' ? 'transparent' : 'auto',
+        background: 'auto',
         referenceFiles: referenceImages.value.map(reference => reference.file),
         aspectRatio: taskAspectRatio,
         resolution: imageResolution.value,
@@ -2082,7 +2082,7 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     size: input.size,
     quality: input.quality,
     outputFormat: input.outputFormat,
-    background: input.background,
+    background: 'auto',
     // Grok may return temporary cross-origin URLs that browsers cannot save
     // through the download attribute. Base64 keeps the result self-contained.
     ...(usesBase64Response ? { responseFormat: 'b64_json' } : {}),
@@ -2646,11 +2646,8 @@ async function composeWorkVideo(work: CreatorHistoryItem, blobs: Blob[], notifyF
 async function recomposeVideo(work: CreatorHistoryItem) {
   if (composingWorkId.value) return
   try {
-    const blobs = await Promise.all(work.outputs.map(async (output) => {
-      const response = await fetch(output)
-      if (!response.ok) throw new Error(`读取镜头素材失败：HTTP ${response.status}`)
-      return response.blob()
-    }))
+    const blobs = await readVideoSegmentBlobs(work)
+    work.videoBlobs = blobs
     await composeWorkVideo(work, blobs, true)
     work.updatedAt = Date.now()
     await persistWork(work)
@@ -2660,6 +2657,48 @@ async function recomposeVideo(work: CreatorHistoryItem) {
   } catch (error) {
     appStore.showError(errorMessage(error, '完整视频合成失败'))
   }
+}
+
+/**
+ * Recover segments without depending on temporary object URLs. Those URLs
+ * are intentionally omitted from IndexedDB and may have been revoked after a
+ * refresh or a failed composition attempt; the original video task endpoint
+ * remains a valid fallback while the provider retains the task.
+ */
+async function readVideoSegmentBlobs(work: CreatorHistoryItem): Promise<Blob[]> {
+  const requestIds = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+  const key = requestIds.length ? findKeyForWork(work) : null
+
+  return Promise.all(work.outputs.map(async (output, index) => {
+    const persisted = work.videoBlobs?.[index]
+    if (persisted instanceof Blob && persisted.size > 0) return persisted
+
+    let outputError: unknown
+    if (output) {
+      try {
+        const response = await fetch(output)
+        if (response.ok) {
+          const blob = await response.blob()
+          if (blob.size > 0) return blob
+        } else {
+          outputError = new Error(`读取镜头素材失败：HTTP ${response.status}`)
+        }
+      } catch (error) {
+        outputError = error
+      }
+    }
+
+    const requestId = requestIds[index]
+    if (key && requestId) {
+      try {
+        return await getCreatorVideoContent(key.key, requestId)
+      } catch (error) {
+        outputError = error
+      }
+    }
+
+    throw outputError || new Error(`缺少第 ${index + 1} 段视频素材`)
+  }))
 }
 
 async function removeWork(work: CreatorHistoryItem) {
@@ -2689,7 +2728,6 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       outputCount.value = Math.max(1, Math.min(4, work.outputCount || work.outputs.length || 1))
       imageQuality.value = work.quality || 'auto'
       outputFormat.value = work.outputFormat || 'png'
-      transparentBackground.value = work.background === 'transparent'
     } else {
       aspectRatio.value = work.aspectRatio || '16:9'
       videoResolution.value = historicalVideoResolution
@@ -2907,6 +2945,7 @@ function resultDescription(work: CreatorHistoryItem, index: number) {
 
 function completeVideoDescription(work: CreatorHistoryItem) {
   const count = workShotPrompts(work).length
+  if (!work.mergedOutput) return `${count} 个镜头素材已保留，合成完成后可预览或下载完整视频。`
   return `${count} 个镜头已按时间顺序拼接，完整保留每段画面与声音，可直接预览或下载。`
 }
 
@@ -3184,6 +3223,7 @@ function formatHistoryTime(timestamp: number) {
 }
 
 function errorMessage(error: unknown, fallback: string) {
+  if (typeof error === 'string' && error.trim()) return error
   if (error instanceof Error && error.message) return error.message
   if (typeof error === 'object' && error) {
     const candidate = error as { message?: string; error?: { message?: string } }
@@ -3228,10 +3268,6 @@ watch(maxReferenceImages, maximum => {
 watch(requiresReferenceVideo15, () => {
   if (restoringWorkSettings) return
   syncVideoModelForGenerationMethod()
-})
-
-watch(outputFormat, format => {
-  if (format === 'jpeg') transparentBackground.value = false
 })
 
 watch(maxOutputCount, maximum => {
@@ -3610,26 +3646,31 @@ onBeforeUnmount(() => {
 .progress-track.indeterminate span { width: 34%; animation: creatorProgress 1.7s ease-in-out infinite; }
 .generation-note { margin-top: 12px; color: #8798ac; font-size: 12px; font-weight: 500; line-height: 1.5; }
 .result-workspace { padding: 32px 0 24px; }
-.result-heading { align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.result-heading { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .result-heading > div { min-width: 0; }
-.result-heading .eyebrow { margin: 0 0 8px; }
-.result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 9px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.result-heading-complete { align-items: center; }
-.result-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border: 1px solid #d6e4e1; border-radius: 17px; color: #728093; background: #fff; font-size: 11px; }
-.result-heading-actions .secondary-command { border-color: #d6e4e1; color: #3f5d59; }
+.result-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-heading-complete { align-items: flex-start; flex-wrap: wrap; }
+.result-heading-complete > div:first-child { flex: 1 1 240px; }
+.result-heading h2 { font-size: 20px; font-weight: 700; line-height: 1.4; }
+.result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
+.result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); white-space: nowrap; color: #728093; background: #fff; font-size: 11px; }
+.result-heading-actions .secondary-command { min-height: 34px; padding: 0 12px; flex-shrink: 0; white-space: nowrap; font-weight: 600; border-color: #d6e4e1; color: #3f5d59; }
+.result-heading-actions .icon-action { flex-shrink: 0; width: 34px; height: 34px; }
 .result-heading-actions .primary-soft { border-color: #a9e3d9; color: var(--creator-accent-strong); background: #f1fbf8; }
 .complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
-.complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; border-bottom: 1px solid #dce7e5; }
-.complete-video-card > header h3 { margin: 4px 0 0; color: #172033; font-size: 18px; }
-.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 7px 0 0; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: 999px; color: #5d716d; background: #f7faf9; font-size: 10px; }
+.complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #dce7e5; }
+.complete-video-card > header > div { min-width: 0; }
+.complete-video-card > header .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.complete-video-card > header h3 { margin: 0; color: #172033; font-size: 16px; font-weight: 700; line-height: 1.4; }
+.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; font-weight: 400; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius); white-space: nowrap; color: #5d716d; background: #f7faf9; font-size: 10px; }
 .complete-video-frame,
 .video-result-frame { position: relative; width: 100%; overflow: hidden; background: #101b1a; }
-.complete-video-frame { display: grid; max-height: min(58vh, 620px); }
+.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
 .complete-video-media { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: min(58vh, 620px); background: #0f1717; object-fit: contain; opacity: 0; transition: opacity 180ms ease; }
 .complete-video-media.video-ready { opacity: 1; }
-.video-result-frame { display: grid; max-height: min(58vh, 620px); }
+.video-result-frame { display: grid; border-radius: 0; max-height: min(58vh, 620px); }
 .video-result-frame > .result-media.video { position: relative; z-index: 1; height: 100%; opacity: 0; transition: opacity 180ms ease; }
 .video-result-frame > .result-media.video.video-ready { opacity: 1; }
 .video-loading-overlay,
@@ -3660,11 +3701,12 @@ onBeforeUnmount(() => {
 .complete-video-pending.failed { color: #b64b42; }
 .complete-video-pending.failed > span { border-color: #e7b4ae; background: #fff5f3; }
 .segment-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 2px 0 12px; }
-.segment-heading h3 { margin: 4px 0 0; color: #263347; font-size: 16px; }
+.segment-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.segment-heading h3 { margin: 0; color: #263347; font-size: 16px; font-weight: 700; }
 .segment-heading > span { color: #8593a5; font-size: 11px; }
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .result-grid.single { grid-template-columns: minmax(0, 1fr); }
-.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; border-radius: var(--creator-surface-radius); background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
+.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
 .result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: 6px; color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
 .result-media {
   position: relative;
@@ -3693,6 +3735,8 @@ onBeforeUnmount(() => {
 .result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
 .result-segment-grid .result-description p { display: -webkit-box; line-height: 1.45; text-overflow: initial; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.result-workspace .icon-action,
+.result-workspace .secondary-command { border-radius: var(--creator-radius); }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
 .result-error { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #e7b4ae; border-radius: 8px; color: #b64b42; background: #fff8f7; text-align: center; }
 .result-error strong { margin-top: 14px; color: #7b312b; }
@@ -3708,7 +3752,9 @@ onBeforeUnmount(() => {
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { margin-top: 14px; }
 .result-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
+.result-card,
+.result-stat-grid article { border-radius: var(--creator-radius); }
+.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; background: rgb(255 255 255 / 72%); }
 .result-stat-grid span,
 .result-parameter-details div > span { display: block; color: #64748b; font-size: 10px; }
 .result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -3744,14 +3790,14 @@ onBeforeUnmount(() => {
 .sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 8px; color: #8fa0b4; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .sequence-ruler i { height: 1px; background: repeating-linear-gradient(90deg, #b9d6d1 0 1px, transparent 1px 22%); border-bottom: 1px solid #d4e3e0; }
 .sequence-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 2px 2px 8px; }
-.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 112px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
+.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 132px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
 .sequence-shot::before { position: absolute; top: 39px; bottom: 10px; left: 28px; width: 1px; background: #d9e8e5; content: ''; }
 .sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: 6px; color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
 .sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
 .sequence-shot-preview::before { position: absolute; top: 11px; left: 10px; width: 38px; height: 15px; border-top: 1px solid #bddbd5; border-left: 1px solid #bddbd5; transform: skewX(-28deg); content: ''; }
 .sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 34px; height: 34px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
 .sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 7px; font-weight: 750; font-variant-numeric: tabular-nums; }
-.sequence-shot-content { min-width: 0; }
+.sequence-shot-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .sequence-shot-content > header { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 24px; }
 .sequence-shot-content > header > strong { color: #64748b; font-size: 8px; }
 .sequence-shot-content > header > span { display: flex; align-items: center; gap: 3px; color: #91a0b2; font-size: 7px; }
@@ -3760,13 +3806,10 @@ onBeforeUnmount(() => {
 .sequence-shot-content > header button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 5px; color: #718096; }
 .sequence-shot-content > header button:hover:not(:disabled) { color: var(--creator-accent-strong); background: #eff9f7; }
 .sequence-shot-content > header button:disabled { opacity: .25; }
-.sequence-shot-content textarea { width: 100%; height: 46px; padding: 5px 0; border: 0; outline: 0; resize: none; color: #344054; background: transparent; font-size: 10px; line-height: 1.45; }
-.sequence-shot-content textarea::placeholder { color: #a7b3c0; }
-.sequence-shot-content footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.sequence-shot-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; flex: none; margin: 0; padding: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #344054; font-size: 10px; line-height: 1.5; }
+.sequence-shot-prompt.empty { color: #a7b3c0; }
+.sequence-shot-content footer { display: flex; flex-shrink: 0; margin-top: auto; flex-wrap: wrap; align-items: center; gap: 4px; }
 .sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: 5px; color: #607b76; background: #f5faf9; font-size: 7px; }
-.sequence-shot-content footer label { display: flex; align-items: center; min-width: 58px; flex: 1; gap: 4px; margin-left: 2px; color: #8b98a8; font-size: 7px; }
-.sequence-shot-content footer input { min-width: 32px; flex: 1; accent-color: var(--creator-accent); }
-.sequence-shot-content footer strong { color: #536579; font-size: 7px; white-space: nowrap; }
 .sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; }
 .sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 8px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
@@ -3949,6 +3992,15 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .toggle-row input:checked + i { background: var(--creator-accent); }
 .toggle-row input:checked + i::after { transform: translateX(16px); }
 .toggle-row input:disabled + i { opacity: .4; }
+.professional-toggle { display: grid; grid-template-columns: 24px max-content minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #cbd8e8; border-radius: 8px; background: #fafbfe; box-shadow: none; }
+.professional-toggle-icon { display: grid; grid-column: 1; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: #6f86a6; background: #dceaff; }
+.professional-toggle-copy { grid-column: 2; white-space: nowrap; }
+.professional-toggle-copy strong { color: #26364f; font-size: 12px; font-weight: 600; line-height: 1.5; }
+.professional-toggle-copy small { display: none; }
+.professional-toggle-hint { grid-column: 3; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #71829c; font-size: 10px; font-weight: 400; line-height: 1.5; }
+.professional-toggle-chevron { grid-column: 4; color: #657994; }
+.video-control-row { box-sizing: border-box; height: 52px; min-height: 52px; flex-shrink: 0; padding-top: 0; padding-bottom: 0; }
+.stepper.video-control-row button { height: 100%; }
 .generate-button { min-height: 52px; margin-top: 6px; font-size: 14px; }
 .button-spinner { width: 16px; height: 16px; border: 2px solid rgb(255 255 255 / 45%); border-top-color: #fff; border-radius: 50%; animation: creatorSpin .8s linear infinite; }
 .spinning { animation: creatorSpin .8s linear infinite; }
@@ -4080,7 +4132,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .sequence-shot { border-color: #334642; background: #14211f; }
 :global(.dark) .sequence-header h2,
 :global(.dark) .sequence-header dd,
-:global(.dark) .sequence-shot-content textarea,
+:global(.dark) .sequence-shot-prompt,
 :global(.dark) .result-stat-grid strong,
 :global(.dark) .result-parameter-details p { color: #dbe7e5; }
 :global(.dark) .sequence-header h2 span { border-color: #347a6f; color: #83ddd0; background: #15302c; }

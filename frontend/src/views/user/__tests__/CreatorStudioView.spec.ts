@@ -22,6 +22,8 @@ const {
   showError,
   showInfo,
   showSuccess,
+  showWarning,
+  composeVideoSegments,
   optimizeVideoReferenceImage,
 } = vi.hoisted(() => ({
   createKey: vi.fn(),
@@ -39,6 +41,8 @@ const {
   showError: vi.fn(),
   showInfo: vi.fn(),
   showSuccess: vi.fn(),
+  showWarning: vi.fn(),
+  composeVideoSegments: vi.fn(),
   optimizeVideoReferenceImage: vi.fn(),
 }))
 
@@ -82,8 +86,10 @@ vi.mock('@/services/videoReferenceImage', () => ({
 }))
 
 vi.mock('@/stores/app', () => ({
-  useAppStore: () => ({ showError, showInfo, showSuccess }),
+  useAppStore: () => ({ showError, showInfo, showSuccess, showWarning }),
 }))
+
+vi.mock('@/services/videoComposer', () => ({ composeVideoSegments }))
 
 vi.mock('vue-router', () => ({
   useRouter: () => ({ resolve: () => ({ href: '/creator' }) }),
@@ -158,6 +164,7 @@ describe('CreatorStudioView', () => {
     listModels.mockResolvedValue([{ id: 'grok-imagine-image' }])
     createKey.mockResolvedValue(createdKey)
     putHistory.mockResolvedValue(undefined)
+    composeVideoSegments.mockReset().mockResolvedValue(new Blob(['complete'], { type: 'video/mp4' }))
     removeHistory.mockResolvedValue(undefined)
     generateImage.mockResolvedValue({ data: [{ url: 'data:image/png;base64,UE5H' }] })
     createVideo.mockResolvedValue({ id: 'video-task-1' })
@@ -315,6 +322,29 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('gpt-image-2')
     expect(wrapper.get<HTMLSelectElement>('#creator-model').attributes('aria-busy')).toBe('false')
+  })
+
+  it.each(['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'])('submits the selected Image2 model %s even when gpt-image-2 is available', async model => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'gpt-image-2' },
+      { id: model },
+    ])
+    const wrapper = mount(CreatorStudioView, {
+      global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } },
+    })
+    await flushPromises()
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
+    await flushPromises()
+    await wrapper.get('#creator-model').setValue(model)
+    await wrapper.get('#creator-prompt').setValue('画一只猫')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({ model }))
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ model }))
+    wrapper.unmount()
   })
 
   it('expands, collapses, and pages through inline prompt templates', async () => {
@@ -1334,6 +1364,45 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 2：城市跟拍')
   })
 
+  it('preserves worker errors and retries composition using persisted segments', async () => {
+    const videoBlobs = [new Blob(['shot-one']), new Blob(['shot-two'])]
+    const mergedVideoBlob = new Blob(['complete'], { type: 'video/mp4' })
+    listHistory.mockResolvedValue([{
+      id: 'retry-composition', type: 'video', status: 'completed',
+      prompt: '两个镜头', model: 'grok-imagine-video', provider: 'Grok 视频',
+      groupName: group.name, createdAt: Date.now(), updatedAt: Date.now(),
+      outputs: ['blob:expired-one', 'blob:expired-two'], videoBlobs,
+      shotCount: 2, mergeError: '先前合成失败',
+    }])
+    composeVideoSegments
+      .mockRejectedValueOnce('RuntimeError: WebAssembly compilation blocked')
+      .mockResolvedValueOnce(mergedVideoBlob)
+    const wrapper = mount(CreatorStudioView, {
+      global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } },
+    })
+    await flushPromises()
+    await wrapper.findAll('.history-tabs button')[1].trigger('click')
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    expect(wrapper.get('.complete-video-card h3').text()).toContain('等待合成')
+    expect(wrapper.get('.complete-video-card').text()).not.toContain('已按时间顺序拼接')
+
+    await wrapper.get('.complete-video-pending button').trigger('click')
+    await flushPromises()
+    expect(composeVideoSegments).toHaveBeenLastCalledWith(videoBlobs)
+    expect(wrapper.get('.complete-video-pending').text()).toContain('WebAssembly compilation blocked')
+    expect(showWarning).toHaveBeenCalledWith('RuntimeError: WebAssembly compilation blocked')
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ videoBlobs }))
+
+    await wrapper.get('.complete-video-pending button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.complete-video-card h3').text()).toBe('所有镜头已按顺序合成')
+    expect(wrapper.find('.complete-video-media').exists()).toBe(true)
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ videoBlobs, mergedVideoBlob, mergeError: undefined }))
+    expect(getVideoContent).not.toHaveBeenCalled()
+    expect(createVideo).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('keeps queued zero indeterminate and shows real progress even when the provider still says pending', async () => {
     vi.useFakeTimers()
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
@@ -1881,7 +1950,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('#creator-resolution').exists()).toBe(false)
     expect(wrapper.get('#creator-output-size').text()).toContain('1K · 1024×1024')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形产品照片')
-    await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
+    expect(wrapper.text()).not.toContain('透明背景')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
 
@@ -1889,7 +1958,7 @@ describe('CreatorStudioView', () => {
       model: 'gpt-image-2',
       size: '1024x1024',
       protocol: 'openai',
-      background: 'transparent',
+      background: 'auto',
     }))
     const request = generateImage.mock.calls.at(-1)?.[1]
     expect(request).not.toHaveProperty('aspectRatio')
@@ -2303,7 +2372,8 @@ describe('CreatorStudioView', () => {
     expect(wrapper.findAll('.sequence-shot')).toHaveLength(2)
     expect(wrapper.findAll('.sequence-shot')[1].classes()).toContain('active')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头的右侧编辑文案')
-    expect(wrapper.findAll<HTMLTextAreaElement>('.sequence-shot textarea')[1].element.value).toBe('第二个镜头的右侧编辑文案')
+    expect(wrapper.findAll('.sequence-shot-prompt')[1].text()).toBe('第二个镜头的右侧编辑文案')
+    expect(wrapper.find('.sequence-shot textarea, .sequence-shot input').exists()).toBe(false)
     expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 16 秒')
     expect(wrapper.get('.video-duration-estimate').text()).toContain('按镜头顺序拼接')
 
@@ -2311,5 +2381,12 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('')
     await wrapper.get('.field-block .stepper button:last-child').trigger('click')
     expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 17 秒')
+    expect(wrapper.find('.settings-panel input[type="range"]').exists()).toBe(false)
+    await wrapper.get('button[title="减少时长"]').trigger('click')
+    expect(wrapper.findAll('.sequence-shot')[0].text()).toContain('8 秒')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 16 秒')
+    await wrapper.findAll('.sequence-shot')[1].trigger('click')
+    expect(wrapper.get('.field-block .stepper strong').text()).toBe('8 秒')
+    expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二个镜头的右侧编辑文案')
   })
 })

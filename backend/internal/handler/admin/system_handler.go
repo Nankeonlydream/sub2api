@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/creatorupdate"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/sysutil"
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
@@ -18,8 +19,9 @@ import (
 
 // SystemHandler handles system-related operations
 type SystemHandler struct {
-	updateSvc systemUpdateService
-	lockSvc   *service.SystemOperationLockService
+	updateSvc      systemUpdateService
+	lockSvc        *service.SystemOperationLockService
+	creatorUpdater *creatorupdate.Manager
 }
 
 // systemUpdateTimeout bounds a full in-place update or rollback: the release
@@ -53,10 +55,23 @@ type systemUpdateService interface {
 
 // NewSystemHandler creates a new SystemHandler
 func NewSystemHandler(updateSvc systemUpdateService, lockSvc *service.SystemOperationLockService) *SystemHandler {
-	return &SystemHandler{
+	h := &SystemHandler{
 		updateSvc: updateSvc,
 		lockSvc:   lockSvc,
 	}
+	if custom, ok := updateSvc.(interface{ UsesCustomUpdates() bool }); ok && custom.UsesCustomUpdates() {
+		h.creatorUpdater = creatorupdate.FromEnv()
+	}
+	return h
+}
+
+// GetCreatorUpdateStatus restores progress when the dropdown/browser is reopened.
+func (h *SystemHandler) GetCreatorUpdateStatus(c *gin.Context) {
+	if h.creatorUpdater == nil {
+		response.Success(c, creatorupdate.Status{State: "disabled", LocalOnly: true})
+		return
+	}
+	response.Success(c, h.creatorUpdater.Status())
 }
 
 // GetVersion returns the current version
@@ -83,6 +98,15 @@ func (h *SystemHandler) CheckUpdates(c *gin.Context) {
 // PerformUpdate downloads and applies the update
 // POST /api/v1/admin/system/update
 func (h *SystemHandler) PerformUpdate(c *gin.Context) {
+	if h.creatorUpdater != nil {
+		status, err := h.creatorUpdater.Start()
+		if err != nil {
+			response.Error(c, http.StatusConflict, err.Error())
+			return
+		}
+		response.Success(c, gin.H{"message": "Custom update task started", "need_restart": false, "job": status})
+		return
+	}
 	operationID := buildSystemOperationID(c, "update")
 	payload := gin.H{"operation_id": operationID}
 	executeAdminIdempotentJSON(c, "admin.system.update", payload, service.DefaultSystemOperationIdempotencyTTL(), func(ctx context.Context) (any, error) {

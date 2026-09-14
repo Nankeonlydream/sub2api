@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useAppStore } from '@/stores/app'
 import { getPublicSettings } from '@/api/auth'
+import { checkUpdates } from '@/api/admin/system'
 import type { PublicSettings } from '@/types'
 
 function createDeferred<T>() {
@@ -91,6 +92,18 @@ describe('useAppStore', () => {
   })
 
   // --- Toast 消息管理 ---
+
+  it('preserves official version warnings in cache and clears them after a successful refresh', async () => {
+    const store = useAppStore()
+    const response = { current_version: '0.2.4-creator.local.123', latest_version: '0.2.4', has_update: false, build_type: 'source', cached: true }
+    vi.mocked(checkUpdates).mockResolvedValueOnce({ ...response, warning: 'Using cached data' })
+      .mockResolvedValueOnce({ ...response, cached: false })
+    await store.fetchVersion()
+    expect(store.versionWarning).toBe('Using cached data')
+    expect((await store.fetchVersion())?.warning).toBe('Using cached data')
+    await store.fetchVersion(true)
+    expect(store.versionWarning).toBe('')
+  })
 
   describe('Toast 消息管理', () => {
     it('showSuccess 创建 success 类型 toast', () => {

@@ -1,0 +1,8 @@
+{
+  "repository": "/absolute/path/to/sub2api",
+  "work_dir": "/absolute/path/outside-repository/sub2api-local-builds",
+  "upstream_url": "https://github.com/Wei-Shaw/sub2api.git",
+  "upstream_ref": "refs/heads/main",
+  "pnpm": "pnpm",
+  "include_working_tree": false
+}
