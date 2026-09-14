@@ -35,7 +35,9 @@ func TestProcessRuntimeStartsChecksStopsAndRecoversRealChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	address := listener.Addr().String()
-	listener.Close()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("CREATOR_TEST_HELPER", "1")
 	t.Setenv("CREATOR_TEST_ADDRESS", address)
 	binary, err := os.Executable()
@@ -51,7 +53,11 @@ func TestProcessRuntimeStartsChecksStopsAndRecoversRealChild(t *testing.T) {
 	hash, _ := hashFile(script)
 	good := release{Binary: script, Directory: dir, SHA256: hash}
 	p := &processRuntime{healthURL: "http://" + address + "/health"}
-	defer p.Stop()
+	t.Cleanup(func() {
+		if err := p.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 	if err := p.Start(good); err != nil {
 		t.Fatal(err)
 	}
