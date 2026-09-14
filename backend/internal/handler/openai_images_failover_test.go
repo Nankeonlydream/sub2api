@@ -339,7 +339,7 @@ func TestOpenAIGatewayHandlerImages_UsesChannelAliasForAccountSelectionAndForwar
 	gin.SetMode(gin.TestMode)
 	groupID := int64(3132)
 	channelRepo := makeOpenAIImagesChannelRepo(groupID, "gpt-image-2", "opt-image-2")
-	channelService := service.NewChannelService(channelRepo, nil, nil, nil)
+	channelService := service.NewChannelService(channelRepo, nil, nil, nil, nil)
 	accountRepo := openAIImagesFailoverAccountRepo{accounts: []service.Account{{
 		ID:          3,
 		Name:        "channel-alias-image-account",
