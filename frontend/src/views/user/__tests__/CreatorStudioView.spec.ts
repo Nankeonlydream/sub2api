@@ -590,7 +590,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.text()).toContain('还没有视频作品')
     await wrapper.findAll('.history-tabs button')[0].trigger('click')
     await flushPromises()
-    expect(wrapper.get('.history-list').text()).toContain('作品 0')
+    await vi.waitFor(() => expect(wrapper.get('.history-list').text()).toContain('作品 0'))
     wrapper.unmount()
   })
 
