@@ -551,7 +551,21 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
-  it('renders a bounded history window and scrolls to older works without mounting original images', async () => {
+  it('renders a bounded history window and scrolls to older works without mounting original images', async ({ onTestFinished }) => {
+    // jsdom omits Element.scrollTo; model the browser scroll event used by the virtualizer.
+    const scrollToDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollTo')
+    Object.defineProperty(Element.prototype, 'scrollTo', {
+      configurable: true,
+      value(this: Element, options: ScrollToOptions) {
+        if (typeof options.top === 'number') this.scrollTop = options.top
+        if (typeof options.left === 'number') this.scrollLeft = options.left
+        this.dispatchEvent(new Event('scroll'))
+      },
+    })
+    onTestFinished(() => {
+      if (scrollToDescriptor) Object.defineProperty(Element.prototype, 'scrollTo', scrollToDescriptor)
+      else Reflect.deleteProperty(Element.prototype, 'scrollTo')
+    })
     listHistory.mockResolvedValue(Array.from({ length: 100 }, (_, index) => ({
       id: `large-history-${index}`, type: 'image', status: 'completed',
       prompt: `作品 ${index}`, model: 'grok-imagine-image', provider: 'grok', groupName: group.name,
