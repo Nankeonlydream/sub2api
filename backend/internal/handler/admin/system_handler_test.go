@@ -6,8 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/Wei-Shaw/sub2api/internal/creatorupdate"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -321,4 +324,45 @@ func TestSystemHandlerGetRollbackVersionsError(t *testing.T) {
 	router.ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+func TestSystemHandlerCustomBuildCannotFallBackToOfficialUpdate(t *testing.T) {
+	t.Setenv("CREATOR_UPDATE_CONFIG", "")
+	gin.SetMode(gin.TestMode)
+	svc := service.NewUpdateService(nil, nil, "0.2.4-creator.1", "release")
+	h := NewSystemHandler(svc, nil)
+	require.NotNil(t, h.creatorUpdater)
+	router := gin.New()
+	router.POST("/update", h.PerformUpdate)
+	router.GET("/status", h.GetCreatorUpdateStatus)
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/update", nil))
+	require.Equal(t, http.StatusConflict, recorder.Code)
+	require.Contains(t, recorder.Body.String(), "CREATOR_UPDATE_CONFIG")
+	status := httptest.NewRecorder()
+	router.ServeHTTP(status, httptest.NewRequest(http.MethodGet, "/status", nil))
+	require.Contains(t, status.Body.String(), `"state":"disabled"`)
+}
+
+func TestSystemHandlerCustomTaskReturnsImmediatelyAndSurvivesDisconnect(t *testing.T) {
+	t.Setenv("CREATOR_UPDATE_CONFIG", "")
+	repo, work := t.TempDir(), t.TempDir()
+	// An invalid source repo fails in the detached job, never in dispatch.
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	data, err := json.Marshal(creatorupdate.Config{Repository: repo, WorkDir: work, UpstreamRef: "refs/heads/main"})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(configPath, data, 0600))
+	t.Setenv("CREATOR_UPDATE_CONFIG", configPath)
+	h := NewSystemHandler(service.NewUpdateService(nil, nil, "0.2.4", "release"), nil)
+	router := gin.New()
+	router.POST("/update", h.PerformUpdate)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/update", nil).WithContext(ctx))
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Contains(t, recorder.Body.String(), `"need_restart":false`)
+	require.Contains(t, recorder.Body.String(), `"state":"running"`)
+	require.Eventually(t, func() bool { return h.creatorUpdater.Status().State == "failed" }, time.Second*5, time.Millisecond*10)
+	require.Contains(t, h.creatorUpdater.Status().Message, "HEAD")
 }

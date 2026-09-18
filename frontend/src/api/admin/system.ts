@@ -19,6 +19,7 @@ export interface VersionInfo {
   cached: boolean
   warning?: string
   build_type: string // "source" for manual builds, "release" for CI builds
+  update_mode?: string
 }
 
 /**
@@ -43,6 +44,25 @@ export async function checkUpdates(force = false): Promise<VersionInfo> {
 export interface UpdateResult {
   message: string
   need_restart: boolean
+  job?: CreatorUpdateStatus
+}
+
+export interface CreatorUpdateStatus {
+  state: 'disabled' | 'idle' | 'running' | 'ready' | 'failed' | 'deployed' | 'rolled_back' | 'recovery_required'
+  stage?: string
+  message?: string
+  job_id?: string
+  conflicts?: string[]
+  local_only: boolean
+  auto_deploy?: boolean
+  version?: string
+  deployed_at?: string
+  upstream_commit?: string
+}
+
+export async function getCreatorUpdateStatus(): Promise<CreatorUpdateStatus> {
+  const { data } = await apiClient.get<CreatorUpdateStatus>('/admin/system/creator-update')
+  return data
 }
 
 export interface RollbackVersionInfo {

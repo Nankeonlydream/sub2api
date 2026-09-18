@@ -26,7 +26,7 @@ func remoteRequest(socket, method, path string) (Status, error) {
 	if err != nil {
 		return Status{}, errors.New("local deployment supervisor is unavailable")
 	}
-	defer res.Body.Close()
+	defer func() { _ = res.Body.Close() }()
 	var body struct {
 		Status Status `json:"status"`
 		Error  string `json:"error,omitempty"`

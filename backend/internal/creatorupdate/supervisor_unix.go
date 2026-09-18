@@ -131,7 +131,7 @@ func databaseBackup(cfg appconfig.DatabaseConfig) func(context.Context, string) 
 		if err != nil {
 			return err
 		}
-		defer os.Remove(path + ".tmp")
+		defer func() { _ = os.Remove(path + ".tmp") }()
 		cmd := exec.CommandContext(ctx, "pg_dump", "--host", cfg.Host, "--port", strconv.Itoa(cfg.Port), "--username", cfg.User, "--dbname", cfg.DBName, "--format=custom", "--no-password")
 		configureCommand(cmd)
 		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "PGPASSWORD=" + cfg.Password, "PGSSLMODE=" + cfg.SSLMode, "PGCONNECT_TIMEOUT=10"}
@@ -177,7 +177,7 @@ func bootstrapRelease(work, binary, resources, migrations string) (release, erro
 		if err != nil {
 			return release{}, err
 		}
-		defer in.Close()
+		defer func() { _ = in.Close() }()
 		out, err := os.OpenFile(target+".tmp", os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0700)
 		if err != nil {
 			return release{}, err
@@ -224,11 +224,11 @@ func RunSupervisor(ctx context.Context, configPath, binary, resources, migration
 	if err != nil {
 		return err
 	}
-	defer lock.Close()
+	defer func() { _ = lock.Close() }()
 	if err := unix.Flock(int(lock.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return errors.New("another supervisor is running")
 	}
-	defer unix.Flock(int(lock.Fd()), unix.LOCK_UN)
+	defer func() { _ = unix.Flock(int(lock.Fd()), unix.LOCK_UN) }()
 	m, err := New(config)
 	if err != nil {
 		return err
@@ -296,8 +296,8 @@ func RunSupervisor(ctx context.Context, configPath, binary, resources, migration
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
-	defer os.Remove(config.SupervisorSocket)
+	defer func() { _ = listener.Close() }()
+	defer func() { _ = os.Remove(config.SupervisorSocket) }()
 	if err := os.Chmod(config.SupervisorSocket, 0600); err != nil {
 		return err
 	}

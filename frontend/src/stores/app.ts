@@ -40,8 +40,10 @@ export const useAppStore = defineStore('app', () => {
   const versionLoading = ref<boolean>(false)
   const currentVersion = ref<string>('')
   const latestVersion = ref<string>('')
+  const versionWarning = ref<string>('')
   const hasUpdate = ref<boolean>(false)
   const buildType = ref<string>('source')
+  const updateMode = ref<string>('creator')
   const releaseInfo = ref<ReleaseInfo | null>(null)
 
   // Auto-incrementing ID for toasts
@@ -248,7 +250,9 @@ export const useAppStore = defineStore('app', () => {
         latest_version: latestVersion.value,
         has_update: hasUpdate.value,
         build_type: buildType.value,
+        update_mode: updateMode.value,
         release_info: releaseInfo.value || undefined,
+        warning: versionWarning.value || undefined,
         cached: true
       }
     }
@@ -263,13 +267,16 @@ export const useAppStore = defineStore('app', () => {
       const data = await checkUpdatesAPI(force)
       currentVersion.value = data.current_version
       latestVersion.value = data.latest_version
+      versionWarning.value = data.warning || ''
       hasUpdate.value = data.has_update
       buildType.value = data.build_type || 'source'
+      updateMode.value = data.update_mode || 'creator'
       releaseInfo.value = data.release_info || null
       versionLoaded.value = true
       return data
     } catch (error) {
       console.error('Failed to fetch version:', error)
+      versionWarning.value = 'request_failed'
       return null
     } finally {
       versionLoading.value = false
@@ -459,8 +466,10 @@ export const useAppStore = defineStore('app', () => {
     versionLoading,
     currentVersion,
     latestVersion,
+    versionWarning,
     hasUpdate,
     buildType,
+    updateMode,
     releaseInfo,
 
     // Computed

@@ -70,7 +70,7 @@ func FromEnv() *Manager {
 	if path == "" {
 		return disabled("Set CREATOR_UPDATE_CONFIG to enable local custom builds")
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G703: operator-owned CREATOR_UPDATE_CONFIG, never an HTTP parameter.
 	if err != nil {
 		return disabled("Cannot read CREATOR_UPDATE_CONFIG")
 	}
@@ -421,7 +421,7 @@ func (m *Manager) prepare(ctx context.Context, job string, log io.Writer) error 
 	if err != nil {
 		return fmt.Errorf("missing build artifact: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, f); err != nil {
 		return err
@@ -449,7 +449,7 @@ func copyUntracked(repo, candidate, name string) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(dst, data, info.Mode().Perm())
+	return os.WriteFile(dst, data, info.Mode().Perm()) //nolint:gosec // G703: git-listed paths are confined to both repository roots above; untracked symlinks are rejected.
 }
 
 func (m *Manager) build(ctx context.Context, source, artifact string, log io.Writer) error {

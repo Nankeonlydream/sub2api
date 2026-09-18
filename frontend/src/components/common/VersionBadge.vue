@@ -10,9 +10,9 @@
             ? 'bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-900/30 dark:text-amber-400 dark:hover:bg-amber-900/50'
             : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-800 dark:text-dark-400 dark:hover:bg-dark-700'
         ]"
-        :title="hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
+        :title="isCreatorMode ? t('version.creator.versionInfo') : hasUpdate ? t('version.updateAvailable') : t('version.upToDate')"
       >
-        <span v-if="currentVersion" class="font-medium">v{{ currentVersion }}</span>
+        <span v-if="currentVersion" class="font-medium">{{ displayVersion }}</span>
         <span
           v-else
           class="h-3 w-12 animate-pulse rounded bg-gray-200 font-medium dark:bg-dark-600"
@@ -32,7 +32,7 @@
           v-if="dropdownOpen"
           ref="dropdownRef"
           class="absolute left-0 z-50 mt-2 overflow-hidden whitespace-normal rounded-xl border border-gray-200 bg-white shadow-lg transition-all duration-200 dark:border-dark-700 dark:bg-dark-800"
-          :class="rollbackPanelOpen && isReleaseBuild ? 'w-80' : 'w-64'"
+          :class="isCreatorMode || (rollbackPanelOpen && isReleaseBuild) ? 'w-80 max-w-[calc(100vw-2rem)]' : 'w-64'"
         >
           <!-- Header with refresh button -->
           <div
@@ -83,13 +83,13 @@
                 <div class="inline-flex items-center gap-2">
                   <span
                     v-if="currentVersion"
-                    class="text-2xl font-bold text-gray-900 dark:text-white"
-                    >v{{ currentVersion }}</span
+                    class="break-words text-2xl font-bold text-gray-900 dark:text-white"
+                    >{{ displayVersion }}</span
                   >
                   <span v-else class="text-2xl font-bold text-gray-400 dark:text-dark-500">--</span>
                   <!-- Show check mark when up to date -->
                   <span
-                    v-if="!hasUpdate"
+                    v-if="!isCreatorMode && !hasUpdate"
                     class="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/30"
                   >
                     <svg
@@ -105,7 +105,7 @@
                     </svg>
                   </span>
                 </div>
-                <p class="mt-1 text-xs text-gray-500 dark:text-dark-400">
+                <p v-if="!isCreatorMode" class="mt-1 text-xs text-gray-500 dark:text-dark-400">
                   {{
                     hasUpdate
                       ? t('version.latestVersion') + ': v' + latestVersion
@@ -114,8 +114,24 @@
                 </p>
               </div>
 
+              <template v-if="isCreatorMode">
+                <div class="mb-4 space-y-2 text-xs" data-testid="official-version">
+                  <div class="flex items-center justify-between gap-2">
+                    <span class="text-gray-500 dark:text-dark-400">{{ t('version.creator.officialLatest') }}</span>
+                    <a v-if="latestVersion" :href="releaseInfo?.html_url || 'https://github.com/Wei-Shaw/sub2api/releases/latest'" target="_blank" rel="noopener noreferrer" class="font-medium text-primary-600 hover:underline dark:text-primary-400">
+                      v{{ latestVersion }}
+                    </a>
+                    <span v-else class="text-gray-500 dark:text-dark-400">{{ t('version.creator.officialUnavailable') }}</span>
+                  </div>
+                  <p v-if="appStore.versionWarning && latestVersion" class="text-amber-700 dark:text-amber-400">{{ t('version.creator.officialCached') }}</p>
+                  <p v-if="hasUpdate" class="text-amber-700 dark:text-amber-400">{{ t('version.creator.officialUpdateAvailable') }}</p>
+                  <p class="text-gray-500 dark:text-dark-400">{{ t('version.creator.officialHint') }}</p>
+                </div>
+                <CreatorUpdatePanel />
+              </template>
+
               <!-- Priority 1: Update error (must check before hasUpdate) -->
-              <div v-if="updateError" class="space-y-2">
+              <div v-else-if="updateError" class="space-y-2">
                 <div
                   class="flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-3 dark:border-red-800/50 dark:bg-red-900/20"
                 >
@@ -632,7 +648,7 @@
 
     <!-- Non-admin: Simple static version text -->
     <span v-else-if="version" class="text-xs text-gray-500 dark:text-dark-400">
-      v{{ version }}
+      {{ formatVersion(version, t('version.creator.customLabel')) }}
     </span>
   </div>
 </template>
@@ -650,6 +666,8 @@ import {
 } from '@/api/admin/system'
 import { useClipboard } from '@/composables/useClipboard'
 import Icon from '@/components/icons/Icon.vue'
+import CreatorUpdatePanel from './CreatorUpdatePanel.vue'
+import { formatVersion } from '@/utils/version'
 
 const GITHUB_REPO = 'Wei-Shaw/sub2api'
 // Docker Hub image published by CI (tags carry no "v" prefix, e.g. weishaw/sub2api:0.1.146)
@@ -672,6 +690,8 @@ const dropdownRef = ref<HTMLElement | null>(null)
 // Use store's cached version state
 const loading = computed(() => appStore.versionLoading)
 const currentVersion = computed(() => appStore.currentVersion || props.version || '')
+const displayVersion = computed(() => formatVersion(currentVersion.value, t('version.creator.customLabel')))
+const isCreatorMode = computed(() => appStore.updateMode === 'creator')
 const latestVersion = computed(() => appStore.latestVersion)
 const hasUpdate = computed(() => appStore.hasUpdate)
 const releaseInfo = computed(() => appStore.releaseInfo)
