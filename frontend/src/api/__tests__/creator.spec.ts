@@ -24,6 +24,32 @@ describe('creator gateway API', () => {
     vi.restoreAllMocks()
   })
 
+  it('fetches image prices with the selected key and encoded model without generating', async () => {
+    const quote = { currency: 'USD', billing_mode: 'image', prices: { '1K': 0.04, '2K': 0.08, '4K': 0.16 } }
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(quote))
+    const { getCreatorImagePricing } = await import('@/api/creator')
+    const controller = new AbortController()
+    await expect(getCreatorImagePricing('sk-pricing', 'gpt-image-2', controller.signal)).resolves.toEqual(quote)
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toMatch(/\/v1\/sub2api\/image-pricing\?model=gpt-image-2$/)
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer sk-pricing' })
+    expect(init?.signal).toBe(controller.signal)
+    expect(init?.body).toBeUndefined()
+  })
+
+  it('fetches video duration quotes with the selected key', async () => {
+    const quote = { currency: 'USD', prices: { '720p': Array(15).fill(0.2) } }
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(quote))
+    const { getCreatorVideoPricing } = await import('@/api/creator')
+    const controller = new AbortController()
+    await expect(getCreatorVideoPricing('sk-video', 'xai/grok-imagine-video', controller.signal)).resolves.toEqual(quote)
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(String(url)).toMatch(/video-pricing\?model=xai%2Fgrok-imagine-video$/)
+    expect(init?.headers).toMatchObject({ Authorization: 'Bearer sk-video' })
+    expect(init?.signal).toBe(controller.signal)
+    expect(init?.body).toBeUndefined()
+  })
+
   it('lists creator models with the API key', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse({ data: [{ id: 'grok-imagine-image', object: 'model' }] }),

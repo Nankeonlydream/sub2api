@@ -1,6 +1,6 @@
 <template>
   <AppLayout>
-    <section class="creator-studio card" aria-label="创作中心">
+    <section ref="studioElement" class="creator-studio card" aria-label="创作中心">
     <header class="studio-toolbar">
       <div class="studio-title">
         <span class="studio-title-icon"><Icon name="sparkles" size="sm" /></span>
@@ -77,9 +77,10 @@
           </button>
         </div>
 
-        <div v-if="visibleHistory.length" class="history-list">
+        <div v-if="visibleHistory.length && !historyCollapsed" ref="historyListElement" class="history-list">
+          <div v-if="historyPaddingTop" :style="{ height: `${historyPaddingTop}px` }" aria-hidden="true"></div>
           <article
-            v-for="work in visibleHistory"
+            v-for="work in renderedHistory"
             :key="work.id"
             class="history-item"
             :class="{ active: selectedWork?.id === work.id }"
@@ -91,7 +92,7 @@
               @click="selectWork(work)"
             ></button>
             <span class="history-preview">
-              <img v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" alt="" loading="lazy" decoding="async" />
+              <CreatorThumbnail v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" :cache-key="`${work.id}:${work.updatedAt}`" />
               <video v-else-if="work.type === 'video' && work.outputs[0]" :src="work.outputs[0]" muted preload="none" />
               <Icon v-else :name="work.type === 'image' ? 'sparkles' : 'play'" size="sm" />
               <span v-if="work.status === 'pending'" class="history-status pending"></span>
@@ -116,6 +117,7 @@
               </button>
             </span>
           </article>
+          <div v-if="historyPaddingBottom" :style="{ height: `${historyPaddingBottom}px` }" aria-hidden="true"></div>
         </div>
 
         <div v-else class="history-empty">
@@ -145,7 +147,7 @@
           >
             <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
           </div>
-          <small class="generation-note">创作过程中请勿离开当前页面，以免影响生成结果。</small>
+          <small class="generation-note">可以切换站内其他页面，生成会继续；返回后可查看进度和结果。请勿刷新或关闭浏览器页面。</small>
         </div>
 
         <div v-else-if="selectedWork" class="result-workspace">
@@ -225,7 +227,7 @@
             <header>
               <div>
                 <p class="eyebrow">完整成片</p>
-                <h3>所有镜头已按顺序合成</h3>
+                <h3>{{ selectedWork.mergedOutput ? '所有镜头已按顺序合成' : '镜头素材已完成，等待合成完整视频' }}</h3>
                 <p>{{ completeVideoDescription(selectedWork) }}</p>
               </div>
               <span>{{ selectedWork.outputs.length }} 个镜头 · {{ selectedWork.requestedDuration || 0 }} 秒</span>
@@ -277,17 +279,16 @@
           <div v-else-if="selectedWork.status !== 'failed' && selectedWork.outputs.length" class="result-grid" :class="{ single: selectedWork.outputs.length === 1 }">
             <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-${index}`" class="result-card">
               <span class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
-              <button
+              <CreatorImage
                 v-if="selectedWork.type === 'image'"
-                type="button"
                 class="result-media"
                 :class="{ landscape: resultIsLandscape(selectedWork) }"
                 :style="resultMediaStyle(selectedWork)"
+                :src="output"
+                :alt="`生成图片 ${index + 1}`"
                 title="查看大图"
-                @click="previewUrl = output"
-              >
-                <img :src="output" :alt="`生成图片 ${index + 1}`" />
-              </button>
+                @preview="previewUrl = output"
+              />
               <div v-else class="video-result-frame" :style="resultMediaStyle(selectedWork, index)">
                 <video
                   class="result-media video result-segment-video"
@@ -390,8 +391,9 @@
 
           <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
             <Icon :name="checkingVideoHistory ? 'refresh' : 'clock'" size="lg" :class="{ 'status-check-icon': checkingVideoHistory }" />
-            <strong>{{ checkingVideoHistory ? '正在检查任务状态' : '任务仍在处理中' }}</strong>
-            <p>{{ checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
+            <strong>{{ selectedWork.type === 'image' ? '无法恢复这次图片生成的进度' : checkingVideoHistory ? '正在检查任务状态' : '任务仍在处理中' }}</strong>
+            <p>{{ selectedWork.type === 'image' ? '刷新或关闭页面前的图片请求无法在此恢复。可点击「再次生成」重新提交，这会发起新的生成请求。' : checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
+            <button v-if="selectedWork.type === 'image'" type="button" class="secondary-command primary-soft" @click="syncHistory">刷新生成结果</button>
             <button
               v-if="selectedWork.type === 'video' && selectedWork.requestId"
               type="button"
@@ -445,7 +447,7 @@
             <div>
               <p class="sequence-eyebrow"><i></i> PRO EDITOR · SEQUENCE</p>
               <h2>镜头序列 <span>{{ videoShots.length }} / 6</span></h2>
-              <p>按时间顺序编排画面，点击镜头后可直接编辑参数</p>
+              <p>按时间顺序编排画面，点击镜头后在右侧编辑描述与参数</p>
             </div>
             <dl>
               <div><dt>总时长</dt><dd>{{ formatSequenceDuration(totalShotDuration) }}</dd></div>
@@ -483,7 +485,7 @@
                     <button type="button" title="删除镜头" :disabled="videoShots.length === 1 || processingReferenceImages" @click="removeShot(index)"><Icon name="x" size="xs" /></button>
                   </div>
                 </header>
-                <textarea v-model="shot.prompt" maxlength="8000" placeholder="描述这个镜头的画面、动作与运镜"></textarea>
+                <p class="sequence-shot-prompt" :class="{ empty: !shot.prompt }">{{ shot.prompt || '在右侧描述这个镜头的画面、动作与运镜' }}</p>
                 <footer>
                   <span>
                     {{ videoGenerationMethodLabelFor(shot.generationMethod) }}
@@ -491,10 +493,7 @@
                   </span>
                   <span>{{ shot.aspectRatio }}</span>
                   <span>{{ shot.resolution }}</span>
-                  <label title="调整镜头时长">
-                    <input v-model.number="shot.duration" type="range" min="1" max="15" />
-                    <strong>{{ shot.duration }} 秒</strong>
-                  </label>
+                  <span>{{ shot.duration }} 秒</span>
                 </footer>
               </div>
             </article>
@@ -773,7 +772,7 @@
               <div class="field-block">
                 <label for="creator-resolution">{{ imageCapability === 'grok' ? '清晰度' : '分辨率' }}</label>
                 <select id="creator-resolution" v-model="imageResolution" class="studio-input">
-                  <option v-for="resolution in imageResolutionOptions" :key="resolution" :value="resolution">{{ imageResolutionLabel(resolution) }}</option>
+                  <option v-for="resolution in imageResolutionOptions" :key="resolution" :value="resolution">{{ imageResolutionLabel(resolution) }} · {{ imageTierPriceLabel(resolution) }}</option>
                 </select>
               </div>
             </div>
@@ -788,11 +787,6 @@
                   <option value="high">高</option>
                 </select>
               </div>
-              <label class="toggle-row wide">
-                <span><strong>透明背景</strong><small>仅 PNG / WebP 可用</small></span>
-                <input v-model="transparentBackground" type="checkbox" :disabled="outputFormat === 'jpeg'" />
-                <i></i>
-              </label>
             </div>
 
             <div class="field-block">
@@ -831,24 +825,50 @@
 
             <div class="field-block">
               <label>{{ professionalVideo ? `镜头 ${selectedShotIndex + 1} 时长` : '视频时长' }}</label>
-              <div class="stepper">
+              <div class="stepper video-control-row">
                 <button type="button" title="减少时长" :disabled="configuredVideoDuration <= 1" @click="adjustVideoDuration(-1)"><Icon name="minus" size="sm" /></button>
                 <strong>{{ configuredVideoDuration }} 秒</strong>
                 <button type="button" title="增加时长" :disabled="configuredVideoDuration >= 15" @click="adjustVideoDuration(1)"><Icon name="plus" size="sm" /></button>
               </div>
             </div>
 
-            <div class="video-duration-estimate" aria-label="预计总时长">
+            <div class="video-duration-estimate video-control-row" aria-label="预计总时长">
               <span>预计总时长 <strong>{{ estimatedVideoDuration }} 秒</strong></span>
               <small>{{ estimatedVideoMode }}</small>
             </div>
 
-            <label class="toggle-row">
-              <span><strong>{{ professionalVideo ? '收起专业工作区' : '展开专业工作区' }}</strong><small>镜头编辑器会显示在主画布</small></span>
+            <label class="toggle-row professional-toggle video-control-row">
+              <span class="professional-toggle-icon"><Icon name="grid" size="sm" /></span>
+              <span class="professional-toggle-copy"><strong>{{ professionalVideo ? '收起专业工作区' : '展开专业工作区' }}</strong><small>主画布展示镜头序列，选中后在右侧编辑</small></span>
+              <span class="professional-toggle-hint" title="镜头、排序、逐镜头参考与重试">镜头、排序、逐镜头参考与重试</span>
               <input v-model="professionalVideo" type="checkbox" />
-              <i></i>
+              <span class="professional-toggle-chevron"><Icon name="chevronDown" size="sm" /></span>
             </label>
           </template>
+
+          <div v-if="studioMode === 'image'" class="image-cost-preview" aria-live="polite" aria-label="生成费用预估">
+            <div class="image-cost-copy">
+              <span class="image-cost-label">预计费用</span>
+              <p>{{ imagePricingNote }}</p>
+              <button v-if="imagePricingFailed" type="button" class="image-price-retry" @click="loadImagePricing">重新加载</button>
+            </div>
+            <div class="image-cost-total" :class="{ 'is-status': !imagePricing || imagePricing.billing_mode === 'token' }" title="已计入当前适用倍率，最终以使用记录为准">
+              <strong>{{ imageEstimatedCost }}</strong>
+              <span v-if="imagePricing && imagePricing.billing_mode !== 'token'">USD</span>
+            </div>
+          </div>
+
+          <div v-if="studioMode === 'video'" class="image-cost-preview video-cost-preview" aria-live="polite" aria-label="视频生成费用预估">
+            <div class="image-cost-copy">
+              <span class="image-cost-label">预计费用</span>
+              <p>{{ videoPricingNote }}</p>
+              <button v-if="videoPricingFailed" type="button" class="image-price-retry" @click="loadVideoPricing">重新加载</button>
+            </div>
+            <div class="image-cost-total" :class="{ 'is-status': videoPricingLoading || videoEstimatedAmount == null }" title="已计入当前适用倍率，最终以使用记录为准">
+              <strong>{{ videoEstimatedCost }}</strong>
+              <span v-if="!videoPricingLoading && videoEstimatedAmount != null">USD</span>
+            </div>
+          </div>
 
           <button type="button" class="generate-button" :disabled="!canGenerate" @click="startGeneration">
             <Icon v-if="!generating" name="sparkles" size="sm" />
@@ -862,7 +882,7 @@
 
     <div v-if="previewUrl" class="modal-backdrop image-preview" role="presentation" @click="previewUrl = ''">
       <button type="button" class="preview-close" title="关闭预览" @click="previewUrl = ''"><Icon name="x" size="sm" /></button>
-      <img :src="previewUrl" alt="生成图片预览" @click.stop />
+      <CreatorImage class="image-preview-content" :src="previewUrl" alt="生成图片预览" preview />
     </div>
 
     <BaseDialog
@@ -904,7 +924,7 @@
                 type="button"
                 :class="{ active: imageSizeDraftResolution === resolution }"
                 @click="imageSizeDraftResolution = resolution"
-              >{{ resolution }}</button>
+              ><span>{{ resolution }}</span><small class="image-tier-price">{{ imageTierPriceLabel(resolution) }}</small></button>
             </div>
           </section>
 
@@ -952,7 +972,10 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { observeElementRect, useVirtualizer } from '@tanstack/vue-virtual'
+import CreatorImage from '@/components/common/CreatorImage.vue'
+import CreatorThumbnail from '@/components/common/CreatorThumbnail.vue'
 import Icon from '@/components/icons/Icon.vue'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import AppLayout from '@/components/layout/AppLayout.vue'
@@ -962,6 +985,10 @@ import {
   createCreatorVideo,
   downloadCreatorImage,
   generateCreatorImage,
+  getCreatorImagePricing,
+  getCreatorVideoPricing,
+  type CreatorVideoPricing,
+  type CreatorImagePricing,
   getCreatorVideoContent,
   getCreatorVideoStatus,
   listCreatorModels,
@@ -979,6 +1006,7 @@ import {
 } from '@/services/videoReferenceImage'
 import { useAppStore } from '@/stores/app'
 import type { ApiKey, Group } from '@/types'
+import { formatScaled } from '@/utils/pricing'
 
 type StudioMode = 'image' | 'video'
 type ImageCapability = 'grok' | 'image2' | 'banner'
@@ -1043,45 +1071,45 @@ interface VideoGenerationSnapshot {
 }
 
 const imageTemplates: PromptTemplate[] = [
-  { title: '月光猫影', tag: '角色肖像', subtitle: '冷色月光下的动漫镜头', prompt: '动漫电影风格的白发猫耳少女站在夜色屋顶，银白长发被风轻轻吹起，身后是朦胧城市灯火和一轮明月，冷蓝月光勾勒轮廓，细腻面部特写，浅景深，电影感构图。' },
-  { title: '雨夜电车', tag: '环境叙事', subtitle: '潮湿街道与暖色车灯', prompt: '雨后的城市街角，一辆复古电车穿过积水路面，暖黄色车灯映在湿润柏油上，行人撑伞从画面边缘经过，低机位，真实雨雾，克制的电影色彩。' },
-  { title: '云上藏书室', tag: '奇想空间', subtitle: '漂浮在云层上的安静书房', prompt: '一间漂浮在云层之上的古老藏书室，巨大的拱形窗外是金色日落，书架与纸页被微风轻轻吹动，柔和体积光，宁静、超现实、极高细节。' },
-  { title: '银色相机', tag: '商业静物', subtitle: '复古器物的高级广告质感', prompt: '复古银色相机置于深绿色丝绒桌面，侧面硬光勾勒金属边缘，旁边是一张手写明信片和一小段皮革表带，奢侈品广告摄影，细腻材质，留出干净标题空间。' },
-  { title: '雾林肖像', tag: '自然肖像', subtitle: '清晨薄雾中的人物特写', prompt: '年轻女孩站在清晨的雾林中，柔和逆光穿过树叶和薄雾，皮肤质感自然，微风带动发丝，安静真实的情绪，85mm 人像镜头，浅景深。' },
-  { title: '深海晚餐', tag: '超现实', subtitle: '海底餐桌与幽蓝光线', prompt: '深海中的白色长桌与精致餐具，水母像吊灯一样漂浮在上方，幽蓝光线穿过海水，桌布缓慢摆动，梦境般安静，超现实时尚大片。' },
-  { title: '纸上城市', tag: '纸艺模型', subtitle: '手工折纸搭建的微缩街区', prompt: '完全由白色与红色纸张折叠出的微缩城市，俯视街区布局，小人和车辆具有手工纸艺质感，柔和棚拍光线，清晰阴影，精密模型摄影。' },
-  { title: '海风书桌', tag: '生活方式', subtitle: '面朝海岸的安静工作角落', prompt: '面朝海岸的木质书桌，打开的书页被海风轻轻吹动，玻璃杯中有冰水，白色窗帘和远处蓝色海面，午后自然光，清爽真实的生活方式摄影。' },
-  { title: '液态音乐节', tag: '视觉海报', subtitle: '银白液态雕塑与霓虹排版', prompt: '极简未来主义音乐节海报，银白色液态雕塑悬浮在深黑背景中央，少量青绿色和金色高光，利落网格排版，强烈材质对比，现代视觉设计。' },
-  { title: '玻璃香水', tag: '产品广告', subtitle: '透光材质与水面倒影', prompt: '透明香水瓶立在浅水台面，清晨阳光穿过玻璃形成细碎彩色折射，几片白色花瓣漂浮在水面，干净高级的商业广告构图，真实材质与柔和阴影。' },
-  { title: '旧城早餐', tag: '生活纪实', subtitle: '街边烟火与清晨光线', prompt: '老城区街边早餐摊刚刚开张，蒸汽从竹蒸笼升起，店主正在整理桌椅，晨光照进狭窄街巷，真实生活细节，温暖克制的纪实摄影。' },
-  { title: '雪山营地', tag: '户外旅行', subtitle: '高山清晨与帐篷灯光', prompt: '雪山脚下的轻量化露营地，橙色帐篷内透出暖光，远处山峰被清晨第一束阳光照亮，空气清透，广角旅行摄影，人物尺度自然。' },
-  { title: '机械花园', tag: '科幻概念', subtitle: '金属植物与生态空间', prompt: '未来城市中的机械花园，银色枝叶与真实藤蔓交织，微型维护机器人穿行其间，柔和天光从玻璃穹顶落下，精密而宁静的科幻概念设计。' },
-  { title: '东方茶席', tag: '文化静物', subtitle: '宋式美学与自然材质', prompt: '极简东方茶席，青瓷茶具摆放在深色原木桌面，一枝白梅斜入画面，窗格投下柔和光影，留白克制，宋式审美，细腻真实的静物摄影。' },
-  { title: '糖果建筑', tag: '创意场景', subtitle: '明快色彩与微缩世界', prompt: '由透明糖果和果冻搭建的微缩现代建筑群，阳光穿透材质形成彩色光斑，微小人物行走其间，明快但不过度饱和，精致模型摄影。' },
-  { title: '黑金腕表', tag: '奢品广告', subtitle: '暗调金属与轮廓光', prompt: '黑色机械腕表悬浮在深灰背景中央，暖金色轮廓光划过表圈和齿轮结构，少量烟雾增强层次，极致细节，成熟克制的奢侈品广告摄影。' },
-  { title: '窗边阅读', tag: '室内人像', subtitle: '柔光日常与安静情绪', prompt: '年轻人坐在公寓窗边阅读，薄纱窗帘过滤午后阳光，身旁有木椅和绿植，人物状态自然放松，低饱和日常摄影，温柔且真实。' },
-  { title: '荒漠信号塔', tag: '电影场景', subtitle: '辽阔空间与孤独叙事', prompt: '广阔荒漠中央矗立一座废弃信号塔，一辆越野车停在塔下，远处沙尘正缓慢靠近，傍晚冷暖交界光线，史诗尺度，电影概念画面。' },
+  { title: '月球花店', tag: '科幻日常', subtitle: '荒凉月面上的一抹鲜活', prompt: '月球表面的一间透明玻璃花店，身穿白色宇航服的店主抱着一束橙色郁金香，窗外是灰白陨石坑和遥远地球，室内暖灯与冷色月面形成对比，正面广角构图，写实科幻电影剧照。' },
+  { title: '柿子小院', tag: '东方生活', subtitle: '秋日暖阳与红砖旧墙', prompt: '秋日乡间小院，一棵结满橙红柿子的老树伸过红砖墙，竹椅上蜷着一只三花猫，地面散落金黄树叶，午后斜阳，朴素自然的胶片摄影，画面安静而有生活气息。' },
+  { title: '鲸骨图书馆', tag: '奇幻建筑', subtitle: '巨兽骨架中的知识殿堂', prompt: '一座建在巨大鲸骨内部的海边图书馆，弧形肋骨支撑木质书架与悬空走廊，窗外海浪翻涌，一位读者站在中央体现空间尺度，阴天柔光，精致建筑概念设计，低饱和蓝灰与原木色。' },
+  { title: '琥珀汽水', tag: '饮品广告', subtitle: '透亮气泡与夏日折射', prompt: '一瓶无标签的琥珀色汽水放在浅蓝瓷砖台面，瓶身凝结细密水珠，旁边摆着半颗橙子和透明冰块，强烈夏日侧光穿过玻璃投下金色光斑，干净商业摄影，右上留白。' },
+  { title: '红墙来客', tag: '时尚肖像', subtitle: '几何建筑中的克制色彩', prompt: '一位短发成年女性穿象牙白廓形外套站在赭红色建筑墙前，手中握着一枝银色叶片，正午阳光投下利落几何阴影，人物偏左构图，自然皮肤纹理，现代时尚杂志摄影。' },
+  { title: '星际洗衣店', tag: '超现实', subtitle: '霓虹小店与宇宙窗景', prompt: '深夜自助洗衣店内部，一排圆形滚筒洗衣机里映出不同颜色的星云，塑料椅上坐着抱头盔的宇航员，地面微微反光，粉紫霓虹与青蓝灯光，电影宽幅构图，孤独又幽默。' },
+  { title: '蘑菇邮局', tag: '微缩童话', subtitle: '苔藓间的手工小小世界', prompt: '森林地面的一间蘑菇邮局，红色菌盖下有木门、黄铜信箱和微型自行车，一只穿邮差外套的小刺猬整理信件，苔藓与露珠清晰可见，毛毡定格动画质感，温暖微距摄影。' },
+  { title: '山间温泉', tag: '旅行风光', subtitle: '雪与热气交织的宁静', prompt: '覆盖白雪的山间露天温泉，深色火山岩围出弧形水池，蒸汽在松林间弥漫，一盏石灯笼泛出暖光，远处蓝灰雪峰层叠，无人景观，清晨漫射光，真实高端旅行摄影。' },
+  { title: '引力展览', tag: '艺术海报', subtitle: '悬浮石块与极简留白', prompt: '当代艺术展览海报，一块粗糙玄武岩悬浮在奶油白空间中央，下方是细小圆形阴影，一条朱红丝线绕石块延伸，强烈材质对比，瑞士平面设计风格，大面积留白，不含文字。' },
+  { title: '雨滴耳饰', tag: '珠宝静物', subtitle: '银与玻璃的透明层次', prompt: '一对雨滴形银质耳饰置于弧形透明玻璃片上，背景为柔和雾蓝色，侧后方窄光照亮金属边缘，玻璃投下层叠折射纹理，微距商业摄影，细节清晰，构图简洁克制。' },
+  { title: '夜市修鞋匠', tag: '人文纪实', subtitle: '灯泡下的一双专注的手', prompt: '夜市角落的修鞋摊，一位老师傅低头缝补皮鞋，双手和工具被一盏暖黄灯泡照亮，身后人群与摊位化成柔和散景，平视近景，真实皱纹与皮革纹理，尊重人物的纪实摄影。' },
+  { title: '盐湖旅人', tag: '户外旅行', subtitle: '镜面大地与极小人物', prompt: '雨后的盐湖如镜面延伸至天际，一位穿钴蓝色风衣的旅人站在画面下方，脚边倒映大片粉橙晚霞，地平线极低，简洁广角构图，真实自然光，辽阔宁静，旅行杂志封面质感。' },
+  { title: '珊瑚空间站', tag: '科幻概念', subtitle: '海洋形态的未来居所', prompt: '一座珊瑚形态的白色空间站漂浮在蓝色行星上空，枝状舱体通过透明廊桥连接，窗内透出温暖灯光，小型飞船停靠在边缘，真实航天材料，精密硬科幻设计，壮阔远景。' },
+  { title: '蓝染工坊', tag: '传统工艺', subtitle: '布料纹理与深浅靛蓝', prompt: '传统蓝染工坊里，深浅不一的靛蓝布料从木梁上垂落，阳光穿过天窗照亮布纹与空气中的微尘，下方摆着陶缸和竹篮，正面层次构图，安静朴实的工艺纪录摄影。' },
+  { title: '水果游泳池', tag: '创意静物', subtitle: '俯视视角里的清凉幽默', prompt: '一半切开的粉红葡萄柚被设计成微缩游泳池，透明水面上漂着小小白色泳圈，果皮边缘摆放迷你遮阳伞，薄荷绿纯色背景，俯视构图，清晰果肉纹理，趣味商业创意摄影。' },
+  { title: '黑胶唱机', tag: '复古器物', subtitle: '木纹金属与午后光影', prompt: '胡桃木黑胶唱机摆在暖灰色桌面，唱片上的细密纹路清晰可见，黄铜唱臂折射柔光，旁边半露一张米白唱片封套，百叶窗投下斜向光影，温暖复古产品摄影，精致真实材质。' },
+  { title: '温室画家', tag: '环境人像', subtitle: '绿叶之间的一段创作时光', prompt: '一位卷发成年画家在玻璃温室里描绘植物，穿着沾有颜料的亚麻围裙，画架周围是龟背竹与蕨类，雨滴布满头顶玻璃，柔和天光，人物侧面中景，自然松弛的编辑摄影。' },
+  { title: '极夜观测站', tag: '电影场景', subtitle: '冰原上的孤独暖光', prompt: '广阔极夜冰原上，一座小型气象观测站亮着橙黄色窗灯，屋顶天线覆着冰霜，雪地上留下一行通往门口的脚印，远方淡绿色极光横贯夜空，低机位广角，写实电影美术，冷暖对比。' },
 ]
 
 const videoTemplates: PromptTemplate[] = [
-  { title: '白发猫耳御姐', tag: '角色肖像', subtitle: '动漫镜头 · 缓慢推进', prompt: '镜头缓慢推进，白发猫耳少女站在夜色屋顶回头看向镜头，风吹动长发与衣角，城市灯火在身后形成柔和散景，月光勾勒轮廓，动作自然连贯。' },
-  { title: '雨中街角', tag: '环境叙事', subtitle: '电影感 · 低机位跟拍', prompt: '低机位沿雨后街道向前移动，一辆暖黄色电车从画面右侧驶过，积水倒映霓虹和车灯，撑伞行人掠过前景，真实雨雾与自然运动模糊。' },
-  { title: '海边奔跑', tag: '动作镜头', subtitle: '自然光 · 手持跟随', prompt: '黄昏海边，一位年轻人沿潮湿沙滩奔跑，镜头在侧后方平稳跟随，海浪拍岸，衣服和头发被海风吹动，金色逆光，充满自由感的电影镜头。' },
-  { title: '晨雾森林', tag: '环境肖像', subtitle: '体积光 · 环绕运镜', prompt: '清晨薄雾笼罩森林，镜头缓慢环绕一位穿浅色风衣的人物，树叶间的光束随雾气流动，发丝被微风吹起，动作克制自然，真实电影质感。' },
-  { title: '城市追逐', tag: '动作场面', subtitle: '快速剪辑 · 跟拍', prompt: '夜晚城市巷道中的追逐场面，镜头贴近人物快速跟拍，路灯和招牌在背景形成流动光轨，转弯时轻微甩镜，节奏紧凑但主体始终清晰。' },
-  { title: '产品旋转', tag: '商业广告', subtitle: '棚拍质感 · 环绕展示', prompt: '高级商业广告镜头，产品放置在深色镜面台上缓慢旋转，窄束轮廓光扫过材质表面，镜头平稳环绕并逐渐靠近，背景干净，细节锐利。' },
-  { title: '云海列车', tag: '奇幻场景', subtitle: '航拍推进 · 壮阔', prompt: '一列复古列车穿行在云海之上的高架轨道，镜头从远景俯冲后与列车平行飞行，金色晨光穿透云层，蒸汽向后飘散，宏大而宁静。' },
-  { title: '花瓣定格', tag: '视觉实验', subtitle: '慢动作 · 微距', prompt: '微距镜头中花瓣在空中缓慢散开，水滴与细小颗粒被逆光照亮，镜头绕主体轻微旋转，超慢动作，柔和背景虚化，精致梦幻。' },
-  { title: '视效海报', tag: '视觉设计', subtitle: '动态图形 · 节奏', prompt: '极简未来主义动态海报，银色液态形体在深色背景中舒展变形，青绿色光线按音乐节奏扫过，排版元素平滑进场，干净利落的视觉设计。' },
-  { title: '咖啡拉花', tag: '生活特写', subtitle: '俯拍 · 慢速推进', prompt: '俯拍镜头缓慢靠近咖啡杯，细腻奶泡被倒入并形成完整拉花，桌边晨光逐渐移动，蒸汽轻轻升起，动作连贯，温暖真实的生活广告质感。' },
-  { title: '雪山滑行', tag: '户外运动', subtitle: '航拍 · 高速跟随', prompt: '航拍镜头高速跟随滑雪者穿过松软雪坡，转弯扬起细密雪雾，镜头保持主体居中并逐渐拉远，阳光明亮，速度感强且画面稳定。' },
-  { title: '茶室光影', tag: '东方美学', subtitle: '横移 · 静谧氛围', prompt: '镜头沿日式茶室缓慢横移，窗格光影落在榻榻米和茶具上，人物抬手斟茶，蒸汽与尘埃在光束中浮动，节奏安静克制。' },
-  { title: '机械觉醒', tag: '科幻叙事', subtitle: '特写转全景 · 戏剧光', prompt: '从机器人眼部亮起的极近特写开始，镜头迅速后拉展示巨大的地下机库，机械臂依次启动，冷白灯光沿空间逐排点亮，宏大科幻氛围。' },
-  { title: '海岛延时', tag: '自然风光', subtitle: '固定机位 · 时间流逝', prompt: '固定广角镜头记录热带海岛从黄昏进入星夜，云层快速流动，潮水反复漫过沙滩，远处灯塔逐渐亮起，平滑自然的延时摄影。' },
-  { title: '珠宝微光', tag: '奢品广告', subtitle: '微距环绕 · 光线扫过', prompt: '微距镜头围绕钻石戒指缓慢旋转，一束窄光依次扫过切面并形成精致高光，黑色背景保持纯净，运动平稳，奢华而克制。' },
-  { title: '街舞瞬间', tag: '人物动作', subtitle: '环绕跟拍 · 节拍切换', prompt: '夜晚街头舞者完成连续动作，镜头低机位环绕跟拍并在重拍处轻微变速，路面反射彩色灯光，衣物运动自然，充满节奏和现场感。' },
-  { title: '纸船远行', tag: '微缩故事', subtitle: '低机位 · 梦幻叙事', prompt: '一只纸船沿雨后路边的浅水缓缓前行，镜头贴近水面跟随，倒影中的城市灯光被涟漪打散，纸船穿过落叶与水滴，细腻梦幻。' },
-  { title: '香水花开', tag: '产品视效', subtitle: '变形转场 · 柔光', prompt: '香水瓶悬浮在浅色空间，透明液体从瓶身周围旋转上升并逐渐变成盛开的花朵，镜头缓慢推进，转化自然顺滑，干净高级的广告视效。' },
+  { title: '水母星河', tag: '深海梦境', subtitle: '水下仰拍 · 缓慢上升', prompt: '幽蓝深海中，一只半透明水母舒展伞体向上游动，镜头从下方缓慢跟随，触须划过细小悬浮颗粒，远处水母像星光般逐渐显现，柔和生物荧光，安静梦幻，一镜到底。' },
+  { title: '末班书店', tag: '城市故事', subtitle: '窗外推进 · 暖冷对比', prompt: '深夜街角的小书店仍亮着灯，镜头从带有雨滴的玻璃窗外缓慢推进，一位店员合上书抬头望向窗外，台灯照亮侧脸，窗上倒映一辆驶过的公交车，冷蓝夜色与暖黄室内光交织。' },
+  { title: '沙丘来信', tag: '公路电影', subtitle: '侧向跟拍 · 黄昏逆光', prompt: '日落时分，一位骑摩托车的旅人沿沙丘边缘的公路前行，镜头从侧面平稳跟拍，围巾和细沙向后飘动，夕阳在头盔上形成柔和反光，最后缓缓拉远展现辽阔荒漠，写实电影质感。' },
+  { title: '龙猫面包房', tag: '治愈动画', subtitle: '桌面平移 · 定格质感', prompt: '温暖的微缩面包房里，一只圆滚滚的灰色龙猫戴着厨师帽，将刚出炉的面包推到木桌中央，镜头沿桌面缓慢平移，面包升起薄薄热气，面粉轻轻飘落，毛毡与黏土材质，手工定格动画风格。' },
+  { title: '天台放映夜', tag: '青春片段', subtitle: '背后拉远 · 夏夜微风', prompt: '夏夜天台上，两位年轻人并肩坐在折叠椅中看露天电影，镜头从肩后缓慢拉远，白色幕布被风轻轻吹动，投影光束中浮着微尘，脚边汽水瓶反射串灯，远处城市灯火柔和闪烁。' },
+  { title: '冰块里的夏天', tag: '饮品广告', subtitle: '微距特写 · 高速慢放', prompt: '微距镜头对准一杯透明气泡水，一片青柠落入杯中带起晶莹水花，冰块轻轻碰撞，密集气泡沿果皮上升，镜头缓慢靠近杯壁凝结的水珠，薄荷绿背景，明亮侧逆光，清爽的高速摄影质感。' },
+  { title: '鲸游云端', tag: '奇幻旅途', subtitle: '平行航拍 · 云雾穿行', prompt: '一头巨大的蓝鲸在云海中缓慢游动，镜头与它平行飞行，鲸鳍轻轻划开薄云，阳光穿透云隙落在背部，一座小小的白色灯塔从下方云雾间露出，尺度宏大，动作舒缓，梦幻写实风格。' },
+  { title: '陶土成器', tag: '手作纪录', subtitle: '近景定机 · 触感细节', prompt: '近景固定镜头记录陶艺师双手轻扶旋转的湿润陶土，杯壁在指尖间慢慢升起，水纹与细小泥浆清晰可见，窗边侧光照亮手部和器物边缘，背景柔和虚化，动作连贯，朴素真实的纪录片质感。' },
+  { title: '折叠都市', tag: '空间实验', subtitle: '中心推进 · 几何变化', prompt: '极简白色纸模型城市铺在桌面上，镜头沿中央街道缓慢推进，两侧纸建筑像折纸一样依次展开升起，暖色侧光投下清晰几何阴影，纸张纤维细腻，运动有序流畅，整个过程保持同一镜头。' },
+  { title: '萤火渡口', tag: '东方幻想', subtitle: '贴水跟随 · 夜色微光', prompt: '夏夜河面上，一艘木船缓缓驶向芦苇深处，镜头贴近水面从船尾平稳跟随，船头灯笼映出金色涟漪，萤火虫从两岸草丛中升起，薄雾轻轻漂移，青绿夜色，含蓄宁静的东方电影画面。' },
+  { title: '峡谷骑行', tag: '户外探索', subtitle: '低空追踪 · 弯道拉远', prompt: '清晨峡谷公路上，一位骑行者沿平缓弯道向前骑行，镜头从侧后方低空稳定跟随，车轮转动与踩踏动作自然连贯，经过弯道时镜头缓缓升高，露出层叠岩壁和远处河流，晨光通透。' },
+  { title: '风起晾衣巷', tag: '日常诗意', subtitle: '长焦定机 · 前景遮挡', prompt: '午后老巷里，阳光穿过晾晒的白色床单，一只橘猫慢慢走过石阶，固定长焦镜头透过随风起伏的布料观察它，床单交替遮挡和显露猫的身影，树影轻晃，胶片颗粒细腻，生活气息自然。' },
+  { title: '月面温室', tag: '科幻日常', subtitle: '人物近景 · 缓慢后拉', prompt: '月球基地的玻璃温室中，一位穿工作服的植物学家轻触番茄叶片上的水珠，镜头从手部特写缓慢后拉，展现整齐绿植与窗外灰白月面，远处地球悬在黑色天空，柔和工作灯，克制写实的科幻氛围。' },
+  { title: '苔藓苏醒', tag: '微观自然', subtitle: '微距定机 · 雨后细节', prompt: '雨后的森林地面，微距固定镜头贴近一簇翠绿苔藓，一滴水从叶尖缓缓滑落，落在下方小水洼中荡开涟漪，一只小蜗牛从画面边缘慢慢爬过，散射晨光，极浅景深，真实自然纪录片风格。' },
+  { title: '腕表流光', tag: '精密工艺', subtitle: '微距横移 · 材质展示', prompt: '深灰色背景中，一枚机械腕表平放在磨砂石台上，微距镜头沿表盘缓慢横移，秒针稳定前进，一道柔和条形光依次掠过蓝宝石镜面与拉丝表壳，金属纹理清晰，低调精致的商业广告质感。' },
+  { title: '红幕之前', tag: '舞台人物', subtitle: '侧面环绕 · 聚光入场', prompt: '空旷剧院里，一位穿深红长裙的成年舞者站在舞台中央，抬起手臂完成一次舒缓转身，镜头从侧面小幅环绕，裙摆自然展开后落下，一束顶光照亮空气中的微尘，背景红幕静止，动作优雅连贯。' },
+  { title: '口袋宇宙', tag: '微缩奇观', subtitle: '特写推进 · 光影转动', prompt: '木桌上的透明玻璃弹珠内藏着一片微缩星系，镜头缓慢靠近，弹珠轻轻滚动半圈后停住，内部星云与细小行星缓慢旋转，窗边阳光在桌面折射出彩色光斑，玻璃质感真实，童话般神秘。' },
+  { title: '唱片与落日', tag: '复古生活', subtitle: '俯拍转斜拍 · 暖光氛围', prompt: '落日余晖照进复古客厅，黑胶唱片在唱机上匀速旋转，唱针轻轻落到唱片纹路上，镜头从俯拍缓慢倾斜至侧面，窗帘被晚风吹动，琥珀色光线掠过木质机身，温暖胶片色调，安静从容。' },
 ]
 
 const imageCapabilities: Array<{ id: ImageCapability; label: string }> = [
@@ -1205,7 +1233,6 @@ const videoResolution = ref('720p')
 const videoGenerationMethod = ref<VideoGenerationMethod>('text')
 const imageQuality = ref('auto')
 const outputFormat = ref('png')
-const transparentBackground = ref(false)
 const outputCount = ref(1)
 const videoDuration = ref(8)
 const professionalVideo = ref(false)
@@ -1250,6 +1277,9 @@ const isDragging = ref(false)
 let modelRequestSequence = 0
 let referenceUploadSequence = 0
 let disposed = false
+let unsubscribeHistory: (() => void) | undefined
+const studioElement = ref<HTMLElement | null>(null)
+let studioActive = true
 let generationTimer: number | undefined
 let templateAutoplayTimer: number | undefined
 let restoringWorkSettings = false
@@ -1371,9 +1401,90 @@ const referenceUploadDescription = computed(() => {
 const selectedGroup = computed(() => groups.value.find(group => group.id === selectedGroupId.value) || null)
 const selectedApiKey = computed(() => apiKeys.value.find(key => key.status === 'active' && key.group_id === selectedGroupId.value) || null)
 const availableGroups = computed(() => groups.value.filter(group => groupMatchesCurrentCapability(group)))
+const imagePricing = ref<CreatorImagePricing | null>(null)
+const imagePricingLoading = ref(false)
+const imagePricingFailed = ref(false)
+let imagePricingRequest: AbortController | null = null
+const imageBillingTier = computed(() => {
+  if (imageCapability.value !== 'image2') return imageResolution.value
+  const size = sizeForImage()
+  if (size === 'auto') return ''
+  if (image2SizeOptions['1K'].some(option => option.size === size)) return '1K'
+  const edge = Math.max(...size.split('x').map(Number))
+  return edge <= 1024 ? '1K' : edge <= 2048 ? '2K' : '4K'
+})
+function imageTierPriceLabel(tier: string) {
+  const price = imagePricing.value?.prices[tier]
+  return price != null ? `${formatScaled(price, 1, 2)}/张` : '价格待确认'
+}
+const imageEstimatedCost = computed(() => {
+  if (imagePricingLoading.value) return '正在查询…'
+  if (!imagePricing.value) return '暂无法预估'
+  if (imagePricing.value.billing_mode === 'token') return '按实际用量计费'
+  const prices = imagePricing.value.prices
+  if (imageBillingTier.value) {
+    const price = prices[imageBillingTier.value]
+    return price == null ? '暂无法预估' : formatScaled(price, outputCount.value, 2)
+  }
+  const values = imageResolutionOptions.value.map(tier => prices[tier]).filter((price): price is number => price != null)
+  if (!values.length) return '暂无法预估'
+  const low = Math.min(...values), high = Math.max(...values)
+  return low === high ? formatScaled(low, outputCount.value, 2) : `${formatScaled(low, outputCount.value, 2)}–${formatScaled(high, outputCount.value, 2)}`
+})
+const imagePricingNote = computed(() => {
+  if (imagePricingLoading.value) return '正在获取价格'
+  if (!imagePricing.value) return '价格暂未获取'
+  if (imagePricing.value.billing_mode === 'token') return '按实际 Token 用量结算'
+  if (!imageBillingTier.value) return `自动尺寸 · ${outputCount.value} 张 · 按输出尺寸结算`
+  return `${imageBillingTier.value} · ${imageTierPriceLabel(imageBillingTier.value)} × ${outputCount.value} 张`
+})
+async function loadImagePricing() {
+  imagePricingRequest?.abort()
+  const request = new AbortController()
+  imagePricingRequest = request
+  imagePricing.value = null
+  imagePricingFailed.value = false
+  imagePricingLoading.value = false
+  if (studioMode.value !== 'image' || !selectedApiKey.value || !selectedModel.value) return
+  imagePricingLoading.value = true
+  try {
+    const quote = await getCreatorImagePricing(selectedApiKey.value.key, imageModelForGeneration(), request.signal)
+    if (imagePricingRequest !== request) return
+    imagePricing.value = quote
+  } catch {
+    if (imagePricingRequest === request) imagePricingFailed.value = true
+  } finally {
+    if (imagePricingRequest === request) imagePricingLoading.value = false
+  }
+}
 const imageHistoryCount = computed(() => historyItems.value.filter(item => item.type === 'image').length)
 const videoHistoryCount = computed(() => historyItems.value.filter(item => item.type === 'video').length)
 const visibleHistory = computed(() => historyItems.value.filter(item => item.type === historyFilter.value))
+const historyListElement = ref<HTMLElement | null>(null)
+const virtualizeHistory = computed(() => visibleHistory.value.length > 20)
+const historyVirtualizer = useVirtualizer<HTMLElement, HTMLElement>(computed(() => ({
+  enabled: virtualizeHistory.value && !historyCollapsed.value,
+  count: virtualizeHistory.value ? visibleHistory.value.length : 0,
+  getScrollElement: () => historyListElement.value,
+  getItemKey: (index: number) => visibleHistory.value[index].id,
+  estimateSize: () => 78,
+  overscan: 3,
+  initialRect: { width: 0, height: 600 },
+  observeElementRect: (instance, callback) => observeElementRect(instance, rect => {
+    if (rect.height > 0) callback(rect)
+  }),
+})))
+const historyVirtualRows = computed(() => historyVirtualizer.value.getVirtualItems())
+const renderedHistory = computed(() => virtualizeHistory.value
+  ? historyVirtualRows.value.map(row => visibleHistory.value[row.index])
+  : visibleHistory.value)
+const historyPaddingTop = computed(() => virtualizeHistory.value ? historyVirtualRows.value[0]?.start || 0 : 0)
+const historyPaddingBottom = computed(() => virtualizeHistory.value
+  ? Math.max(0, historyVirtualizer.value.getTotalSize() - (historyVirtualRows.value.at(-1)?.end || 0))
+  : 0)
+watch(historyFilter, () => {
+  historyVirtualizer.value.scrollToOffset(0)
+}, { flush: 'post' })
 const totalShotDuration = computed(() => videoShots.value.reduce((sum, shot) => sum + Number(shot.duration || 0), 0))
 const editorPrompt = computed({
   get: () => studioMode.value === 'video' && professionalVideo.value
@@ -1387,10 +1498,67 @@ const editorPrompt = computed({
     prompt.value = value
   },
 })
-const configuredVideoDuration = computed(() => professionalVideo.value
-  ? Number(selectedShot.value?.duration || 0)
-  : videoDuration.value)
+const configuredVideoDuration = computed({
+  get: () => professionalVideo.value
+    ? Number(selectedShot.value?.duration || 0)
+    : videoDuration.value,
+  set: (value: number) => {
+    const next = Math.max(1, Math.min(15, value))
+    if (professionalVideo.value && selectedShot.value) {
+      selectedShot.value.duration = next
+      return
+    }
+    videoDuration.value = next
+  },
+})
 const estimatedVideoDuration = computed(() => professionalVideo.value ? totalShotDuration.value : videoDuration.value)
+const videoPricing = ref<CreatorVideoPricing | null>(null)
+const videoPricingLoading = ref(false)
+const videoPricingFailed = ref(false)
+let videoPricingRequest: AbortController | null = null
+const videoEstimatedAmount = computed(() => {
+  if (!videoPricing.value) return null
+  const shots = professionalVideo.value
+    ? videoShots.value
+    : [{ resolution: videoResolution.value, duration: videoDuration.value }]
+  if (!shots.length) return null
+  let total = 0
+  for (const shot of shots) {
+    const cost = videoPricing.value.prices[shot.resolution]?.[Number(shot.duration) - 1]
+    if (cost == null || !Number.isFinite(cost)) return null
+    total += cost
+  }
+  return total
+})
+const videoEstimatedCost = computed(() => {
+  if (videoPricingLoading.value) return '正在查询…'
+  return videoEstimatedAmount.value == null ? '暂无法预估' : formatScaled(videoEstimatedAmount.value, 1, 2)
+})
+const videoPricingNote = computed(() => {
+  if (videoPricingLoading.value) return '正在获取价格'
+  if (videoEstimatedAmount.value == null) return '价格暂未获取'
+  return professionalVideo.value
+    ? `${videoShots.value.length} 个镜头 · 共 ${estimatedVideoDuration.value} 秒 · 按各镜头清晰度汇总`
+    : `${videoResolution.value} · ${videoDuration.value} 秒 · 已计入当前适用倍率`
+})
+async function loadVideoPricing() {
+  videoPricingRequest?.abort()
+  const request = new AbortController()
+  videoPricingRequest = request
+  videoPricing.value = null
+  videoPricingFailed.value = false
+  videoPricingLoading.value = false
+  if (studioMode.value !== 'video' || !selectedApiKey.value || !selectedModel.value) return
+  videoPricingLoading.value = true
+  try {
+    const quote = await getCreatorVideoPricing(selectedApiKey.value.key, selectedModel.value, request.signal)
+    if (videoPricingRequest === request) videoPricing.value = quote
+  } catch {
+    if (videoPricingRequest === request) videoPricingFailed.value = true
+  } finally {
+    if (videoPricingRequest === request) videoPricingLoading.value = false
+  }
+}
 const estimatedVideoMode = computed(() => professionalVideo.value && videoShots.value.length > 1 ? '按镜头顺序拼接' : '单段视频')
 const effectivePrompt = computed(() => {
   if (studioMode.value === 'video' && professionalVideo.value) {
@@ -1523,8 +1691,10 @@ function image2StandardModel() {
 }
 
 function imageModelForGeneration() {
-  if (imageCapability.value !== 'image2') return selectedModel.value
-  return image2StandardModel() || selectedModel.value
+  if (imageCapability.value === 'image2' && isImage2FourKModel(selectedModel.value)) {
+    return image2StandardModel() || selectedModel.value
+  }
+  return selectedModel.value
 }
 
 function syncSelectedGroup() {
@@ -1573,14 +1743,13 @@ async function refreshStudio() {
   if (bootstrapping.value) return
   bootstrapping.value = true
   try {
-    const [available, activeKeys, works] = await Promise.all([
+    const [available, activeKeys] = await Promise.all([
       userGroupsAPI.getAvailable(),
       loadAllUserKeys(),
-      creatorHistory.list(),
     ])
     groups.value = available
     apiKeys.value = activeKeys
-    historyItems.value = works
+    await syncHistory()
     syncSelectedGroup()
     await loadModels()
   } catch (error) {
@@ -1588,6 +1757,37 @@ async function refreshStudio() {
   } finally {
     bootstrapping.value = false
   }
+}
+
+function applyHistoryUpdate(work: CreatorHistoryItem) {
+  const current = historyItems.value.find(item => item.id === work.id)
+  if (current && current.updatedAt > work.updatedAt) return
+  historyItems.value = current
+    ? historyItems.value.map(item => item.id === work.id ? work : item)
+    : [work, ...historyItems.value]
+  if (selectedWork.value?.id === work.id) {
+    restorePersistedVideoOutputs(work)
+    selectedWork.value = work
+  }
+}
+
+async function syncHistory() {
+  const works = await creatorHistory.list()
+  if (disposed) return
+  const current = new Map(historyItems.value.map(work => [work.id, work]))
+  historyItems.value = works.map(work => {
+    const previous = current.get(work.id)
+    return previous && previous.updatedAt > work.updatedAt ? previous : work
+  })
+  if (selectedWork.value) {
+    const latest = historyItems.value.find(work => work.id === selectedWork.value?.id)
+    if (latest) restorePersistedVideoOutputs(latest)
+    selectedWork.value = latest || null
+  }
+}
+
+function syncVisibleHistory() {
+  if (studioActive && document.visibilityState === 'visible') void syncHistory()
 }
 
 async function loadAllUserKeys() {
@@ -1640,12 +1840,7 @@ function useTemplate(template: PromptTemplate) {
 }
 
 function adjustVideoDuration(delta: -1 | 1) {
-  const next = Math.max(1, Math.min(15, configuredVideoDuration.value + delta))
-  if (professionalVideo.value && selectedShot.value) {
-    selectedShot.value.duration = next
-    return
-  }
-  videoDuration.value = next
+  configuredVideoDuration.value += delta
 }
 
 function previousTemplate() {
@@ -1675,7 +1870,7 @@ function stopTemplateAutoplay() {
 
 function startTemplateAutoplay() {
   stopTemplateAutoplay()
-  if (activeTemplates.value.length <= 1) return
+  if (!studioActive || activeTemplates.value.length <= 1) return
   templateAutoplayTimer = window.setInterval(advanceTemplate, 3000)
 }
 
@@ -1967,7 +2162,7 @@ async function generateFromCurrentSettings(source: string) {
         size: sizeForImage(),
         quality: imageQuality.value,
         outputFormat: outputFormat.value,
-        background: transparentBackground.value && outputFormat.value !== 'jpeg' ? 'transparent' : 'auto',
+        background: 'auto',
         referenceFiles: referenceImages.value.map(reference => reference.file),
         aspectRatio: taskAspectRatio,
         resolution: imageResolution.value,
@@ -2082,7 +2277,7 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     size: input.size,
     quality: input.quality,
     outputFormat: input.outputFormat,
-    background: input.background,
+    background: 'auto',
     // Grok may return temporary cross-origin URLs that browsers cannot save
     // through the download attribute. Base64 keeps the result self-contained.
     ...(usesBase64Response ? { responseFormat: 'b64_json' } : {}),
@@ -2187,6 +2382,7 @@ async function normalizeCreatorImageOutput(output: string, requestedRatio: strin
 
 async function normalizeHistoricalImageWork(work: CreatorHistoryItem) {
   if (work.imageCapability !== 'image2' || work.imageSizeMode === 'auto' || !/^\d+x\d+$/.test(work.outputSize || '') || !work.outputs.length) return
+  if (work.actualOutputSize === work.outputSize) return
   const requestedSize = work.outputSize || ''
   const normalizedOutputs = await Promise.all(work.outputs.map(output => normalizeCreatorImageOutput(output, work.aspectRatio || '1:1', requestedSize)))
   const changed = normalizedOutputs.some((output, index) => output !== work.outputs[index])
@@ -2198,14 +2394,16 @@ async function normalizeHistoricalImageWork(work: CreatorHistoryItem) {
     await persistWork(work)
   }
   historyItems.value = historyItems.value.map(item => item.id === work.id ? cloneWork(work) : item)
-  selectedWork.value = cloneWork(work)
+  if (selectedWork.value?.id === work.id) selectedWork.value = cloneWork(work)
 }
 
 function imageDataUrlDimensions(output: string) {
-  const match = /^data:image\/png;base64,([a-z0-9+/=\s]+)$/i.exec(output.trim())
+  // PNG dimensions live in the first 24 bytes. Never decode the entire 4K
+  // payload just to read its header on a history selection.
+  const match = /^data:image\/png;base64,/i.exec(output.slice(0, 32))
   if (!match) return null
   try {
-    const decoded = window.atob(match[1].replace(/\s/g, ''))
+    const decoded = window.atob(output.slice(match[0].length, match[0].length + 128).replace(/\s/g, '').slice(0, 32))
     if (decoded.length < 24 || decoded.slice(0, 8) !== '\x89PNG\r\n\x1a\n' || decoded.slice(12, 16) !== 'IHDR') return null
     const view = new DataView(Uint8Array.from(decoded, character => character.charCodeAt(0)).buffer)
     const width = view.getUint32(16)
@@ -2646,11 +2844,8 @@ async function composeWorkVideo(work: CreatorHistoryItem, blobs: Blob[], notifyF
 async function recomposeVideo(work: CreatorHistoryItem) {
   if (composingWorkId.value) return
   try {
-    const blobs = await Promise.all(work.outputs.map(async (output) => {
-      const response = await fetch(output)
-      if (!response.ok) throw new Error(`读取镜头素材失败：HTTP ${response.status}`)
-      return response.blob()
-    }))
+    const blobs = await readVideoSegmentBlobs(work)
+    work.videoBlobs = blobs
     await composeWorkVideo(work, blobs, true)
     work.updatedAt = Date.now()
     await persistWork(work)
@@ -2660,6 +2855,48 @@ async function recomposeVideo(work: CreatorHistoryItem) {
   } catch (error) {
     appStore.showError(errorMessage(error, '完整视频合成失败'))
   }
+}
+
+/**
+ * Recover segments without depending on temporary object URLs. Those URLs
+ * are intentionally omitted from IndexedDB and may have been revoked after a
+ * refresh or a failed composition attempt; the original video task endpoint
+ * remains a valid fallback while the provider retains the task.
+ */
+async function readVideoSegmentBlobs(work: CreatorHistoryItem): Promise<Blob[]> {
+  const requestIds = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+  const key = requestIds.length ? findKeyForWork(work) : null
+
+  return Promise.all(work.outputs.map(async (output, index) => {
+    const persisted = work.videoBlobs?.[index]
+    if (persisted instanceof Blob && persisted.size > 0) return persisted
+
+    let outputError: unknown
+    if (output) {
+      try {
+        const response = await fetch(output)
+        if (response.ok) {
+          const blob = await response.blob()
+          if (blob.size > 0) return blob
+        } else {
+          outputError = new Error(`读取镜头素材失败：HTTP ${response.status}`)
+        }
+      } catch (error) {
+        outputError = error
+      }
+    }
+
+    const requestId = requestIds[index]
+    if (key && requestId) {
+      try {
+        return await getCreatorVideoContent(key.key, requestId)
+      } catch (error) {
+        outputError = error
+      }
+    }
+
+    throw outputError || new Error(`缺少第 ${index + 1} 段视频素材`)
+  }))
 }
 
 async function removeWork(work: CreatorHistoryItem) {
@@ -2689,7 +2926,6 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       outputCount.value = Math.max(1, Math.min(4, work.outputCount || work.outputs.length || 1))
       imageQuality.value = work.quality || 'auto'
       outputFormat.value = work.outputFormat || 'png'
-      transparentBackground.value = work.background === 'transparent'
     } else {
       aspectRatio.value = work.aspectRatio || '16:9'
       videoResolution.value = historicalVideoResolution
@@ -2907,6 +3143,7 @@ function resultDescription(work: CreatorHistoryItem, index: number) {
 
 function completeVideoDescription(work: CreatorHistoryItem) {
   const count = workShotPrompts(work).length
+  if (!work.mergedOutput) return `${count} 个镜头素材已保留，合成完成后可预览或下载完整视频。`
   return `${count} 个镜头已按时间顺序拼接，完整保留每段画面与声音，可直接预览或下载。`
 }
 
@@ -3184,6 +3421,7 @@ function formatHistoryTime(timestamp: number) {
 }
 
 function errorMessage(error: unknown, fallback: string) {
+  if (typeof error === 'string' && error.trim()) return error
   if (error instanceof Error && error.message) return error.message
   if (typeof error === 'object' && error) {
     const candidate = error as { message?: string; error?: { message?: string } }
@@ -3204,6 +3442,9 @@ function fileToDataUrl(file: File) {
 function delay(milliseconds: number) {
   return new Promise(resolve => window.setTimeout(resolve, milliseconds))
 }
+
+watch([studioMode, imageCapability, selectedModel, selectedApiKey], loadImagePricing)
+watch([studioMode, selectedModel, selectedApiKey], loadVideoPricing)
 
 watch([studioMode, imageCapability], () => {
   if (restoringWorkSettings) return
@@ -3228,10 +3469,6 @@ watch(maxReferenceImages, maximum => {
 watch(requiresReferenceVideo15, () => {
   if (restoringWorkSettings) return
   syncVideoModelForGenerationMethod()
-})
-
-watch(outputFormat, format => {
-  if (format === 'jpeg') transparentBackground.value = false
 })
 
 watch(maxOutputCount, maximum => {
@@ -3268,13 +3505,40 @@ watch(selectedModel, model => {
   }
 })
 
-onMounted(() => {
+function activateStudio() {
+  studioActive = true
   window.addEventListener('paste', handlePaste)
   startTemplateAutoplay()
+  generationClock.value = Date.now()
+}
+
+onActivated(() => {
+  activateStudio()
+  if (unsubscribeHistory) void syncHistory()
+})
+onDeactivated(() => {
+  studioActive = false
+  window.removeEventListener('paste', handlePaste)
+  stopTemplateAutoplay()
+  imageSizeDialogOpen.value = false
+  previewUrl.value = ''
+  studioElement.value?.querySelectorAll<HTMLVideoElement>('video').forEach(video => video.pause())
+})
+
+onMounted(() => {
+  unsubscribeHistory = creatorHistory.subscribe(applyHistoryUpdate)
+  window.addEventListener('focus', syncVisibleHistory)
+  document.addEventListener('visibilitychange', syncVisibleHistory)
+  activateStudio()
   void refreshStudio()
 })
 
 onBeforeUnmount(() => {
+  unsubscribeHistory?.()
+  window.removeEventListener('focus', syncVisibleHistory)
+  document.removeEventListener('visibilitychange', syncVisibleHistory)
+  imagePricingRequest?.abort()
+  videoPricingRequest?.abort()
   disposed = true
   window.removeEventListener('paste', handlePaste)
   if (generationTimer !== undefined) window.clearInterval(generationTimer)
@@ -3492,7 +3756,7 @@ onBeforeUnmount(() => {
 .history-list::-webkit-scrollbar-track { background: transparent; }
 .history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
 .history-list::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
-.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; min-height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: 8px; text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
+.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: 8px; text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
 .history-item:hover { border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
 .history-item.active { border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
 .history-item-hitbox { position: absolute; z-index: 1; inset: 0; border-radius: inherit; }
@@ -3570,17 +3834,17 @@ onBeforeUnmount(() => {
 .brief-topline > span:first-child { display: flex; align-items: center; gap: 6px; color: #b5d8d1; }
 .brief-topline > div { display: flex; gap: 7px; }
 .brief-topline button { width: 32px; height: 32px; border-color: #334b47; color: #b9cbc7; background: #182825; }
-.brief-stage { min-height: 208px; }
-.brief-body { display: grid; grid-template-columns: .88fr 1.12fr; min-height: 208px; padding: 24px; }
-.brief-summary { padding-right: 24px; border-right: 1px solid #33423f; }
+.brief-stage { height: 256px; overflow: hidden; }
+.brief-body { display: grid; grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr); height: 100%; min-height: 0; padding: 24px; }
+.brief-summary { display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding-right: 24px; border-right: 1px solid #33423f; }
 .brief-summary > span { display: inline-flex; padding: 5px 9px; border: 1px solid #9a7744; border-radius: 6px; color: #d6b374; background: #28251e; font-size: 10px; }
 .brief-summary h3 { margin: 16px 0 7px; color: #fff; font-size: 28px; font-weight: 760; }
 .brief-summary p { margin: 0; color: #a7b6b3; font-size: 12px; line-height: 1.7; }
-.brief-summary small { display: block; margin-top: 26px; color: #788b87; font-size: 10px; }
-.brief-copy { display: flex; align-items: flex-start; flex-direction: column; padding-left: 24px; }
-.brief-copy > small { color: #c2d3cf; font-size: 10px; font-weight: 800; letter-spacing: 0; }
-.brief-copy p { flex: 1; margin: 14px 0; color: #d2dedb; font-size: 13px; line-height: 1.8; }
-.brief-copy button { display: inline-flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: 7px; color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; }
+.brief-summary small { display: block; margin-top: auto; padding-top: 16px; color: #788b87; font-size: 10px; }
+.brief-copy { display: flex; align-items: flex-start; flex-direction: column; min-width: 0; min-height: 0; padding-left: 24px; }
+.brief-copy > small { flex-shrink: 0; color: #c2d3cf; font-size: 10px; font-weight: 800; letter-spacing: 0; }
+.brief-copy p { flex: 1; align-self: stretch; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #5c716d transparent; margin: 14px 0; color: #d2dedb; font-size: 13px; line-height: 1.8; }
+.brief-copy button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: 7px; color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; }
 .brief-copy button:hover { background: #edcc82; }
 .brief-slide-enter-active,
 .brief-slide-leave-active { transition: opacity 220ms ease, transform 220ms ease; }
@@ -3610,26 +3874,31 @@ onBeforeUnmount(() => {
 .progress-track.indeterminate span { width: 34%; animation: creatorProgress 1.7s ease-in-out infinite; }
 .generation-note { margin-top: 12px; color: #8798ac; font-size: 12px; font-weight: 500; line-height: 1.5; }
 .result-workspace { padding: 32px 0 24px; }
-.result-heading { align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 20px; }
+.result-heading { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .result-heading > div { min-width: 0; }
-.result-heading .eyebrow { margin: 0 0 8px; }
-.result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 9px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.result-heading-complete { align-items: center; }
-.result-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 7px; }
-.result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 12px; border: 1px solid #d6e4e1; border-radius: 17px; color: #728093; background: #fff; font-size: 11px; }
-.result-heading-actions .secondary-command { border-color: #d6e4e1; color: #3f5d59; }
+.result-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-heading-complete { align-items: flex-start; flex-wrap: wrap; }
+.result-heading-complete > div:first-child { flex: 1 1 240px; }
+.result-heading h2 { font-size: 20px; font-weight: 700; line-height: 1.4; }
+.result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
+.result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); white-space: nowrap; color: #728093; background: #fff; font-size: 11px; }
+.result-heading-actions .secondary-command { min-height: 34px; padding: 0 12px; flex-shrink: 0; white-space: nowrap; font-weight: 600; border-color: #d6e4e1; color: #3f5d59; }
+.result-heading-actions .icon-action { flex-shrink: 0; width: 34px; height: 34px; }
 .result-heading-actions .primary-soft { border-color: #a9e3d9; color: var(--creator-accent-strong); background: #f1fbf8; }
 .complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
-.complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 18px 20px; border-bottom: 1px solid #dce7e5; }
-.complete-video-card > header h3 { margin: 4px 0 0; color: #172033; font-size: 18px; }
-.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 7px 0 0; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: 999px; color: #5d716d; background: #f7faf9; font-size: 10px; }
+.complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #dce7e5; }
+.complete-video-card > header > div { min-width: 0; }
+.complete-video-card > header .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.complete-video-card > header h3 { margin: 0; color: #172033; font-size: 16px; font-weight: 700; line-height: 1.4; }
+.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; font-weight: 400; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius); white-space: nowrap; color: #5d716d; background: #f7faf9; font-size: 10px; }
 .complete-video-frame,
 .video-result-frame { position: relative; width: 100%; overflow: hidden; background: #101b1a; }
-.complete-video-frame { display: grid; max-height: min(58vh, 620px); }
+.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
 .complete-video-media { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: min(58vh, 620px); background: #0f1717; object-fit: contain; opacity: 0; transition: opacity 180ms ease; }
 .complete-video-media.video-ready { opacity: 1; }
-.video-result-frame { display: grid; max-height: min(58vh, 620px); }
+.video-result-frame { display: grid; border-radius: 0; max-height: min(58vh, 620px); }
 .video-result-frame > .result-media.video { position: relative; z-index: 1; height: 100%; opacity: 0; transition: opacity 180ms ease; }
 .video-result-frame > .result-media.video.video-ready { opacity: 1; }
 .video-loading-overlay,
@@ -3660,11 +3929,12 @@ onBeforeUnmount(() => {
 .complete-video-pending.failed { color: #b64b42; }
 .complete-video-pending.failed > span { border-color: #e7b4ae; background: #fff5f3; }
 .segment-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; margin: 2px 0 12px; }
-.segment-heading h3 { margin: 4px 0 0; color: #263347; font-size: 16px; }
+.segment-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
+.segment-heading h3 { margin: 0; color: #263347; font-size: 16px; font-weight: 700; }
 .segment-heading > span { color: #8593a5; font-size: 11px; }
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .result-grid.single { grid-template-columns: minmax(0, 1fr); }
-.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; border-radius: var(--creator-surface-radius); background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
+.result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
 .result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: 6px; color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
 .result-media {
   position: relative;
@@ -3693,6 +3963,8 @@ onBeforeUnmount(() => {
 .result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
 .result-segment-grid .result-description p { display: -webkit-box; line-height: 1.45; text-overflow: initial; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+.result-workspace .icon-action,
+.result-workspace .secondary-command { border-radius: var(--creator-radius); }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
 .result-error { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #e7b4ae; border-radius: 8px; color: #b64b42; background: #fff8f7; text-align: center; }
 .result-error strong { margin-top: 14px; color: #7b312b; }
@@ -3708,7 +3980,9 @@ onBeforeUnmount(() => {
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { margin-top: 14px; }
 .result-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
+.result-card,
+.result-stat-grid article { border-radius: var(--creator-radius); }
+.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; background: rgb(255 255 255 / 72%); }
 .result-stat-grid span,
 .result-parameter-details div > span { display: block; color: #64748b; font-size: 10px; }
 .result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
@@ -3744,14 +4018,14 @@ onBeforeUnmount(() => {
 .sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 8px; color: #8fa0b4; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .sequence-ruler i { height: 1px; background: repeating-linear-gradient(90deg, #b9d6d1 0 1px, transparent 1px 22%); border-bottom: 1px solid #d4e3e0; }
 .sequence-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 2px 2px 8px; }
-.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 112px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
+.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 132px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
 .sequence-shot::before { position: absolute; top: 39px; bottom: 10px; left: 28px; width: 1px; background: #d9e8e5; content: ''; }
 .sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: 6px; color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
 .sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
 .sequence-shot-preview::before { position: absolute; top: 11px; left: 10px; width: 38px; height: 15px; border-top: 1px solid #bddbd5; border-left: 1px solid #bddbd5; transform: skewX(-28deg); content: ''; }
 .sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 34px; height: 34px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
 .sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 7px; font-weight: 750; font-variant-numeric: tabular-nums; }
-.sequence-shot-content { min-width: 0; }
+.sequence-shot-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
 .sequence-shot-content > header { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 24px; }
 .sequence-shot-content > header > strong { color: #64748b; font-size: 8px; }
 .sequence-shot-content > header > span { display: flex; align-items: center; gap: 3px; color: #91a0b2; font-size: 7px; }
@@ -3760,13 +4034,10 @@ onBeforeUnmount(() => {
 .sequence-shot-content > header button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 5px; color: #718096; }
 .sequence-shot-content > header button:hover:not(:disabled) { color: var(--creator-accent-strong); background: #eff9f7; }
 .sequence-shot-content > header button:disabled { opacity: .25; }
-.sequence-shot-content textarea { width: 100%; height: 46px; padding: 5px 0; border: 0; outline: 0; resize: none; color: #344054; background: transparent; font-size: 10px; line-height: 1.45; }
-.sequence-shot-content textarea::placeholder { color: #a7b3c0; }
-.sequence-shot-content footer { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.sequence-shot-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; flex: none; margin: 0; padding: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #344054; font-size: 10px; line-height: 1.5; }
+.sequence-shot-prompt.empty { color: #a7b3c0; }
+.sequence-shot-content footer { display: flex; flex-shrink: 0; margin-top: auto; flex-wrap: wrap; align-items: center; gap: 4px; }
 .sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: 5px; color: #607b76; background: #f5faf9; font-size: 7px; }
-.sequence-shot-content footer label { display: flex; align-items: center; min-width: 58px; flex: 1; gap: 4px; margin-left: 2px; color: #8b98a8; font-size: 7px; }
-.sequence-shot-content footer input { min-width: 32px; flex: 1; accent-color: var(--creator-accent); }
-.sequence-shot-content footer strong { color: #536579; font-size: 7px; white-space: nowrap; }
 .sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; }
 .sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 8px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
@@ -3949,6 +4220,15 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .toggle-row input:checked + i { background: var(--creator-accent); }
 .toggle-row input:checked + i::after { transform: translateX(16px); }
 .toggle-row input:disabled + i { opacity: .4; }
+.professional-toggle { display: grid; grid-template-columns: 24px max-content minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #cbd8e8; border-radius: 8px; background: #fafbfe; box-shadow: none; }
+.professional-toggle-icon { display: grid; grid-column: 1; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: #6f86a6; background: #dceaff; }
+.professional-toggle-copy { grid-column: 2; white-space: nowrap; }
+.professional-toggle-copy strong { color: #26364f; font-size: 12px; font-weight: 600; line-height: 1.5; }
+.professional-toggle-copy small { display: none; }
+.professional-toggle-hint { grid-column: 3; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #71829c; font-size: 10px; font-weight: 400; line-height: 1.5; }
+.professional-toggle-chevron { grid-column: 4; color: #657994; }
+.video-control-row { box-sizing: border-box; height: 52px; min-height: 52px; flex-shrink: 0; padding-top: 0; padding-bottom: 0; }
+.stepper.video-control-row button { height: 100%; }
 .generate-button { min-height: 52px; margin-top: 6px; font-size: 14px; }
 .button-spinner { width: 16px; height: 16px; border: 2px solid rgb(255 255 255 / 45%); border-top-color: #fff; border-radius: 50%; animation: creatorSpin .8s linear infinite; }
 .spinning { animation: creatorSpin .8s linear infinite; }
@@ -4001,7 +4281,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 
 .modal-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 58%); backdrop-filter: blur(5px); }
 .image-preview { z-index: 80; background: rgb(15 23 42 / 80%); }
-.image-preview img { max-width: calc(100vw - 96px); max-height: calc(100vh - 96px); object-fit: contain; }
+.image-preview-content { --creator-image-background: transparent; --creator-image-text: #dce8e5; width: calc(100vw - 48px); height: calc(100dvh - 96px); max-width: 1600px; border-radius: 12px; }
 .preview-close { position: fixed; top: 18px; right: 18px; border-color: rgb(255 255 255 / 30%); color: #fff; background: rgb(17 24 39 / 75%); }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
@@ -4080,7 +4360,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .sequence-shot { border-color: #334642; background: #14211f; }
 :global(.dark) .sequence-header h2,
 :global(.dark) .sequence-header dd,
-:global(.dark) .sequence-shot-content textarea,
+:global(.dark) .sequence-shot-prompt,
 :global(.dark) .result-stat-grid strong,
 :global(.dark) .result-parameter-details p { color: #dbe7e5; }
 :global(.dark) .sequence-header h2 span { border-color: #347a6f; color: #83ddd0; background: #15302c; }
@@ -4122,7 +4402,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .sequence-header dl { display: none; }
   .sequence-track { grid-template-columns: minmax(0, 1fr); }
   .sequence-shot { width: 100%; }
-  .brief-body { grid-template-columns: 1fr; }
+  .brief-stage { height: 460px; }
+  .brief-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 172px minmax(0, 1fr); }
   .brief-summary { padding: 0 0 18px; border-right: 0; border-bottom: 1px solid #33423f; }
   .brief-copy { padding: 18px 0 0; }
   .result-grid { grid-template-columns: 1fr; }
@@ -4158,4 +4439,18 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 @media (hover: none) {
   .history-item-actions { opacity: 1; pointer-events: auto; }
 }
+.image-cost-preview { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 8px; padding: 14px 2px 4px; border-top: 1px solid #e8eeed; }
+.image-cost-copy { min-width: 0; }
+.image-cost-label { color: #53647a; font-size: 12px; font-weight: 600; }
+.image-cost-copy p { margin: 4px 0 0; color: #8b98aa; font-size: 11px; line-height: 1.5; }
+.image-cost-total { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; column-gap: 5px; row-gap: 2px; text-align: right; }
+.image-cost-total strong { color: #243448; font-size: 21px; font-weight: 650; letter-spacing: -.6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.image-cost-total > span { color: #97a3b2; font-size: 10px; font-weight: 500; letter-spacing: .3px; }
+.image-cost-total.is-status strong { color: #8b98aa; font-size: 12px; font-weight: 500; letter-spacing: 0; }
+.image-price-retry { margin-top: 4px; color: var(--creator-accent-strong); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
+.image-tier-price { display: block; margin-top: 4px; font-size: 11px; font-weight: 500; }
+:global(.dark) .image-cost-preview { border-color: #2c3e42; }
+:global(.dark) .image-cost-label { color: #b6c3ce; }
+:global(.dark) .image-cost-total strong { color: #e2ecef; }
+:global(.dark) .image-cost-total.is-status strong { color: #8b98aa; }
 </style>

@@ -105,7 +105,7 @@ FROM ${POSTGRES_IMAGE} AS pg-client
 # -----------------------------------------------------------------------------
 # Stage 4: Final Runtime Image
 # -----------------------------------------------------------------------------
-FROM ${ALPINE_IMAGE}
+FROM ${ALPINE_IMAGE} AS runtime-base
 
 # Labels
 LABEL maintainer="Wei-Shaw <github.com/Wei-Shaw>"
@@ -159,3 +159,33 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
 # Run the application (entrypoint fixes /app/data ownership then execs as sub2api)
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
 CMD ["/app/sub2api"]
+
+# Optional supervisor is built only for the creator-local target.
+FROM backend-builder AS supervisor-builder
+RUN --mount=type=cache,id=sub2api-gomod,target=/go/pkg/mod \
+    --mount=type=cache,id=sub2api-gobuild,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build \
+    -trimpath -o /app/creator-supervisor ./cmd/creator-supervisor
+
+# Optional native-architecture development image for local automatic updates.
+# The default final stage below remains the minimal production runtime.
+FROM runtime-base AS creator-local
+ARG NPM_CONFIG_REGISTRY
+ARG GOPROXY
+ARG GOSUMDB
+RUN apk add --no-cache git nodejs npm build-base && \
+    npm install --global pnpm@9.15.9 --registry="${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}" && \
+    git config --system --add safe.directory /workspace/sub2api && \
+    mkdir -p /app/creator-builds /home/sub2api && \
+    chown -R sub2api:sub2api /app/creator-builds /home/sub2api
+COPY --from=backend-builder /usr/local/go /usr/local/go
+COPY --from=supervisor-builder --chown=sub2api:sub2api /app/creator-supervisor /app/creator-supervisor
+COPY --from=backend-builder --chown=sub2api:sub2api /app/backend/migrations /app/creator-baseline/migrations
+COPY --from=pg-client /usr/local/bin/pg_restore /usr/local/bin/pg_restore
+ENV PATH="/usr/local/go/bin:${PATH}" \
+    HOME=/home/sub2api \
+    GOPROXY=${GOPROXY} \
+    GOSUMDB=${GOSUMDB} \
+    NPM_CONFIG_REGISTRY=${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}
+
+FROM runtime-base AS runtime

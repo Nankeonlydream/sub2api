@@ -78,7 +78,8 @@ func detectOpenAIWebPDimensions(header []byte) (int, int, bool) {
 func reconcileOpenAIResponsesImageResultSizes(results []openAIResponsesImageResult, firstMeta *openAIResponsesImageResult) {
 	for i := range results {
 		// ChatGPT OAuth can normalize requested controls to "auto". The final
-		// image bytes are authoritative for response metadata and tier billing.
+		// image bytes are authoritative for response metadata. Explicit request
+		// sizes determine billing independently of these output dimensions.
 		if actualSize := detectOpenAIImageResultSize(results[i].Result); actualSize != "" {
 			results[i].Size = actualSize
 		}

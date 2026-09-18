@@ -6,6 +6,7 @@ import {
   putCreatorHistory,
   removeCreatorHistory,
   sortCreatorHistory,
+  subscribeCreatorHistory,
   type CreatorHistoryItem,
 } from '@/services/creatorHistory'
 
@@ -30,6 +31,17 @@ function createItem(
 }
 
 describe('creatorHistory', () => {
+  it('notifies mounted consumers when a background result is saved and unsubscribes cleanly', async () => {
+    const received: CreatorHistoryItem[] = []
+    const unsubscribe = subscribeCreatorHistory(item => { received.push(item) })
+    await putCreatorHistory(createItem('background', 100))
+    expect(received).toHaveLength(1)
+    received[0].outputs.push('mutation')
+    expect((await listCreatorHistory()).find(item => item.id === 'background')?.outputs).toEqual(['https://example.com/background.png'])
+    unsubscribe()
+    await putCreatorHistory(createItem('background', 101))
+    expect(received).toHaveLength(1)
+  })
   beforeEach(async () => {
     await clearCreatorHistory()
   })

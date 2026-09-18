@@ -642,14 +642,23 @@ func (s *OpenAIGatewayService) ForwardImages(
 	if parsed == nil {
 		return nil, fmt.Errorf("parsed images request is required")
 	}
+	var result *OpenAIForwardResult
+	var err error
 	switch account.Type {
 	case AccountTypeAPIKey:
-		return s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
+		result, err = s.forwardOpenAIImagesAPIKey(ctx, c, account, body, parsed, channelMappedModel)
 	case AccountTypeOAuth, AccountTypeSetupToken:
-		return s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel)
+		result, err = s.forwardOpenAIImagesOAuth(ctx, c, account, parsed, channelMappedModel)
 	default:
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
+	if result != nil {
+		// Explicit Images API sizes select the billed tier. Preserve output
+		// dimensions for diagnostics without silently repricing the request.
+		// Also apply this to partial streaming results returned with an error.
+		_, result.ImageInputSizeAuthoritative = ClassifyImageBillingTier(parsed.Size)
+	}
+	return result, err
 }
 
 func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(

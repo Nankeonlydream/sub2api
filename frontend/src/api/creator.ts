@@ -1,5 +1,31 @@
 import { buildGatewayUrl } from './client'
 
+export interface CreatorImagePricing {
+  currency: 'USD'
+  billing_mode: string
+  prices: Record<string, number>
+}
+
+export async function getCreatorImagePricing(apiKey: string, model: string, signal?: AbortSignal): Promise<CreatorImagePricing> {
+  return fetchJSON<CreatorImagePricing>(buildGatewayUrl(`/v1/sub2api/image-pricing?model=${encodeURIComponent(model)}`), {
+    headers: authHeaders(apiKey),
+    signal,
+  })
+}
+
+export interface CreatorVideoPricing {
+  currency: 'USD'
+  // Each resolution lists costs for durations 1–15 seconds.
+  prices: Record<string, number[]>
+}
+
+export async function getCreatorVideoPricing(apiKey: string, model: string, signal?: AbortSignal): Promise<CreatorVideoPricing> {
+  return fetchJSON<CreatorVideoPricing>(buildGatewayUrl(`/v1/sub2api/video-pricing?model=${encodeURIComponent(model)}`), {
+    headers: authHeaders(apiKey),
+    signal,
+  })
+}
+
 export interface CreatorModel {
   id: string
   object?: string

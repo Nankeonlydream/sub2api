@@ -190,6 +190,8 @@ func RegisterGatewayRoutes(
 	gateway.Use(endpointNorm)
 	gateway.Use(gin.HandlerFunc(apiKeyAuth))
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
+	gateway.GET("/sub2api/image-pricing", h.OpenAIGateway.CreatorImagePricing)
+	gateway.GET("/sub2api/video-pricing", h.OpenAIGateway.CreatorVideoPricing)
 	gateway.Use(groupModelAllowlist)
 	gateway.Use(compositeTarget)
 	gateway.Use(requireGroupAnthropic)

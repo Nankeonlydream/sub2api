@@ -58,6 +58,12 @@ const CREATED_AT_INDEX = 'createdAt'
 const memoryItems = new Map<string, CreatorHistoryItem>()
 let databasePromise: Promise<IDBDatabase | null> | undefined
 let memoryOnly = false
+const listeners = new Set<(item: CreatorHistoryItem) => void>()
+
+export function subscribeCreatorHistory(listener: (item: CreatorHistoryItem) => void): () => void {
+  listeners.add(listener)
+  return () => { listeners.delete(listener) }
+}
 
 function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return {
@@ -214,13 +220,12 @@ export async function putCreatorHistory(item: CreatorHistoryItem): Promise<void>
   memoryItems.set(storedItem.id, storedItem)
 
   const database = await openDatabase()
-  if (!database) return
-
   try {
-    await runWrite(database, (store) => store.put(storedItem))
+    if (database) await runWrite(database, (store) => store.put(storedItem))
   } catch {
     switchToMemory()
   }
+  listeners.forEach(listener => listener(cloneItem(storedItem)))
 }
 
 export async function removeCreatorHistory(id: string): Promise<void> {
@@ -250,6 +255,7 @@ export async function clearCreatorHistory(): Promise<void> {
 }
 
 export const creatorHistory = {
+  subscribe: subscribeCreatorHistory,
   list: listCreatorHistory,
   put: putCreatorHistory,
   remove: removeCreatorHistory,
