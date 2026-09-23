@@ -1,0 +1,25 @@
+# Run the locally built Creator release using its original named data volumes.
+# docker compose -p sub2api-preview -f deploy/docker-compose.yml -f deploy/docker-compose.preview.yml up -d
+services:
+  sub2api:
+    container_name: sub2api-preview
+    image: sub2api-local:0.2.8-creator.23
+    ports: !override
+      - "127.0.0.1:8081:8080"
+  postgres:
+    container_name: sub2api-preview-postgres
+  redis:
+    container_name: sub2api-preview-redis
+volumes:
+  sub2api_data:
+    driver: !reset null
+    external: true
+    name: deploy_sub2api_data
+  postgres_data:
+    driver: !reset null
+    external: true
+    name: deploy_postgres_data
+  redis_data:
+    driver: !reset null
+    external: true
+    name: deploy_redis_data
