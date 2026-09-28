@@ -3,7 +3,6 @@ package creatorupdate
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -25,27 +24,15 @@ func TestSupervisorClientDispatchesAndRestoresStatus(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Error(err)
-		}
-	})
+	defer os.RemoveAll(dir)
 	socket := filepath.Join(dir, "rpc.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
 	}
 	server := &http.Server{Handler: supervisorHandler(m)}
-	go func() {
-		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			t.Error(err)
-		}
-	}()
-	t.Cleanup(func() {
-		if err := server.Close(); err != nil {
-			t.Error(err)
-		}
-	})
+	go server.Serve(listener)
+	defer server.Close()
 	config.AutoDeploy, config.SupervisorSocket = true, socket
 	data, _ := json.Marshal(config)
 	path := filepath.Join(t.TempDir(), "config.json")
@@ -65,9 +52,7 @@ func TestSupervisorClientDispatchesAndRestoresStatus(t *testing.T) {
 	if got := FromEnv().Status(); got.JobID != s.JobID || got.State != "ready" {
 		t.Fatalf("restored client: %+v", got)
 	}
-	if err := server.Close(); err != nil {
-		t.Fatal(err)
-	}
+	server.Close()
 	if _, err := client.Start(); err == nil {
 		t.Fatal("unavailable supervisor silently fell back to local runner")
 	}

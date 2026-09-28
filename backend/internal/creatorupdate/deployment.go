@@ -51,7 +51,7 @@ func hashFile(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = f.Close() }()
+	defer f.Close()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -122,7 +122,7 @@ func writeJSON(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	defer func() { _ = dir.Close() }()
+	defer dir.Close()
 	return dir.Sync()
 }
 

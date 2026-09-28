@@ -1,4 +1,4 @@
-<template>
+  <template>
   <div class="relative">
     <!-- Admin: Full version badge with dropdown -->
     <template v-if="isAdmin">
