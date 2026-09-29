@@ -3,7 +3,7 @@
 services:
   sub2api:
     container_name: sub2api-preview
-    image: sub2api-local:0.2.8-creator.23
+    image: sub2api-local:0.2.10-creator.26
     ports: !override
       - "127.0.0.1:8081:8080"
   postgres:
