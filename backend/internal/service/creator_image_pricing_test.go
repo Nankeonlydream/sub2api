@@ -54,7 +54,7 @@ func TestCreatorImagePricingTokenModeHasNoFixedPrice(t *testing.T) {
 }
 
 func TestCreator1KPresetsMatchRecordedCharge(t *testing.T) {
-	for _, size := range []string{"1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536", "1360x1024", "1024x1360", "1536x656"} {
+	for _, size := range []string{"1024x1024", "1024x688", "688x1024", "1024x768", "768x1024"} {
 		t.Run(size, func(t *testing.T) {
 			for _, withOutput := range []bool{false, true} {
 				repo := &openAIRecordUsageLogRepoStub{inserted: true}
@@ -75,4 +75,17 @@ func TestCreator1KPresetsMatchRecordedCharge(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreator1KRequestWithLargerOutputIsChargedAs2K(t *testing.T) {
+	repo := &openAIRecordUsageLogRepoStub{inserted: true}
+	svc := newOpenAIRecordUsageServiceForTest(repo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+	p1, p2 := 0.04, 0.06
+	key := &APIKey{ID: 1, GroupID: i64p(2), Group: &Group{ID: 2, RateMultiplier: 1, ImagePrice1K: &p1, ImagePrice2K: &p2}}
+	err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+		Result: &OpenAIForwardResult{RequestID: "upscaled-output", Model: "gpt-image-2", ImageCount: 1, ImageInputSize: "1024x688", ImageOutputSize: "1536x1024"},
+		APIKey: key, User: &User{ID: 3}, Account: &Account{ID: 4, Platform: PlatformOpenAI},
+	})
+	require.NoError(t, err)
+	require.InDelta(t, p2, repo.lastLog.ActualCost, 1e-12)
 }

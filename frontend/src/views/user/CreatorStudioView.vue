@@ -936,12 +936,15 @@
                 :key="option.value"
                 type="button"
                 :class="{ active: imageSizeDraftRatio === option.value }"
+                :disabled="!isImageRatioAvailable(imageSizeDraftResolution, option.value)"
+                :title="isImageRatioAvailable(imageSizeDraftResolution, option.value) ? undefined : '此比例请选择 2K 或 4K'"
                 @click="imageSizeDraftRatio = option.value"
               >
                 <i :style="ratioShapeStyle(option.value)"></i>
                 <span>{{ option.value }}</span>
               </button>
             </div>
+            <p v-if="imageSizeDraftResolution === '1K'" class="image-size-tier-hint">1K 最长边不超过 1024px。16:9、9:16、21:9 为满足最小像素要求，请选择 2K 或 4K。</p>
             <button type="button" class="custom-ratio-command" @click="imageSizeDraftMode = 'custom'">自定义比例</button>
           </section>
         </template>
@@ -1170,13 +1173,10 @@ const image2RatioOptions = [
 const image2SizeOptions: Record<string, Array<{ value: string; label: string; size: string }>> = {
   '1K': [
     { value: '1:1', label: '1:1 方形 · 1024×1024', size: '1024x1024' },
-    { value: '3:2', label: '3:2 横图 · 1536×1024', size: '1536x1024' },
-    { value: '2:3', label: '2:3 竖图 · 1024×1536', size: '1024x1536' },
-    { value: '16:9', label: '16:9 横图 · 1536×864', size: '1536x864' },
-    { value: '9:16', label: '9:16 竖图 · 864×1536', size: '864x1536' },
-    { value: '4:3', label: '4:3 横图 · 1360×1024', size: '1360x1024' },
-    { value: '3:4', label: '3:4 竖图 · 1024×1360', size: '1024x1360' },
-    { value: '21:9', label: '21:9 超宽 · 1536×656', size: '1536x656' },
+    { value: '3:2', label: '3:2 横图 · 1024×688', size: '1024x688' },
+    { value: '2:3', label: '2:3 竖图 · 688×1024', size: '688x1024' },
+    { value: '4:3', label: '4:3 横图 · 1024×768', size: '1024x768' },
+    { value: '3:4', label: '3:4 竖图 · 768×1024', size: '768x1024' },
   ],
   '2K': [
     { value: '1:1', label: '1:1 方形 · 2048×2048', size: '2048x2048' },
@@ -2020,6 +2020,14 @@ function sizeForImage() {
   return `${width * scale}x${height * scale}`
 }
 
+function isImageRatioAvailable(resolution: string, ratio: string) {
+  return (image2SizeOptions[resolution] || []).some(option => option.value === ratio)
+}
+
+watch(imageSizeDraftResolution, resolution => {
+  if (!isImageRatioAvailable(resolution, imageSizeDraftRatio.value)) imageSizeDraftRatio.value = '1:1'
+})
+
 function image2SizeFor(resolution: string, ratio: string) {
   const options = image2SizeOptions[resolution] || image2SizeOptions['1K']
   return options.find(option => option.value === ratio)?.size || options[0].size
@@ -2051,8 +2059,6 @@ function normalizeCustomImageSize(widthValue: number, heightValue: number): [num
 }
 
 function customImageResolution(width: number, height: number) {
-  // Match the backend classifier for presets and custom dimensions alike.
-  if (image2SizeOptions['1K'].some(option => option.size === `${width}x${height}`)) return '1K'
   const edge = Math.max(width, height)
   return edge <= 1024 ? '1K' : edge <= 2048 ? '2K' : '4K'
 }
@@ -2991,6 +2997,8 @@ function restoreImage2SizeSettings(work: CreatorHistoryItem) {
     .find(option => option.size === outputSize)
   if (work.imageSizeMode !== 'custom' && knownSize) {
     imageSizeMode.value = 'ratio'
+    const [width, height] = knownSize.size.split('x').map(Number)
+    imageResolution.value = customImageResolution(width, height)
     aspectRatio.value = knownSize.value
     return
   }
@@ -3001,6 +3009,7 @@ function restoreImage2SizeSettings(work: CreatorHistoryItem) {
     imageSizeMode.value = 'custom'
     imageCustomWidth.value = width
     imageCustomHeight.value = height
+    imageResolution.value = customImageResolution(width, height)
     aspectRatio.value = ratioForDimensions(width, height)
     return
   }
@@ -4107,6 +4116,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-resolution-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
 .image-ratio-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
 .image-ratio-grid button { display: grid; min-height: 80px; place-items: center; align-content: center; gap: 7px; border: 1px solid #d8e2e8; border-radius: 14px; color: #66768c; background: #fff; font-size: 12px; font-weight: 750; transition: 150ms ease; }
+.image-ratio-grid button:disabled { opacity: .4; cursor: not-allowed; }
+.image-size-tier-hint { margin-top: 10px; color: #66768c; font-size: 12px; line-height: 1.6; }
 .image-ratio-grid button i { display: block; box-sizing: border-box; border: 2px solid #95a4b7; border-radius: 3px; }
 .image-ratio-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
 .image-ratio-grid button.active i { border-color: #4f9e94; }

@@ -19,7 +19,7 @@ func TestClassifyImageBillingTier(t *testing.T) {
 		{name: "explicit 4k portrait", size: "2160x3840", wantTier: "4K", wantOK: true},
 		{name: "long edge 1k", size: "1024X768", wantTier: "1K", wantOK: true},
 		{name: "long edge 2k", size: "1280x768", wantTier: "2K", wantOK: true},
-		{name: "creator normalized 1k", size: " 1536 X 1024 ", wantTier: "1K", wantOK: true},
+		{name: "legacy creator preset is 2k", size: " 1536 X 1024 ", wantTier: "2K", wantOK: true},
 		{name: "non-preset 1536 square stays 2k", size: "1536x1536", wantTier: "2K", wantOK: true},
 		{name: "near preset stays 2k", size: "1552x1024", wantTier: "2K", wantOK: true},
 		{name: "long edge 4k", size: "2560x1600", wantTier: "4K", wantOK: true},

@@ -1,18 +1,18 @@
 # Creator Studio on ranxi v2.10.2
 
 Base: `ranxi2001/sub2api` v2.10.2 (`d3e43f2de33af9e987cffa511d76dfabbcd749da`).
-Custom version: `2.10.2-creator.2`.
+Custom version: `2.10.2-creator.3`.
 
 Ports the Creator Studio UI, browser history/thumbnails, image/video pricing
 queries, protected image downloads and browser FFmpeg composition from the local
-Creator branch. Keeps ranxi generation and routing. Starting with creator.2,
-image billing treats the Creator 1K preset canvases (1024x1024, 1536x1024,
-1024x1536, 1536x864, 864x1536, 1360x1024, 1024x1360, 1536x656) as 1K,
-for both request fallback and actual output dimensions. Other sizes retain the
-upstream longest-edge classification. The frontend uses the same classification
-for custom dimensions and price estimates. This is an intentional, operator-
-authorized billing change on the right node, including direct API requests.
-The left node retains its existing billing rules until separately upgraded.
+Creator branch. Keeps ranxi generation, routing and longest-edge billing rules.
+Creator.3 removes creator.2's special 1K billing exemption. The 1K preset list now
+uses only dimensions whose longest edge is at most 1024: 1024x1024, 1024x688,
+688x1024, 1024x768 and 768x1024. These also satisfy the existing multiple-of-16
+and minimum 655360-pixel constraints. Ratios 16:9, 9:16 and 21:9 are disabled
+at 1K because they cannot meet both limits; they remain available at 2K/4K.
+Custom and historical dimensions are classified by their actual longest edge;
+1536x1024 and the other legacy large 1K presets are billed as 2K again.
 Estimates are labelled as estimates; final output/usage controls billing.
 No SQL migrations are added. Video task reads remain available after generation
 uses the remaining balance. API key authentication and task ownership checks remain.
@@ -32,7 +32,7 @@ pnpm install --frozen-lockfile
 pnpm build
 cd ../backend
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embed -trimpath \
-  -ldflags="-s -w -X main.Version=2.10.2-creator.2 -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildType=release" \
+  -ldflags="-s -w -X main.Version=2.10.2-creator.3 -X main.Commit=$(git rev-parse --short HEAD) -X main.BuildType=release" \
   -o ../sub2api ./cmd/server
 ```
 

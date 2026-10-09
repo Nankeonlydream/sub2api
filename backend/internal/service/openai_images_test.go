@@ -95,7 +95,7 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_MultipartEdit(t *testing.T
 	require.Equal(t, "gpt-image-2", parsed.Model)
 	require.Equal(t, "replace background", parsed.Prompt)
 	require.Equal(t, "1536x1024", parsed.Size)
-	require.Equal(t, "1K", parsed.SizeTier)
+	require.Equal(t, "2K", parsed.SizeTier)
 	require.Len(t, parsed.Uploads, 1)
 	require.Equal(t, OpenAIImagesCapabilityNative, parsed.RequiredCapability)
 }
@@ -153,8 +153,8 @@ func TestOpenAIGatewayServiceParseOpenAIImagesRequest_NormalizesOfficialAndCusto
 		wantTier string
 	}{
 		{size: "1024x1024", wantTier: "1K"},
-		{size: "1536x1024", wantTier: "1K"},
-		{size: "1024x1536", wantTier: "1K"},
+		{size: "1536x1024", wantTier: "2K"},
+		{size: "1024x1536", wantTier: "2K"},
 		{size: "2048x2048", wantTier: "2K"},
 		{size: "2048x1152", wantTier: "2K"},
 		{size: "3840x2160", wantTier: "4K"},

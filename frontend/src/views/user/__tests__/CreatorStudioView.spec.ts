@@ -230,26 +230,45 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
-  it('quotes every 1K ratio preset at the 1K price, including landscape and portrait', async () => {
+  it('sends only valid 1K dimensions for every enabled 1K ratio and quotes the 1K price', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     await flushPromises()
-    const sizes = ['1024×1024', '1536×1024', '1024×1536', '1536×864', '864×1536', '1360×1024', '1024×1360', '1536×656']
+    const sizes = ['1024×1024', '1024×688', '688×1024', '1024×768', '768×1024']
+    await wrapper.get('#creator-prompt').setValue('尺寸计费测试')
     for (const [index, size] of sizes.entries()) {
       await wrapper.get('#creator-output-size').trigger('click')
       const dialog = wrapper.getComponent(BaseDialog)
       await dialog.findAll('.image-resolution-grid button')[0].trigger('click')
-      await dialog.findAll('.image-ratio-grid button')[index].trigger('click')
+      await dialog.findAll('.image-ratio-grid button').filter(button => button.attributes('disabled') === undefined)[index].trigger('click')
       await dialog.get('.image-size-confirm').trigger('click')
       expect(wrapper.get('#creator-output-size').text()).toContain(`1K · ${size}`)
       expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.04')
       expect(wrapper.text()).toContain('1K · $0.04/张 × 1 张')
+      const [width, height] = size.split('×').map(Number)
+      expect(Math.max(width, height)).toBeLessThanOrEqual(1024)
+      expect(width * height).toBeGreaterThanOrEqual(655360)
+      expect(width % 16).toBe(0)
+      expect(height % 16).toBe(0)
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: size.replace('×', 'x') }))
     }
     await wrapper.get('button[title="增加数量"]').trigger('click')
     expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.08')
-    expect(generateImage).not.toHaveBeenCalled()
+    expect(generateImage).toHaveBeenCalledTimes(5)
+    await wrapper.get('#creator-output-size').trigger('click')
+    const dialog = wrapper.getComponent(BaseDialog)
+    expect(dialog.findAll('.image-ratio-grid button').filter(button => button.attributes('disabled') !== undefined).map(button => button.text())).toEqual(['16:9', '9:16', '21:9'])
+    await dialog.findAll('.image-resolution-grid button')[1].trigger('click')
+    expect(dialog.findAll('.image-ratio-grid button').every(button => button.attributes('disabled') === undefined)).toBe(true)
+    await dialog.findAll('.image-ratio-grid button')[3].trigger('click')
+    expect(dialog.text()).toContain('2048×1152')
+    await dialog.findAll('.image-resolution-grid button')[0].trigger('click')
+    expect(dialog.get('.image-ratio-grid button.active').text()).toBe('1:1')
+    expect(dialog.text()).toContain('1024×1024')
     wrapper.unmount()
   })
 
@@ -886,6 +905,8 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     await wrapper.get('[aria-label="编辑这张照片"]').trigger('click')
     await flushPromises()
+    expect(wrapper.get('#creator-output-size').text()).toContain('自定义 · 1536×656')
+    expect(wrapper.text()).toContain('2K · $0.08/张 × 1 张')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
 
@@ -2174,7 +2195,7 @@ describe('CreatorStudioView', () => {
     await dialog.get('.image-size-confirm').trigger('click')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
-    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '1536x1024' }))
+    expect(generateImage.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({ size: '1024x688' }))
 
     await wrapper.get('#creator-output-size').trigger('click')
     dialog = wrapper.getComponent(BaseDialog)
