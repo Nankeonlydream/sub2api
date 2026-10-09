@@ -1409,8 +1409,8 @@ const imageBillingTier = computed(() => {
   if (imageCapability.value !== 'image2') return imageResolution.value
   const size = sizeForImage()
   if (size === 'auto') return ''
-  const edge = Math.max(...size.split('x').map(Number))
-  return edge <= 1024 ? '1K' : edge <= 2048 ? '2K' : '4K'
+  const [width, height] = size.split('x').map(Number)
+  return customImageResolution(width, height)
 })
 function imageTierPriceLabel(tier: string) {
   const price = imagePricing.value?.prices[tier]
@@ -2051,9 +2051,10 @@ function normalizeCustomImageSize(widthValue: number, heightValue: number): [num
 }
 
 function customImageResolution(width: number, height: number) {
-  if (Math.max(width, height) > 2048) return '4K'
-  if (Math.max(width, height) > 1536 || width * height > 1572864) return '2K'
-  return '1K'
+  // Match the backend classifier for presets and custom dimensions alike.
+  if (image2SizeOptions['1K'].some(option => option.size === `${width}x${height}`)) return '1K'
+  const edge = Math.max(width, height)
+  return edge <= 1024 ? '1K' : edge <= 2048 ? '2K' : '4K'
 }
 
 function ratioForDimensions(width: number, height: number) {

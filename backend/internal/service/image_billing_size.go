@@ -47,6 +47,13 @@ func ClassifyImageBillingTier(size string) (string, bool) {
 	if !ok {
 		return "", false
 	}
+	// Creator Studio's standard 1K canvases include landscape and portrait
+	// dimensions above 1024px. Classify both requested and returned dimensions
+	// identically so the quote and recorded charge use the same tier.
+	switch strconv.Itoa(width) + "x" + strconv.Itoa(height) {
+	case "1536x1024", "1024x1536", "1536x864", "864x1536", "1360x1024", "1024x1360", "1536x656":
+		return ImageBillingSize1K, true
+	}
 	maxEdge := width
 	if height > maxEdge {
 		maxEdge = height

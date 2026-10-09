@@ -52,3 +52,27 @@ func TestCreatorImagePricingTokenModeHasNoFixedPrice(t *testing.T) {
 	require.Equal(t, BillingModeToken, quote.BillingMode)
 	require.Empty(t, quote.Prices)
 }
+
+func TestCreator1KPresetsMatchRecordedCharge(t *testing.T) {
+	for _, size := range []string{"1024x1024", "1536x1024", "1024x1536", "1536x864", "864x1536", "1360x1024", "1024x1360", "1536x656"} {
+		t.Run(size, func(t *testing.T) {
+			for _, withOutput := range []bool{false, true} {
+				repo := &openAIRecordUsageLogRepoStub{inserted: true}
+				svc := newOpenAIRecordUsageServiceForTest(repo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+				p1, p2, p4 := 0.04, 0.06, 0.07
+				key := &APIKey{ID: 1, GroupID: i64p(2), Group: &Group{ID: 2, RateMultiplier: 1,
+					ImagePrice1K: &p1, ImagePrice2K: &p2, ImagePrice4K: &p4,
+				}}
+				result := &OpenAIForwardResult{RequestID: size, Model: "gpt-image-2", ImageCount: 1, ImageInputSize: size}
+				if withOutput {
+					result.ImageOutputSize = size
+				}
+				err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+					Result: result, APIKey: key, User: &User{ID: 3}, Account: &Account{ID: 4, Platform: PlatformOpenAI},
+				})
+				require.NoError(t, err)
+				require.InDelta(t, p1, repo.lastLog.ActualCost, 1e-12, "size=%s output=%v", size, withOutput)
+			}
+		})
+	}
+}

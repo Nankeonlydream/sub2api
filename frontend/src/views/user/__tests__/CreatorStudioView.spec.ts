@@ -230,6 +230,29 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
+  it('quotes every 1K ratio preset at the 1K price, including landscape and portrait', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    const sizes = ['1024×1024', '1536×1024', '1024×1536', '1536×864', '864×1536', '1360×1024', '1024×1360', '1536×656']
+    for (const [index, size] of sizes.entries()) {
+      await wrapper.get('#creator-output-size').trigger('click')
+      const dialog = wrapper.getComponent(BaseDialog)
+      await dialog.findAll('.image-resolution-grid button')[0].trigger('click')
+      await dialog.findAll('.image-ratio-grid button')[index].trigger('click')
+      await dialog.get('.image-size-confirm').trigger('click')
+      expect(wrapper.get('#creator-output-size').text()).toContain(`1K · ${size}`)
+      expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.04')
+      expect(wrapper.text()).toContain('1K · $0.04/张 × 1 张')
+    }
+    await wrapper.get('button[title="增加数量"]').trigger('click')
+    expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.08')
+    expect(generateImage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
   it('shows unavailable pricing and lets users retry without assuming a free generation', async () => {
     getImagePricing.mockRejectedValue(new Error('offline'))
     listGroups.mockResolvedValue([image2Group])
