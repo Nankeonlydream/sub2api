@@ -19,3 +19,13 @@ declare module '*.md?raw' {
   const content: string
   export default content
 }
+
+declare module '@ffmpeg/core/wasm?url' {
+  const url: string
+  export default url
+}
+
+declare module '@ffmpeg/ffmpeg/worker?url' {
+  const url: string
+  export default url
+}

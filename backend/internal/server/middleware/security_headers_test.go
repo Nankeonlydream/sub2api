@@ -309,6 +309,19 @@ func TestNonceTemplate(t *testing.T) {
 }
 
 func TestEnhanceCSPPolicy(t *testing.T) {
+	t.Run("allows_creator_wasm_without_javascript_eval", func(t *testing.T) {
+		for _, policy := range []string{
+			"default-src 'self'",
+			"default-src 'self'; script-src 'self' __CSP_NONCE__",
+			config.DefaultCSPPolicy,
+		} {
+			enhanced := enhanceCSPPolicy(enhanceCSPPolicy(policy))
+			assert.Equal(t, 1, countDirectiveValue(enhanced, "script-src", CreatorWasmSource))
+			assert.Zero(t, countDirectiveValue(enhanced, "script-src", "'unsafe-eval'"))
+			assert.Zero(t, countDirectiveValue(enhanced, "script-src", "'unsafe-inline'"))
+		}
+	})
+
 	t.Run("adds_nonce_placeholder_if_missing", func(t *testing.T) {
 		policy := "default-src 'self'; script-src 'self'"
 		enhanced := enhanceCSPPolicy(policy)
@@ -378,6 +391,14 @@ func TestEnhanceCSPPolicy(t *testing.T) {
 		enhanced := enhanceCSPPolicy(policy)
 
 		assert.Equal(t, 1, countDirectiveValue(enhanced, "worker-src", TencentCaptchaWorkerSource))
+	})
+
+	t.Run("adds_media_sources_for_creator_blob_video", func(t *testing.T) {
+		policy := "default-src 'self'; script-src 'self' __CSP_NONCE__"
+		enhanced := enhanceCSPPolicy(policy)
+
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "media-src", "'self'"))
+		assert.Equal(t, 1, countDirectiveValue(enhanced, "media-src", CreatorMediaBlobSource))
 	})
 
 	t.Run("default_policy_already_carries_tencent_captcha_domains", func(t *testing.T) {

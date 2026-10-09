@@ -177,6 +177,7 @@ export default {
     announcements: 'Announcements',
     apiKeys: 'API Keys',
     batchImage: 'Batch Images',
+    creatorStudio: 'Creator Studio',
     usage: 'Usage',
     redeem: 'Redeem',
     affiliate: 'Affiliate Rebates',
@@ -227,6 +228,13 @@ export default {
     contentModeration: 'Content Moderation',
     promptAudit: 'Prompt Audit',
     auditLogs: 'Audit Logs',
+  },
+
+  creator: {
+    customVersion: 'Creator custom build',
+    customUpdateHint: 'Update or roll back using a verified custom image. Installing an upstream release replaces Creator Studio.',
+    title: 'Creator Studio',
+    description: 'Create with image and video models',
   },
 
   // Auth

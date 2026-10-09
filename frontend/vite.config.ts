@@ -114,6 +114,11 @@ export default defineConfig(({ mode }) => {
          */
         manualChunks(id: string) {
           if (id.includes('node_modules')) {
+            // FFmpeg and its worker are only needed when composing multi-shot videos.
+            if (id.includes('/@ffmpeg/')) {
+              return 'vendor-ffmpeg'
+            }
+
             // Vue 核心库
             if (
               id.includes('/vue/') ||
@@ -157,6 +162,10 @@ export default defineConfig(({ mode }) => {
     server: {
       host: '0.0.0.0',
       port: devPort,
+      headers: {
+        'Cross-Origin-Opener-Policy': 'same-origin',
+        'Cross-Origin-Embedder-Policy': 'require-corp'
+      },
       proxy: {
         '/api': {
           target: backendUrl,
