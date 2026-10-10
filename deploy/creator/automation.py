@@ -37,6 +37,9 @@ def main():
             api('actions/workflows/creator-image.yml/dispatches', {'ref': branch})
         summary.write_text('候选分支已存在：`' + branch + '`。请检查 Creator image 的测试结果；未部署服务器。\n')
         return
+    # Merge may need committer identity even with --no-commit on a clean runner.
+    upstream.git(root, 'config', 'user.name', 'Creator upgrade bot')
+    upstream.git(root, 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com')
     upstream.prepare(root, data)
     worktree = root.parent / ('sub2api-creator-' + tag)
     report = root.parent / ('creator-upgrade-' + tag + '.json')

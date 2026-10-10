@@ -80,3 +80,13 @@ GitHub API 查询可使用本机已有 git credential，凭据不能打印、提
 - `.github/workflows/creator-image.yml` 的默认分支入口与 `image-dispatch.yml` 一致。
 
 真正的镜像构建配置来自所选择的 Creator/candidate 分支。不要将定制源码覆盖到原本服务于其它项目的 main 分支。
+
+
+## 验证记录（2026-10-10）
+
+- 升级工具 8 项测试通过，包括独立 Git worktree 合并、自动解版本冲突、错误主机/镜像拒绝及应用回退。
+- 定时检查已在默认分支启用，首次修正报告上传路径后运行成功：
+  https://github.com/Nankeonlydream/sub2api/actions/runs/38020705321
+- 为兼容服务器 Python 3.6，服务器命令使用 `universal_newlines`。
+- `2.10.3-creator.2` 添加镜像内发布清单，供通用升级器验证；本次工具安装不要求将线上 creator.1 切换到 creator.2。
+- 服务器命令已安装：`/usr/local/sbin/creator-upgrade`；SHA256 `2804f5fd57663df76df4116074b39303ab1df0d077e6b8cec63a8c8fe51c4789`，`--status` 验证成功。
