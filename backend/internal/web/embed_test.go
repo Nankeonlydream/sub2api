@@ -536,6 +536,7 @@ func TestFrontendServer_Middleware(t *testing.T) {
 			"/embeddings",
 			"/contents/generations/tasks",
 			"/contents/generations/tasks/task-123",
+			"/v3/other",
 			"/v3/contents/generations/tasks",
 			"/v3/contents/generations/tasks/task-123",
 			"/tts",
@@ -666,11 +667,11 @@ func TestFrontendServer_Middleware(t *testing.T) {
 
 		// Request for existing static file
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/logo.png", nil)
+		req := httptest.NewRequest(http.MethodGet, "/logo.svg", nil)
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Header().Get("Content-Type"), "image/png")
+		assert.Contains(t, w.Header().Get("Content-Type"), "image/svg+xml")
 		assert.Empty(t, w.Header().Get("Cache-Control"))
 
 		entries, err := fs.ReadDir(server.distFS, "assets")
@@ -722,6 +723,7 @@ func TestEmbeddedFrontendBypassesBareAPIAliases(t *testing.T) {
 		"/x_search",
 		"/contents/generations/tasks",
 		"/contents/generations/tasks/task-123",
+		"/v3/other",
 		"/v3/contents/generations/tasks",
 		"/v3/contents/generations/tasks/task-123",
 	} {
@@ -733,7 +735,6 @@ func TestEmbeddedFrontendBypassesBareAPIAliases(t *testing.T) {
 		"/custom/page-1",
 		"/monitor",
 		"/setup",
-		"/v3/other",
 	} {
 		require.False(t, shouldBypassEmbeddedFrontend(path), "path=%s", path)
 	}
@@ -785,11 +786,11 @@ func TestServeEmbeddedFrontend(t *testing.T) {
 		router.Use(middleware)
 
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodGet, "/logo.png", nil)
+		req := httptest.NewRequest(http.MethodGet, "/logo.svg", nil)
 		router.ServeHTTP(w, req)
 
 		assert.Equal(t, http.StatusOK, w.Code)
-		assert.Contains(t, w.Header().Get("Content-Type"), "image/png")
+		assert.Contains(t, w.Header().Get("Content-Type"), "image/svg+xml")
 	})
 
 	t.Run("serves_index_html_for_root", func(t *testing.T) {

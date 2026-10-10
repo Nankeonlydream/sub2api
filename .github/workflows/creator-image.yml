@@ -30,11 +30,13 @@ jobs:
           cache-dependency-path: frontend/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
         working-directory: frontend
-      - run: pnpm test:run src/views/user/__tests__/CreatorStudioView.spec.ts
+      - run: pnpm test:run
         working-directory: frontend
       - run: pnpm build
         working-directory: frontend
-      - run: go test ./internal/service -count=1
+      - run: go test ./internal/service/... ./internal/handler/... ./internal/server/... ./internal/config ./internal/domain ./internal/pkg/apicompat ./migrations -count=1
+        working-directory: backend
+      - run: go test -tags embed ./internal/web
         working-directory: backend
       - name: Build binary
         working-directory: backend
