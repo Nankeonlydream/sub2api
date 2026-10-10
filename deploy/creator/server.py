@@ -21,7 +21,7 @@ COMPOSE = ['docker', 'compose', '-f', str(DEPLOY / 'docker-compose.yml'), '-f', 
 
 
 def run(args, timeout=300):
-    return subprocess.check_output(args, stderr=subprocess.STDOUT, text=True, timeout=timeout)
+    return subprocess.check_output(args, stderr=subprocess.STDOUT, universal_newlines=True, timeout=timeout)
 
 
 def require(condition, message):
