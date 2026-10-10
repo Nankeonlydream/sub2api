@@ -1,0 +1,32 @@
+# Install this workflow on the repository DEFAULT branch, not just the Creator branch.
+name: Creator upstream check
+on:
+  schedule:
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: write
+concurrency:
+  group: creator-upstream-check
+  cancel-in-progress: false
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feature/creator-on-v2.10.2
+          fetch-depth: 0
+      - name: Prepare latest stable upstream and start candidate tests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 deploy/creator/automation.py
+      - name: Save upgrade review report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: creator-upgrade-review
+          path: ../creator-upgrade-v*.json
+          if-no-files-found: ignore
