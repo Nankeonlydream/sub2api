@@ -90,3 +90,6 @@ GitHub API 查询可使用本机已有 git credential，凭据不能打印、提
 - 为兼容服务器 Python 3.6，服务器命令使用 `universal_newlines`。
 - `2.10.3-creator.2` 添加镜像内发布清单，供通用升级器验证；本次工具安装不要求将线上 creator.1 切换到 creator.2。
 - 服务器命令已安装：`/usr/local/sbin/creator-upgrade`；SHA256 `2804f5fd57663df76df4116074b39303ab1df0d077e6b8cec63a8c8fe51c4789`，`--status` 验证成功。
+- 镜像发布与精确提交 CI 校验通过：https://github.com/Nankeonlydream/sub2api/actions/runs/38020631727 。
+- 在右侧服务器以新工具检查 `2.10.3-creator.2` 的固定 digest `sha256:0362186a1838c296d8ad16769538f29eba16132c4f6304be818f087c3e1bc8b6`，返回 `CHECK_OK`：拉取、发布清单/版本/提交、迁移和隔离创作中心检查通过。没有执行 `--apply`，线上仍为健康的 `2.10.3-creator.1`。
+- 定时检查再次验证成功：https://github.com/Nankeonlydream/sub2api/actions/runs/38021820005 。
