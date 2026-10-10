@@ -63,3 +63,5 @@ git merge --no-commit --no-ff ranxi-v2.10.3
 ghcr.io/nankeonlydream/sub2api@sha256:9a148035dc3b81aed5a24a547f224d005a38795a42f9f58b2f5bcd2c0cd18909
 源码提交：3e73a11cea3653d48d5decf99735a70d766810d9
 ```
+
+2026-10-10：右侧节点已完成上述 v2.10.3 镜像部署，健康检查、270/271 迁移校验、配置保留检查及公网创作中心资源校验通过。成功记录位于 `/root/sub2api-creator-release/2.10.3-creator.1/DEPLOYED_OK`。未执行数据库备份或付费生成测试。
