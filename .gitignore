@@ -209,3 +209,8 @@ issues/
 !docs/screenshots/2fa-rotation/
 **/totp-recovery/
 **/*.sealed
+
+# Generated Creator release metadata
+/deploy/creator/release.json
+/deploy/creator/Dockerfile
+/deploy/creator/__pycache__/

@@ -1,0 +1,13 @@
+# Discovery entry on the default branch. Actual builds run from the chosen Creator ref.
+name: Creator image
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  help:
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo 'Choose feature/creator-on-v2.10.2 or upgrade/creator-vX.Y.Z as the workflow ref.'
+          exit 1
