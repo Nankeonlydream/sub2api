@@ -22,6 +22,21 @@ NEW = server.REPOSITORY + '@sha256:' + 'b' * 64
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_legacy_image_only_allowed_on_registered_left_node(self):
+        server.validate_current_image(server.LEFT_HOST, server.LEFT_LEGACY_IMAGE)
+        for host in [server.HOST, server.LEFT_HOST]:
+            server.validate_current_image(host, OLD)
+        for host, ref in [(server.HOST, server.LEFT_LEGACY_IMAGE),
+                          (server.LEFT_HOST, 'ghcr.io/ranxi2001/sub2api:latest'),
+                          (server.LEFT_HOST, OLD + 'junk')]:
+            with self.assertRaises(RuntimeError):
+                server.validate_current_image(host, ref)
+
+    def test_shared_network_companion_requires_review(self):
+        server.validate_companions({'sub2api': {}, 'redis': {}})
+        with self.assertRaisesRegex(RuntimeError, 'Shared-network companion'):
+            server.validate_companions({'prism-adapter': {'network_mode': 'service:sub2api'}})
+
     def test_reject_untrusted_or_mutable_image(self):
         for ref in ['ghcr.io/ranxi2001/sub2api:2.10.4', server.REPOSITORY + ':latest',
                     server.REPOSITORY + ':2.10.4-creator.1;id', server.REPOSITORY + '@sha256:abc']:

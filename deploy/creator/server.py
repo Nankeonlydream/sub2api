@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Right-node Creator image updater. Default is validation only; --apply switches it."""
+"""Creator image updater for registered nodes. Default is validation only."""
 import argparse
 import fcntl
 import hashlib
@@ -13,6 +13,9 @@ import sys
 import time
 
 HOST = 'iZrj92zzv39jbi7n9fz4fuZ'
+LEFT_HOST = 'iZrj9eby63lh2zp7dbipn8Z'
+HOSTS = {HOST: 'right', LEFT_HOST: 'left'}
+LEFT_LEGACY_IMAGE = 'ghcr.io/ranxi2001/sub2api@sha256:67d3167a638bab1f466384f9db187873e983d776a6a8e741ae6bc2402867e83a'
 REPOSITORY = 'ghcr.io/nankeonlydream/sub2api'
 DEPLOY = Path('/root/sub2api-deploy')
 RELEASES = Path('/root/sub2api-creator-release')
@@ -41,6 +44,18 @@ def validate_image_ref(value):
     pattern = re.escape(REPOSITORY) + r'(?:@sha256:[a-f0-9]{64}|:\d+\.\d+\.\d+-creator\.\d+)'
     require(re.fullmatch(pattern, value), 'Use a fixed Creator version or digest from ' + REPOSITORY)
     return value
+
+
+def validate_current_image(host, value):
+    creator = re.fullmatch(re.escape(REPOSITORY) + r'@sha256:[a-f0-9]{64}', value)
+    require(creator or (host == LEFT_HOST and value == LEFT_LEGACY_IMAGE),
+            'Unexpected current production image')
+
+
+def validate_companions(services):
+    # Replacing a network namespace owner strands companions in the old namespace.
+    require(not any(s.get('network_mode') == 'service:sub2api' for s in services.values()),
+            'Shared-network companion requires a separately reviewed deployment')
 
 
 def validate_metadata(data, image):
@@ -159,20 +174,25 @@ def main():
     parser.add_argument('--status', action='store_true', help='Show current version and health without updating')
     args = parser.parse_args()
     require(os.geteuid() == 0, 'Run with sudo')
-    require(socket.gethostname() == HOST, 'Wrong host: this updater is for the right node only')
+    host = socket.gethostname()
+    require(host in HOSTS, 'Wrong host: this updater is for registered Creator nodes only')
     os.umask(0o077)
     RELEASES.mkdir(parents=True, exist_ok=True)
     with open(RELEASES / 'creator-upgrade.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = inspect('sub2api')
         if args.status:
-            log(json.dumps({'image': old['Config']['Image'], 'health': old['State'].get('Health', {}).get('Status')}))
+            log(json.dumps({'node': HOSTS[host], 'hostname': host, 'image': old['Config']['Image'],
+                            'health': old['State'].get('Health', {}).get('Status')}))
             log(run(['docker', 'exec', 'sub2api', '/app/sub2api', '-version']))
             return
         require(args.image, '--image is required')
         validate_image_ref(args.image)
-        require(old['Config']['Image'].startswith(REPOSITORY + '@sha256:'), 'Unexpected current production image')
+        validate_current_image(host, old['Config']['Image'])
         require(old['State'].get('Health', {}).get('Status') == 'healthy', 'Current service is not healthy')
+        services = json.loads(run(COMPOSE + ['config', '--format', 'json']))['services']
+        validate_companions(services)
+        require(services['sub2api']['image'] == old['Config']['Image'], 'Compose/running image mismatch')
         original = OVERRIDE.read_text()
         log('PULL ' + args.image)
         log(run(['docker', 'pull', args.image], timeout=600))
@@ -218,7 +238,8 @@ def main():
         require(inspect('sub2api')['Id'] == old['Id'] and OVERRIDE.read_text() == original,
                 'Production changed during preflight; retry after inspecting it')
         current, asset = switch_image(original, replacement, image, metadata, old, expected, root)
-        result = {'version': metadata['version'], 'revision': metadata['revision'], 'image': pinned,
+        result = {'node': HOSTS[host], 'hostname': host,
+                  'version': metadata['version'], 'revision': metadata['revision'], 'image': pinned,
                   'container_id': current['Id'], 'health': 'healthy', 'creator_asset': asset,
                   'applied_migrations': sorted(expected), 'config_preserved': True, 'database_backup': False}
         (root / 'DEPLOYED_OK').write_text(json.dumps(result, indent=2) + '\n')

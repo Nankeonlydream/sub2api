@@ -25,9 +25,11 @@ GitHub 对无活动的公开仓库可能暂停定时任务，计划执行也可�
 - 集成分支：`feature/creator-on-v2.10.2`（名称不变，内容持续升级）。
 - 定制仓库：`Nankeonlydream/sub2api`，上游：`ranxi2001/sub2api`。
 - 右侧：`iZrj92zzv39jbi7n9fz4fuZ` / `172.18.28.229`，网站 `https://yapi.asia`。
-- 左侧不更新；不备份数据库；不进行付费生成测试。
+- 左侧：`iZrj9eby63lh2zp7dbipn8Z` / `172.18.29.45`，网站 `https://catbee.online`。
+- 只更新用户指定的左侧、右侧或两侧；不备份数据库；不进行付费生成测试。
+- 左侧 Prism 适配器已按用户要求移除，不自动重装。
 - 保留真实 1K 预设和实际尺寸计费规则。
-- SSH 首选已有可用连接；若只能用阿里云 Chrome SSH 工作台，确认定位右侧终端后操作。
+- SSH 首选已有可用连接；若只能用阿里云 Chrome SSH 工作台，确认主机名对应用户指定节点后操作。
 - 不再要求用户重复批准已经明确要求的升级；在合并冲突、测试失败、迁移不兼容时处理具体问题。
 
 1. 在本仓库运行 `python3 deploy/creator/upstream.py check`，读取发布说明。
@@ -93,3 +95,11 @@ GitHub API 查询可使用本机已有 git credential，凭据不能打印、提
 - 镜像发布与精确提交 CI 校验通过：https://github.com/Nankeonlydream/sub2api/actions/runs/38020631727 。
 - 在右侧服务器以新工具检查 `2.10.3-creator.2` 的固定 digest `sha256:0362186a1838c296d8ad16769538f29eba16132c4f6304be818f087c3e1bc8b6`，返回 `CHECK_OK`：拉取、发布清单/版本/提交、迁移和隔离创作中心检查通过。没有执行 `--apply`，线上仍为健康的 `2.10.3-creator.1`。
 - 定时检查再次验证成功：https://github.com/Nankeonlydream/sub2api/actions/runs/38021820005 。
+
+## 左侧节点接入（2026-10-10）
+
+同一套 GitHub 定时检查与 Creator 镜像供两侧使用，无需重复设置调度。服务器命令按主机名识别左/右节点，默认只检查，加 `--apply` 才部署。下次可说“按已有流程升级左侧/右侧/两侧，保留创作中心，不备份数据库”。
+
+左侧从已核验的 ranxi v2.10.2 固定摘要首次迁入；这个旧镜像仅允许在左侧作为升级起点。其它旧镜像仍拒绝。若出现与主应用共享网络的附属服务，工具会停止，要求审查部署方式。
+
+Prism 容器、Compose 服务和主应用中的 Prism 环境配置已移除；仅保留原数据文件与原配置以便恢复，不再运行适配器。
