@@ -23,10 +23,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: python3 deploy/creator/automation.py
+      - name: Collect upgrade review report
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/creator-review"
+          for report in ../creator-upgrade-v*.json; do
+            if [ -f "$report" ]; then cp "$report" "$RUNNER_TEMP/creator-review/"; fi
+          done
       - name: Save upgrade review report
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: creator-upgrade-review
-          path: ../creator-upgrade-v*.json
+          path: ${{ runner.temp }}/creator-review/*.json
           if-no-files-found: ignore
