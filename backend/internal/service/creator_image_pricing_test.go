@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"github.com/Wei-Shaw/sub2api/internal/config"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -88,4 +90,65 @@ func TestCreator1KRequestWithLargerOutputIsChargedAs2K(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.InDelta(t, p2, repo.lastLog.ActualCost, 1e-12)
+}
+
+func TestCreatorGrokAndBannerRequestedTierMatchesCost(t *testing.T) {
+	p1, p2, p4 := 0.04, 0.06, 0.07
+	key := &APIKey{ID: 1, GroupID: i64p(2), Group: &Group{ID: 2, RateMultiplier: 1, ImagePrice1K: &p1, ImagePrice2K: &p2, ImagePrice4K: &p4}}
+	for _, model := range []string{"grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-2.0", "gemini-3.1-flash-image"} {
+		for _, tier := range []string{"1K", "2K"} {
+			t.Run(model+"/"+tier, func(t *testing.T) {
+				repo := &openAIRecordUsageLogRepoStub{inserted: true}
+				svc := newOpenAIRecordUsageServiceForTest(repo, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
+				inputSize := tier
+				if isGrokImageGenerationModel(model) {
+					info := ParseGrokMediaRequest("application/json", []byte(`{"model":"`+model+`","resolution":"`+tier+`","aspect_ratio":"16:9"}`))
+					inputSize = info.Size
+				} else {
+					inputSize = (&GeminiMessagesCompatService{}).extractImageInputSize([]byte(`{"generationConfig":{"imageConfig":{"imageSize":"` + tier + `","aspectRatio":"16:9"}}}`))
+				}
+				err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{
+					Result: &OpenAIForwardResult{RequestID: model + "/" + tier, Model: model, ImageCount: 1, ImageInputSize: inputSize},
+					APIKey: key, User: &User{ID: 3}, Account: &Account{ID: 4},
+				})
+				require.NoError(t, err)
+				quote, err := svc.CreatorImagePricing(context.Background(), key, 3, model)
+				require.NoError(t, err)
+				require.InDelta(t, quote.Prices[tier], repo.lastLog.ActualCost, 1e-12)
+				require.Equal(t, tier, *repo.lastLog.ImageSize)
+				// Native Gemini/Antigravity billing uses GatewayService rather
+				// than OpenAIGatewayService. Verify that cost path as well.
+				gateway := &GatewayService{billingService: NewBillingService(&config.Config{}, nil)}
+				result := &ForwardResult{Model: model, ImageCount: 1, ImageInputSize: inputSize}
+				ApplyForwardImageBillingResolution(result)
+				cost := gateway.calculateImageCost(context.Background(), result, key, model, 1)
+				require.InDelta(t, quote.Prices[tier], cost.ActualCost, 1e-12)
+			})
+		}
+	}
+}
+
+func TestCreatorGrokLargerOriginalMatchesRequestedTierQuoteAndCharge(t *testing.T) {
+	for _, model := range []string{"grok-imagine-image", "grok-imagine-image-quality", "grok-imagine-image-2.0"} {
+		for _, tier := range []string{"1k", "2k"} {
+			t.Run(model+"/"+tier, func(t *testing.T) {
+				repo := &openAIRecordUsageLogRepoStub{inserted: true}
+				users := &openAIRecordUsageUserRepoStub{}
+				svc := newOpenAIRecordUsageServiceForTest(repo, users, &openAIRecordUsageSubRepoStub{}, nil)
+				p1, p2 := 0.06, 0.08
+				key := &APIKey{ID: 1, GroupID: i64p(2), Group: &Group{ID: 2, RateMultiplier: 1, ImagePrice1K: &p1, ImagePrice2K: &p2}}
+				result := &OpenAIForwardResult{RequestID: model + "/" + tier, Model: model, ImageCount: 2, ImageInputSize: "1024x688", ImageRequestedResolution: tier, ImageOutputSizes: []string{"1248x832", "1248x832"}}
+				err := svc.RecordUsage(context.Background(), &OpenAIRecordUsageInput{Result: result, APIKey: key, User: &User{ID: 3}, Account: &Account{ID: 4, Platform: PlatformGrok}})
+				require.NoError(t, err)
+				quote, err := svc.CreatorImagePricing(context.Background(), key, 3, model)
+				require.NoError(t, err)
+				requestedTier := strings.ToUpper(tier)
+				require.InDelta(t, quote.Prices[requestedTier]*2, repo.lastLog.ActualCost, 1e-12)
+				require.InDelta(t, repo.lastLog.ActualCost, users.lastAmount, 1e-12)
+				require.Equal(t, requestedTier, *repo.lastLog.ImageSize)
+				require.Equal(t, "1248x832", *repo.lastLog.ImageOutputSize)
+				require.Equal(t, ImageSizeSourceInput, *repo.lastLog.ImageSizeSource)
+			})
+		}
+	}
 }

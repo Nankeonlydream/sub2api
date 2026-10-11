@@ -232,6 +232,7 @@ function buildOpenAIJSONPayload(input: ImageGenerationInput): Record<string, unk
       model: input.model,
       prompt: input.prompt,
       ...(input.n !== undefined ? { n: input.n } : {}),
+      ...(input.size ? { size: input.size } : {}),
       ...(input.aspectRatio ? { aspect_ratio: input.aspectRatio } : {}),
       ...(input.imageSize ? { resolution: input.imageSize.toLowerCase() } : {}),
       ...(input.responseFormat ? { response_format: input.responseFormat } : {}),
@@ -484,7 +485,71 @@ export async function getCreatorVideoContent(apiKey: string, requestId: string):
   return blob.type.startsWith('video/') ? blob : blob.slice(0, blob.size, 'video/mp4')
 }
 
+function validVideoDownload(blob: Blob): boolean {
+  return blob.size > 0 && (blob.type.startsWith('video/') || blob.type === 'application/octet-stream')
+}
+
+export async function downloadCreatorVideo(url: string, apiKey?: string, requestId?: string): Promise<Blob> {
+  // Local object URLs and the browser HTTP cache contain the original bytes.
+  // Never send the gateway key to a media host. A partial playback response
+  // cannot serve as a complete download; use the content endpoint instead.
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1500)
+  try {
+    if (url) {
+      const response = await fetch(url, {
+        mode: 'cors',
+        credentials: 'omit',
+        cache: 'force-cache',
+        signal: controller.signal,
+      })
+      if (response.ok && response.status !== 206) {
+        const blob = await response.blob()
+        if (validVideoDownload(blob)) return blob
+      }
+    }
+  } catch {
+    // A revoked object URL, CORS denial or expired URL must not block recovery.
+  } finally {
+    clearTimeout(timeout)
+    controller.abort()
+  }
+
+  if (apiKey && requestId) return getCreatorVideoContent(apiKey, requestId)
+  if (!url || /^(blob:|data:)/i.test(url)) throw new Error('本地视频缓存已失效，未找到可用的视频下载来源')
+
+  const response = await fetch(url, { mode: 'cors', credentials: 'omit', cache: 'reload' })
+  if (!response.ok) throw await parseCreatorError(response)
+  const blob = await response.blob()
+  if (response.status === 206 || !validVideoDownload(blob)) throw new Error('视频下载返回了无效或不完整的内容，请稍后重试')
+  return blob
+}
+
 export async function downloadCreatorImage(apiKey: string, url: string): Promise<Blob> {
+  // Reuse the original bytes the browser fetched for the preview/thumbnail.
+  // Never send gateway credentials to the image CDN. Bound the whole read so
+  // a cache miss or a stalled body cannot delay the server fallback indefinitely.
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1500)
+  try {
+    const response = await fetch(url, {
+      mode: 'cors',
+      credentials: 'omit',
+      cache: 'force-cache',
+      signal: controller.signal,
+    })
+    if (response.ok) {
+      const blob = await response.blob()
+      if (blob.size && blob.type.startsWith('image/')) return blob
+    }
+  } catch {
+    // Some image hosts do not allow CORS, or their cached URL has expired.
+    // The authenticated gateway remains the compatibility fallback.
+  } finally {
+    clearTimeout(timeout)
+    controller.abort()
+  }
+
   const response = await fetch(buildGatewayUrl('/v1/images/download'), {
     method: 'POST',
     headers: authHeaders(apiKey, { 'Content-Type': 'application/json' }),

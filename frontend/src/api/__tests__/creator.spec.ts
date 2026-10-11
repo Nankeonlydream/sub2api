@@ -20,6 +20,7 @@ describe('creator gateway API', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
@@ -187,8 +188,25 @@ describe('creator gateway API', () => {
       n: 1,
       aspect_ratio: '16:9',
       resolution: '2k',
+      size: '1024x1024',
       response_format: 'b64_json',
     })
+  })
+
+  it.each(['grok', 'gemini', 'banner-openai'])('keeps the selected 1K tier in the %s image protocol', async protocol => {
+    vi.mocked(fetch).mockResolvedValueOnce(protocol === 'gemini'
+      ? jsonResponse({ candidates: [{ content: { parts: [{ inlineData: { mimeType: 'image/png', data: 'UE5H' } }] } }] })
+      : jsonResponse({ data: [{ b64_json: 'UE5H' }] }))
+    const { generateCreatorImage } = await import('@/api/creator')
+    await generateCreatorImage('sk-test', {
+      model: protocol === 'grok' ? 'grok-imagine-image-2.0' : 'gemini-3.1-flash-image',
+      protocol: protocol === 'gemini' ? 'gemini' : 'openai',
+      prompt: '尺寸验证', size: '1024x576', imageSize: '1K', aspectRatio: '16:9',
+    })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    if (protocol === 'grok') expect(body).toMatchObject({ resolution: '1k', size: '1024x576', aspect_ratio: '16:9' })
+    else if (protocol === 'gemini') expect(body.generationConfig.imageConfig).toEqual({ imageSize: '1K', aspectRatio: '16:9' })
+    else expect(body).toMatchObject({ image_size: '1K', size: '1024x576', aspect_ratio: '16:9' })
   })
 
   it('builds Gemini native image requests and parses inlineData', async () => {
@@ -342,8 +360,75 @@ describe('creator gateway API', () => {
     )
   })
 
-  it('downloads a cross-origin creator image through the gateway', async () => {
+  it('downloads cached video bytes without contacting the task endpoint or sending credentials', async () => {
+    const videoBlob = new Blob(['complete video'], { type: 'video/mp4' })
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(videoBlob) } as unknown as Response)
+    const { downloadCreatorVideo } = await import('@/api/creator')
+    await expect(downloadCreatorVideo('https://cdn.example/video.mp4', 'sk-video', 'task-1')).resolves.toBe(videoBlob)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(url).toBe('https://cdn.example/video.mp4')
+    expect(init).toMatchObject({ cache: 'force-cache', credentials: 'omit', mode: 'cors' })
+    expect(init?.headers).toBeUndefined()
+  })
+
+  it.each(['revoked', 'empty', 'html', 'partial'])('uses the task endpoint when video cache is unusable: %s', async kind => {
+    const cachedBlob = new Blob(kind === 'empty' ? [] : ['cached'], { type: kind === 'html' ? 'text/html' : 'video/mp4' })
+    const videoBlob = new Blob(['complete video'], { type: 'video/mp4' })
+    if (kind === 'revoked') vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    else vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: kind === 'partial' ? 206 : 200, blob: vi.fn().mockResolvedValue(cachedBlob) } as unknown as Response)
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(videoBlob) } as unknown as Response)
+    const { downloadCreatorVideo } = await import('@/api/creator')
+    await expect(downloadCreatorVideo('blob:old-video', 'sk-video', 'task/2')).resolves.toBe(videoBlob)
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toContain('/task%2F2/content')
+    expect(vi.mocked(fetch).mock.calls[1][1]?.headers).toMatchObject({ Authorization: 'Bearer sk-video' })
+  })
+
+  it('aborts a stalled video cache body before reading the task endpoint', async () => {
+    vi.useFakeTimers()
+    let directSignal: AbortSignal | undefined
+    const videoBlob = new Blob(['complete video'], { type: 'video/mp4' })
+    vi.mocked(fetch).mockImplementationOnce(async (_, init) => {
+      directSignal = init?.signal as AbortSignal
+      return { ok: true, status: 200, blob: () => new Promise((_, reject) => {
+        directSignal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+      }) } as unknown as Response
+    }).mockResolvedValueOnce({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(videoBlob) } as unknown as Response)
+    const { downloadCreatorVideo } = await import('@/api/creator')
+    const download = downloadCreatorVideo('https://cdn.example/video.mp4', 'sk-video', 'task-1')
+    await vi.advanceTimersByTimeAsync(1500)
+    await expect(download).resolves.toBe(videoBlob)
+    expect(directSignal?.aborted).toBe(true)
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('reloads a remote video when its cache is unusable and there is no task key', async () => {
+    const videoBlob = new Blob(['video'], { type: 'video/mp4' })
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValueOnce({ ok: true, status: 200, blob: vi.fn().mockResolvedValue(videoBlob) } as unknown as Response)
+    const { downloadCreatorVideo } = await import('@/api/creator')
+    await expect(downloadCreatorVideo('https://cdn.example/video.mp4')).resolves.toBe(videoBlob)
+    expect(vi.mocked(fetch).mock.calls[1][1]).toMatchObject({ cache: 'reload', credentials: 'omit' })
+  })
+
+  it('saves the original cached image without contacting the gateway or sending CDN credentials', async () => {
+    const imageBlob = new Blob(['original image bytes'], { type: 'image/png' })
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, blob: vi.fn().mockResolvedValue(imageBlob) } as unknown as Response)
+    const { downloadCreatorImage } = await import('@/api/creator')
+
+    await expect(downloadCreatorImage('sk-image', 'https://cdn.example/result.png')).resolves.toBe(imageBlob)
+
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(url).toBe('https://cdn.example/result.png')
+    expect(init).toMatchObject({ cache: 'force-cache', credentials: 'omit', mode: 'cors' })
+    expect(init?.headers).toBeUndefined()
+    expect(init?.body).toBeUndefined()
+  })
+
+  it('falls back to the gateway when the image CDN blocks CORS', async () => {
     const imageBlob = new Blob(['image'], { type: 'image/png' })
+    vi.mocked(fetch).mockRejectedValueOnce(new TypeError('Failed to fetch'))
     vi.mocked(fetch).mockResolvedValueOnce({
       ok: true,
       status: 200,
@@ -354,7 +439,8 @@ describe('creator gateway API', () => {
 
     await expect(downloadCreatorImage('sk-image', 'https://cdn.example/result.png')).resolves.toBe(imageBlob)
 
-    const [url, init] = vi.mocked(fetch).mock.calls[0]
+    expect(fetch).toHaveBeenCalledTimes(2)
+    const [url, init] = vi.mocked(fetch).mock.calls[1]
     expect(String(url)).toMatch(/\/v1\/images\/download$/)
     expect(init?.method).toBe('POST')
     expect(init?.headers).toMatchObject({
@@ -362,6 +448,41 @@ describe('creator gateway API', () => {
       'Content-Type': 'application/json',
     })
     expect(JSON.parse(String(init?.body))).toEqual({ url: 'https://cdn.example/result.png' })
+  })
+
+  it('aborts a stalled direct response body and uses the gateway', async () => {
+    vi.useFakeTimers()
+    const imageBlob = new Blob(['image'], { type: 'image/png' })
+    let directSignal: AbortSignal | undefined
+    vi.mocked(fetch).mockImplementationOnce(async (_, init) => {
+      directSignal = init?.signal as AbortSignal
+      return {
+        ok: true,
+        blob: () => new Promise((_, reject) => {
+          directSignal!.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+        }),
+      } as unknown as Response
+    }).mockResolvedValueOnce({ ok: true, blob: vi.fn().mockResolvedValue(imageBlob) } as unknown as Response)
+    const { downloadCreatorImage } = await import('@/api/creator')
+    const download = downloadCreatorImage('sk-image', 'https://cdn.example/result.png')
+    await vi.advanceTimersByTimeAsync(1500)
+
+    await expect(download).resolves.toBe(imageBlob)
+    expect(directSignal?.aborted).toBe(true)
+    expect(fetch).toHaveBeenCalledTimes(2)
+    expect(String(vi.mocked(fetch).mock.calls[1][0])).toMatch(/\/v1\/images\/download$/)
+  })
+
+  it.each(['empty', 'html', 'http-error'])('does not save an invalid direct response: %s', async kind => {
+    const imageBlob = new Blob(['image'], { type: 'image/png' })
+    const invalidBlob = kind === 'empty' ? new Blob([], { type: 'image/png' }) : new Blob(['error'], { type: 'text/html' })
+    vi.mocked(fetch)
+      .mockResolvedValueOnce({ ok: kind !== 'http-error', blob: vi.fn().mockResolvedValue(invalidBlob) } as unknown as Response)
+      .mockResolvedValueOnce({ ok: true, blob: vi.fn().mockResolvedValue(imageBlob) } as unknown as Response)
+    const { downloadCreatorImage } = await import('@/api/creator')
+
+    await expect(downloadCreatorImage('sk-image', 'https://cdn.example/result.png')).resolves.toBe(imageBlob)
+    expect(fetch).toHaveBeenCalledTimes(2)
   })
 
   it('normalizes generic binary video content to MP4', async () => {

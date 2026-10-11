@@ -1,8 +1,14 @@
 package service
 
 import (
+	"bytes"
+	"mime/multipart"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"github.com/tidwall/gjson"
 )
@@ -57,4 +63,39 @@ func TestGrokImagineAspectRatioFromSize(t *testing.T) {
 	require.Equal(t, "3:4", grokImagineAspectRatioFromSize("1152x1536"))
 	require.Equal(t, "4:3", grokImagineAspectRatioFromSize("1536x1152"))
 	require.Equal(t, "16:9", grokImagineAspectRatioFromSize("1792x1024"))
+}
+
+func TestParseGrokMediaImageResolutionForBilling(t *testing.T) {
+	for _, tier := range []string{"1k", "2k"} {
+		for _, multipartBody := range []bool{false, true} {
+			body := []byte(`{"model":"grok-imagine-image-2.0","resolution":"` + tier + `","aspect_ratio":"16:9"}`)
+			contentType := "application/json"
+			if multipartBody {
+				var buffer bytes.Buffer
+				writer := multipart.NewWriter(&buffer)
+				require.NoError(t, writer.WriteField("model", "grok-imagine-image-2.0"))
+				require.NoError(t, writer.WriteField("resolution", tier))
+				require.NoError(t, writer.Close())
+				body, contentType = buffer.Bytes(), writer.FormDataContentType()
+			}
+			info := ParseGrokMediaRequest(contentType, body)
+			require.Equal(t, tier, info.ImageResolution)
+			require.Equal(t, strings.ToUpper(tier), info.Size)
+			require.Equal(t, strings.ToUpper(tier), info.SizeTier)
+			// OpenAI-compatible accounts parse the same native xAI body before
+			// forwarding it. This path must not default back to 2K either.
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", bytes.NewReader(body))
+			c.Request.Header.Set("Content-Type", contentType)
+			parsed, err := (&OpenAIGatewayService{}).ParseOpenAIImagesRequest(c, body)
+			require.NoError(t, err)
+			require.Equal(t, strings.ToUpper(tier), parsed.Size)
+			require.Equal(t, strings.ToUpper(tier), parsed.SizeTier)
+			metadata := grokMediaUsageFromResponse(GrokMediaEndpointImagesGenerations, info, []byte(`{"data":[{"url":"https://example.test/image.png"}]}`))
+			result := &OpenAIForwardResult{ImageCount: metadata.ImageCount, ImageSize: metadata.ImageSize, ImageInputSize: metadata.ImageInputSize}
+			ApplyOpenAIImageBillingResolution(result)
+			require.Equal(t, strings.ToUpper(tier), result.ImageSize)
+			require.Equal(t, ImageSizeSourceInput, result.ImageSizeSource)
+		}
+	}
 }

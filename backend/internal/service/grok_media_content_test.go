@@ -3,8 +3,11 @@
 package service
 
 import (
+	"bytes"
 	"context"
+	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -67,6 +70,79 @@ func grokMediaContentStatusResponse(body string) *http.Response {
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
 		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+}
+
+func TestForwardGrokMediaImagesPreservesRelayPixelSizeAndBillsRequestedResolution(t *testing.T) {
+	for _, endpoint := range []GrokMediaEndpoint{GrokMediaEndpointImagesGenerations, GrokMediaEndpointImagesEdits} {
+		for _, baseURL := range []string{"https://relay.example/v1", "https://api.x.ai/v1", "https://us-west-2.api.x.ai/v1"} {
+			t.Run(string(endpoint)+"/"+baseURL, func(t *testing.T) {
+				encoded := encodeOpenAIImageTestPNG(t, 1248, 832)
+				upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(fmt.Sprintf(`{"data":[{"b64_json":%q,"size":"1K"}]}`, encoded))}
+				account := grokMediaContentTestAccount()
+				account.Credentials["base_url"] = baseURL
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+				c, _ := grokMediaContentTestContext(http.MethodPost, "https://local.example/v1/images/generations", nil)
+				result, err := svc.ForwardGrokMedia(context.Background(), c, account, endpoint, "", []byte(`{"model":"grok-imagine-image-2.0","prompt":"test","size":"1024x688","resolution":"1k","aspect_ratio":"3:2"}`), "application/json")
+				require.NoError(t, err)
+				forwarded, err := io.ReadAll(upstream.request.Body)
+				require.NoError(t, err)
+				require.Equal(t, "1k", gjson.GetBytes(forwarded, "resolution").String())
+				require.Equal(t, "3:2", gjson.GetBytes(forwarded, "aspect_ratio").String())
+				if baseURL == "https://relay.example/v1" {
+					require.Equal(t, "1024x688", gjson.GetBytes(forwarded, "size").String())
+				} else {
+					require.False(t, gjson.GetBytes(forwarded, "size").Exists())
+				}
+				require.Equal(t, "1024x688", result.ImageInputSize)
+				require.Equal(t, []string{"1248x832"}, result.ImageOutputSizes)
+				ApplyOpenAIImageBillingResolution(result)
+				require.Equal(t, ImageBillingSize1K, result.ImageSize)
+				require.Equal(t, ImageSizeSourceInput, result.ImageSizeSource)
+				require.Equal(t, "1248x832", result.ImageOutputSize)
+				require.Nil(t, result.ImageSizeBreakdown)
+			})
+		}
+	}
+}
+
+func TestForwardGrokMediaImagesCompatibleAccountKeepsRequestedBillingTier(t *testing.T) {
+	for _, tier := range []string{"1k", "2k"} {
+		for _, multipartBody := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/multipart=%t", tier, multipartBody), func(t *testing.T) {
+				body := []byte(fmt.Sprintf(`{"model":"grok-imagine-image-2.0","prompt":"test","size":"1024x688","resolution":%q}`, tier))
+				contentType := "application/json"
+				path := "/v1/images/generations"
+				if multipartBody {
+					var buffer bytes.Buffer
+					writer := multipart.NewWriter(&buffer)
+					require.NoError(t, writer.WriteField("model", "grok-imagine-image-2.0"))
+					require.NoError(t, writer.WriteField("prompt", "test"))
+					require.NoError(t, writer.WriteField("size", "1024x688"))
+					require.NoError(t, writer.WriteField("resolution", tier))
+					part, err := writer.CreateFormFile("image", "reference.png")
+					require.NoError(t, err)
+					_, err = part.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10})
+					require.NoError(t, err)
+					require.NoError(t, writer.Close())
+					body, contentType, path = buffer.Bytes(), writer.FormDataContentType(), "/v1/images/edits"
+				}
+				upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(`{"data":[{"url":"https://image.example/test.png","size":"1248x832"}]}`)}
+				svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+				c, _ := grokMediaContentTestContext(http.MethodPost, "https://local.example"+path, nil)
+				c.Request.Header.Set("Content-Type", contentType)
+				parsed, err := svc.ParseOpenAIImagesRequest(c, body)
+				require.NoError(t, err)
+				account := &Account{ID: 9, Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Credentials: map[string]any{"api_key": "test-key", "base_url": "https://relay.example/v1"}}
+				result, err := svc.ForwardImages(context.Background(), c, account, body, parsed, "")
+				require.NoError(t, err)
+				require.Equal(t, tier, result.ImageRequestedResolution)
+				ApplyOpenAIImageBillingResolution(result)
+				require.Equal(t, strings.ToUpper(tier), result.ImageSize)
+				require.Equal(t, "1248x832", result.ImageOutputSize)
+				require.Equal(t, ImageSizeSourceInput, result.ImageSizeSource)
+			})
+		}
 	}
 }
 

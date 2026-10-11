@@ -4,16 +4,17 @@
       <img
         :key="attempt"
         :data-attempt="attempt"
+        :crossorigin="crossOrigin"
         :src="src"
         :alt="alt"
         decoding="async"
-        :class="{ 'is-ready': state === 'ready' }"
+        :class="{ 'is-ready': state === 'ready', 'was-displayed': wasDisplayed }"
         @load="loaded"
         @error="failed"
         @click="preview && $event.stopPropagation()"
       />
     </component>
-    <div v-if="state === 'loading'" class="creator-image-feedback" role="status" aria-live="polite">
+    <div v-if="state === 'loading' && showLoadingFeedback" class="creator-image-feedback" role="status" aria-live="polite">
       <span class="creator-image-spinner" aria-hidden="true"></span>
       <strong>正在加载图片</strong>
       <span>大图加载需要一点时间，请稍候</span>
@@ -27,21 +28,60 @@
 
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from 'vue'
+import { forgetDisplayedCreatorImage, hasDisplayedCreatorImage, rememberDisplayedCreatorImage } from '@/services/creatorImageDisplayState'
 
-const props = defineProps<{ src: string; alt: string; preview?: boolean }>()
+const props = defineProps<{ src: string; alt: string; preview?: boolean; cacheKey?: string }>()
 defineEmits<{ preview: [] }>()
+// Isolated pages (including the Vite dev server) block no-CORS CDN images
+// without a CORP header. Match thumbnail requests there; keep ordinary image
+// loading on non-isolated pages so CDNs without CORS remain supported.
+const crossOrigin = typeof window !== 'undefined' && window.crossOriginIsolated ? 'anonymous' : undefined
 const state = ref<'loading' | 'ready' | 'error'>('loading')
+const displayKey = () => props.cacheKey || props.src
+const wasDisplayed = ref(hasDisplayedCreatorImage(displayKey()))
+const showLoadingFeedback = ref(!wasDisplayed.value)
 const attempt = ref(0)
 let version = 0
+let loadingTimer: ReturnType<typeof setTimeout> | undefined
 
-function retry() {
-  version++
-  state.value = 'loading'
-  attempt.value++
+function clearLoadingTimer() {
+  if (loadingTimer !== undefined) clearTimeout(loadingTimer)
+  loadingTimer = undefined
 }
 
-watch(() => props.src, retry, { flush: 'sync' })
-onBeforeUnmount(() => version++)
+function scheduleLoadingFeedback() {
+  clearLoadingTimer()
+  showLoadingFeedback.value = !wasDisplayed.value
+  if (!wasDisplayed.value) return
+  const current = version
+  // Remembering a display does not mean the browser still has decoded pixels.
+  // Give cache hits time to paint without a flash, but explain slower reloads.
+  loadingTimer = setTimeout(() => {
+    loadingTimer = undefined
+    if (current === version && state.value === 'loading') showLoadingFeedback.value = true
+  }, 150)
+}
+
+scheduleLoadingFeedback()
+
+function retry() {
+  forgetDisplayedCreatorImage(displayKey())
+  reset()
+}
+
+function reset() {
+  version++
+  wasDisplayed.value = hasDisplayedCreatorImage(displayKey())
+  state.value = 'loading'
+  attempt.value++
+  scheduleLoadingFeedback()
+}
+
+watch([() => props.src, () => props.cacheKey], reset, { flush: 'sync' })
+onBeforeUnmount(() => {
+  version++
+  clearLoadingTimer()
+})
 
 async function loaded(event: Event) {
   const current = version
@@ -51,16 +91,28 @@ async function loaded(event: Event) {
     // The load event can precede decoding a large image. Keep the placeholder
     // until the browser can paint it, and ignore an earlier selection finishing.
     if (image.decode) await image.decode()
-    if (current === version) state.value = 'ready'
+    if (current === version) {
+      rememberDisplayedCreatorImage(displayKey())
+      clearLoadingTimer()
+      state.value = 'ready'
+    }
   } catch {
-    if (current === version) state.value = 'error'
+    if (current === version) markFailed()
   }
 }
 
 function failed(event: Event) {
   if (Number((event.target as HTMLImageElement).dataset.attempt) === attempt.value) {
-    state.value = 'error'
+    markFailed()
   }
+}
+
+function markFailed() {
+  version++
+  clearLoadingTimer()
+  forgetDisplayedCreatorImage(displayKey())
+  wasDisplayed.value = false
+  state.value = 'error'
 }
 </script>
 
@@ -69,6 +121,7 @@ function failed(event: Event) {
 .creator-image-open { position: absolute; inset: 0; width: 100%; height: 100%; }
 .creator-image-open img { display: block; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 200ms ease; }
 .creator-image-open img.is-ready { opacity: 1; }
+.creator-image-open img.was-displayed { transition: none; }
 .is-preview { pointer-events: none; }
 .is-preview .creator-image-open { display: flex; align-items: center; justify-content: center; }
 .is-preview .creator-image-open img { width: auto; height: auto; max-width: 100%; max-height: 100%; pointer-events: auto; }
