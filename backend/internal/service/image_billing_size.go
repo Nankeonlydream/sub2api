@@ -124,7 +124,7 @@ func ApplyOpenAIImageBillingResolution(result *OpenAIForwardResult) {
 	if len(outputSizes) == 0 && strings.TrimSpace(result.ImageOutputSize) != "" {
 		outputSizes = []string{result.ImageOutputSize}
 	}
-	resolved := ResolveImageBillingSize(inputSize, outputSizes)
+	resolved := resolveModelImageBillingSize(result.Model, inputSize, outputSizes, result.ImageRequestedResolution)
 	applyImageBillingResolution(
 		&result.ImageSize,
 		&result.ImageInputSize,
@@ -147,7 +147,7 @@ func ApplyForwardImageBillingResolution(result *ForwardResult) {
 	if len(outputSizes) == 0 && strings.TrimSpace(result.ImageOutputSize) != "" {
 		outputSizes = []string{result.ImageOutputSize}
 	}
-	resolved := ResolveImageBillingSize(inputSize, outputSizes)
+	resolved := resolveModelImageBillingSize(result.Model, inputSize, outputSizes, "")
 	applyImageBillingResolution(
 		&result.ImageSize,
 		&result.ImageInputSize,
@@ -156,6 +156,25 @@ func ApplyForwardImageBillingResolution(result *ForwardResult) {
 		&result.ImageSizeBreakdown,
 		resolved,
 	)
+}
+
+// Grok 1k/2k resolution denotes the purchased tier; a non-square 1k
+// original can exceed 1024px. Keep its actual dimensions for diagnostics
+// without upgrading the requested tier. Other models retain output billing.
+func resolveModelImageBillingSize(model, inputSize string, outputSizes []string, requestedResolution string) ImageBillingSizeResolution {
+	if isGrokImageGenerationModel(model) || grokImagineImageResolution(requestedResolution) != "" {
+		tier := strings.ToUpper(grokImagineImageResolution(requestedResolution))
+		if tier == "" {
+			tier, _ = ClassifyImageBillingTier(inputSize)
+		}
+		if tier != "" {
+			return ImageBillingSizeResolution{
+				BillingSize: tier, InputSize: strings.TrimSpace(inputSize),
+				OutputSize: firstDisplayImageOutputSize(outputSizes), Source: ImageSizeSourceInput,
+			}
+		}
+	}
+	return ResolveImageBillingSize(inputSize, outputSizes)
 }
 
 func applyImageBillingResolution(

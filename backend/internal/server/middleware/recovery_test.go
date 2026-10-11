@@ -108,3 +108,17 @@ func TestRecovery(t *testing.T) {
 		})
 	}
 }
+
+func TestRecoveryPreservesHTTPStreamAbort(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(Recovery())
+	r.GET("/stream", func(c *gin.Context) {
+		_, _ = c.Writer.Write([]byte("image-prefix"))
+		c.Writer.Flush()
+		panic(http.ErrAbortHandler)
+	})
+	w := httptest.NewRecorder()
+	require.PanicsWithValue(t, http.ErrAbortHandler, func() { r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/stream", nil)) })
+	require.Equal(t, "image-prefix", w.Body.String())
+}

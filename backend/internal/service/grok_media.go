@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -131,6 +132,11 @@ func ParseGrokMediaRequest(contentType string, body []byte) GrokMediaRequestInfo
 	info.Model = strings.TrimSpace(info.Model)
 	info.Prompt = strings.TrimSpace(info.Prompt)
 	info.Size = strings.TrimSpace(info.Size)
+	// xAI image requests use resolution (1k/2k), not OpenAI's size field.
+	// Retain that requested tier for billing when no output dimensions exist.
+	if info.Size == "" && info.ImageResolution != "" {
+		info.Size = strings.ToUpper(info.ImageResolution)
+	}
 	info.SizeTier = NormalizeImageBillingTierOrDefault(info.Size)
 	info.AspectRatio = strings.TrimSpace(info.AspectRatio)
 	info.ImageResolution = grokImagineImageResolution(info.ImageResolution)
@@ -693,7 +699,7 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 			}
 		}
 	}
-	body, contentType, err = sanitizeGrokMediaForwardBody(endpoint, body, contentType)
+	body, contentType, err = sanitizeGrokMediaForwardBodyForTarget(endpoint, body, contentType, targetURL)
 	if err != nil {
 		return nil, err
 	}
@@ -783,22 +789,23 @@ func (s *OpenAIGatewayService) ForwardGrokMedia(
 		}
 	}
 	return &OpenAIForwardResult{
-		RequestID:            requestIDHeader,
-		UpstreamHeaders:      resp.Header,
-		ResponseID:           usage.ResponseID,
-		Usage:                usage.Usage,
-		Model:                resultModel,
-		BillingModel:         resultBillingModel,
-		UpstreamModel:        upstreamModel,
-		ResponseHeaders:      resp.Header.Clone(),
-		Duration:             time.Since(startTime),
-		ImageCount:           usage.ImageCount,
-		ImageSize:            usage.ImageSize,
-		ImageInputSize:       usage.ImageInputSize,
-		ImageOutputSizes:     usage.ImageOutputSizes,
-		VideoCount:           usage.VideoCount,
-		VideoResolution:      usage.VideoResolution,
-		VideoDurationSeconds: usage.VideoDurationSeconds,
+		RequestID:                requestIDHeader,
+		UpstreamHeaders:          resp.Header,
+		ResponseID:               usage.ResponseID,
+		Usage:                    usage.Usage,
+		Model:                    resultModel,
+		BillingModel:             resultBillingModel,
+		UpstreamModel:            upstreamModel,
+		ResponseHeaders:          resp.Header.Clone(),
+		Duration:                 time.Since(startTime),
+		ImageCount:               usage.ImageCount,
+		ImageSize:                usage.ImageSize,
+		ImageInputSize:           usage.ImageInputSize,
+		ImageRequestedResolution: requestInfo.ImageResolution,
+		ImageOutputSizes:         usage.ImageOutputSizes,
+		VideoCount:               usage.VideoCount,
+		VideoResolution:          usage.VideoResolution,
+		VideoDurationSeconds:     usage.VideoDurationSeconds,
 	}, nil
 }
 
@@ -1223,6 +1230,25 @@ func sanitizeGrokMediaForwardBody(endpoint GrokMediaEndpoint, body []byte, conte
 	}
 }
 
+// Native xAI accepts resolution/aspect_ratio only. Compatible relays also
+// classify image billing by size, so retain the requested pixel dimensions on
+// those hops instead of letting the relay fall back to its default 2K tier.
+func sanitizeGrokMediaForwardBodyForTarget(endpoint GrokMediaEndpoint, body []byte, contentType, targetURL string) ([]byte, string, error) {
+	out, contentType, err := sanitizeGrokMediaForwardBody(endpoint, body, contentType)
+	if err != nil || xai.IsOfficialBaseURL(targetURL) {
+		return out, contentType, err
+	}
+	if endpoint != GrokMediaEndpointImagesGenerations && endpoint != GrokMediaEndpointImagesEdits {
+		return out, contentType, nil
+	}
+	size := strings.TrimSpace(gjson.GetBytes(body, "size").String())
+	if _, _, ok := parseImageBillingDimensions(size); !ok {
+		return out, contentType, nil
+	}
+	out, err = sjson.SetBytes(out, "size", size)
+	return out, contentType, err
+}
+
 func (r GrokMediaRequestInfo) HasInputImage() bool {
 	return len(r.InputImageURLs) > 0 || len(r.Uploads) > 0
 }
@@ -1269,6 +1295,27 @@ func grokMediaUsageFromResponse(endpoint GrokMediaEndpoint, requestInfo GrokMedi
 		meta.ImageSize = requestInfo.SizeTier
 		meta.ImageInputSize = requestInfo.Size
 		meta.ImageOutputSizes = collectOpenAIResponseImageOutputSizesFromJSONBytes(responseBody)
+		// Preserve original pixel dimensions for diagnostics. Grok billing uses
+		// the requested resolution tier, not the original image edge length.
+		if data := gjson.GetBytes(responseBody, "data"); data.IsArray() {
+			sizes := make([]string, 0, len(data.Array()))
+			data.ForEach(func(_, item gjson.Result) bool {
+				size := detectOpenAIImageResultSize(item.Get("b64_json").String())
+				if size == "" && strings.HasPrefix(strings.ToLower(item.Get("url").String()), "data:") {
+					size = detectOpenAIImageResultSize(item.Get("url").String())
+				}
+				if size == "" {
+					size = strings.TrimSpace(item.Get("size").String())
+				}
+				if size != "" {
+					sizes = append(sizes, size)
+				}
+				return true
+			})
+			if len(sizes) > 0 {
+				meta.ImageOutputSizes = sizes
+			}
+		}
 	case GrokMediaEndpointVideosGenerations, GrokMediaEndpointVideosEdits, GrokMediaEndpointVideosExtensions:
 		// Async video: capture request_id + create-time pricing params only.
 		// Billable VideoCount is set later when status polling observes video.url.

@@ -15,6 +15,8 @@ export interface CreatorHistoryItem {
   outputs: string[]
   /** Browser-persisted video payloads used to rebuild temporary blob URLs after refresh. */
   videoBlobs?: Blob[]
+  /** Small locally generated cover; usable without opening/decoding the video. */
+  videoThumbnail?: string
   mergedOutput?: string
   mergedVideoBlob?: Blob
   shotPrompts?: string[]
@@ -33,6 +35,8 @@ export interface CreatorHistoryItem {
   outputSize?: string
   /** Actual pixel dimensions after client-side normalization, when available. */
   actualOutputSize?: string
+  /** Original provider dimensions, before download resizing. */
+  upstreamImageSizes?: string[]
   imageSizeMode?: 'auto' | 'ratio' | 'custom'
   quality?: string
   outputFormat?: string
@@ -59,6 +63,35 @@ const memoryItems = new Map<string, CreatorHistoryItem>()
 let databasePromise: Promise<IDBDatabase | null> | undefined
 let memoryOnly = false
 const listeners = new Set<(item: CreatorHistoryItem) => void>()
+export const CREATOR_HISTORY_CHANGE_KEY = 'sub2api-creator-history-change'
+export type CreatorHistoryChange = { type: 'put' | 'remove'; id: string } | { type: 'clear' }
+const externalListeners = new Set<(change: CreatorHistoryChange) => void>()
+
+function receiveExternalChange(event: StorageEvent): void {
+  if (event.key !== CREATOR_HISTORY_CHANGE_KEY || !event.newValue) return
+  try {
+    const change = JSON.parse(event.newValue) as CreatorHistoryChange
+    if (!change || (change.type !== 'clear' && !(['put', 'remove'].includes(change.type) && typeof change.id === 'string'))) return
+    externalListeners.forEach(listener => listener(change))
+  } catch { /* Ignore unrelated or malformed storage notifications. */ }
+}
+
+export function subscribeExternalCreatorHistory(listener: (change: CreatorHistoryChange) => void): () => void {
+  if (!externalListeners.size && typeof window !== 'undefined') window.addEventListener('storage', receiveExternalChange)
+  externalListeners.add(listener)
+  return () => {
+    externalListeners.delete(listener)
+    if (!externalListeners.size && typeof window !== 'undefined') window.removeEventListener('storage', receiveExternalChange)
+  }
+}
+
+function publishHistoryChange(change: CreatorHistoryChange): void {
+  try {
+    // Notify only after the IndexedDB transaction commits. Never copy image or
+    // video payloads into localStorage or between windows.
+    window.localStorage.setItem(CREATOR_HISTORY_CHANGE_KEY, JSON.stringify({ ...change, revision: crypto.randomUUID() }))
+  } catch { /* Focus/visibility refresh still works if localStorage is blocked. */ }
+}
 
 export function subscribeCreatorHistory(listener: (item: CreatorHistoryItem) => void): () => void {
   listeners.add(listener)
@@ -69,6 +102,7 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...item,
     outputs: [...item.outputs],
+    upstreamImageSizes: item.upstreamImageSizes ? [...item.upstreamImageSizes] : undefined,
     videoBlobs: item.videoBlobs ? [...item.videoBlobs] : undefined,
     shotPrompts: item.shotPrompts ? [...item.shotPrompts] : undefined,
     shotDurations: item.shotDurations ? [...item.shotDurations] : undefined,
@@ -215,17 +249,66 @@ export async function listCreatorHistory(): Promise<CreatorHistoryItem[]> {
   }
 }
 
+export async function getCreatorHistory(id: string): Promise<CreatorHistoryItem | undefined> {
+  const database = await openDatabase()
+  if (database) {
+    try {
+      const stored = await new Promise<CreatorHistoryItem | undefined>((resolve, reject) => {
+        const request = database.transaction(STORE_NAME, 'readonly').objectStore(STORE_NAME).get(id)
+        request.onsuccess = () => resolve(request.result)
+        request.onerror = () => reject(request.error)
+      })
+      const pending = memoryItems.get(id)
+      const latest = pending && (!stored || pending.updatedAt > stored.updatedAt) ? pending : stored
+      return latest ? cloneItem(latest) : undefined
+    } catch {
+      switchToMemory()
+    }
+  }
+  const item = memoryItems.get(id)
+  return item ? cloneItem(item) : undefined
+}
+
 export async function putCreatorHistory(item: CreatorHistoryItem): Promise<void> {
   const storedItem = cloneItem(item)
   memoryItems.set(storedItem.id, storedItem)
 
   const database = await openDatabase()
+  let saved = false
   try {
-    if (database) await runWrite(database, (store) => store.put(storedItem))
+    if (database) {
+      await runWrite(database, (store) => store.put(storedItem))
+      saved = true
+      // Keep only unsaved items in memory, so stale local copies cannot hide a
+      // newer result (or deletion) committed by another creator window.
+      if (memoryItems.get(storedItem.id) === storedItem) memoryItems.delete(storedItem.id)
+    }
   } catch {
     switchToMemory()
   }
   listeners.forEach(listener => listener(cloneItem(storedItem)))
+  if (saved) publishHistoryChange({ type: 'put', id: storedItem.id })
+}
+
+export async function saveCreatorVideoThumbnail(id: string, updatedAt: number, thumbnail: string): Promise<void> {
+  if (!thumbnail.startsWith('data:image/webp;base64,') || thumbnail.length > 100000) return
+  const database = await openDatabase()
+  const pending = memoryItems.get(id)
+  if (pending?.type === 'video' && pending.updatedAt === updatedAt) {
+    memoryItems.set(id, { ...pending, videoThumbnail: thumbnail })
+  }
+  if (!database) return
+  try {
+    // Patch only an existing matching revision, in one transaction. A late
+    // frame extraction must not resurrect a deleted work or overwrite a job.
+    await runWrite(database, store => {
+      const request = store.get(id)
+      request.onsuccess = () => {
+        const item = request.result as CreatorHistoryItem | undefined
+        if (item?.type === 'video' && item.updatedAt === updatedAt) store.put({ ...item, videoThumbnail: thumbnail })
+      }
+    })
+  } catch { /* Optional covers must not disrupt history or video playback. */ }
 }
 
 export async function removeCreatorHistory(id: string): Promise<void> {
@@ -236,6 +319,7 @@ export async function removeCreatorHistory(id: string): Promise<void> {
 
   try {
     await runWrite(database, (store) => store.delete(id))
+    publishHistoryChange({ type: 'remove', id })
   } catch {
     switchToMemory()
   }
@@ -249,6 +333,7 @@ export async function clearCreatorHistory(): Promise<void> {
 
   try {
     await runWrite(database, (store) => store.clear())
+    publishHistoryChange({ type: 'clear' })
   } catch {
     switchToMemory()
   }
@@ -256,8 +341,11 @@ export async function clearCreatorHistory(): Promise<void> {
 
 export const creatorHistory = {
   subscribe: subscribeCreatorHistory,
+  subscribeExternal: subscribeExternalCreatorHistory,
+  get: getCreatorHistory,
   list: listCreatorHistory,
   put: putCreatorHistory,
+  saveVideoThumbnail: saveCreatorVideoThumbnail,
   remove: removeCreatorHistory,
   clear: clearCreatorHistory,
 }

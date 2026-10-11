@@ -1481,7 +1481,7 @@ func TestForwardGrokMediaImagesGenerationStripsUnsupportedSize(t *testing.T) {
 		Concurrency: 1,
 		Credentials: map[string]any{
 			"api_key":       "api-key",
-			"base_url":      "https://xai.test/v1",
+			"base_url":      "https://api.x.ai/v1",
 			"model_mapping": map[string]any{"grok-imagine-edit": "vendor-image-edit"},
 		},
 	}
@@ -1603,7 +1603,7 @@ func TestForwardGrokMediaImagesEditMultipartPreservesExplicitGeometry(t *testing
 
 	result, err := svc.ForwardGrokMedia(context.Background(), c, account, GrokMediaEndpointImagesEdits, "", buf.Bytes(), writer.FormDataContentType())
 	require.NoError(t, err)
-	require.False(t, gjson.GetBytes(upstream.lastBody, "size").Exists())
+	require.Equal(t, "1024x1024", gjson.GetBytes(upstream.lastBody, "size").String())
 	require.Equal(t, "2k", gjson.GetBytes(upstream.lastBody, "resolution").String())
 	require.Equal(t, "16:9", gjson.GetBytes(upstream.lastBody, "aspect_ratio").String())
 	require.Equal(t, ImageBillingSize1K, result.ImageSize)

@@ -1,6 +1,7 @@
 package service
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -31,6 +32,78 @@ type CreatorImageDownload struct {
 	Data        []byte
 	ContentType string
 	Extension   string
+}
+
+// Stream validates an image response and forwards it without buffering the
+// complete payload in memory.
+func (d *CreatorImageDownloader) Stream(ctx context.Context, rawURL string, write func(*http.Response, io.Reader) error) error {
+	if d == nil {
+		return ErrCreatorImageDownloadFailed
+	}
+	if err := d.validateURL(ctx, rawURL); err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return ErrCreatorImageDownloadInvalidURL
+	}
+	req.Header.Set("Accept", "image/avif,image/webp,image/png,image/jpeg,image/gif;q=0.9,*/*;q=0.1")
+	resp, err := d.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrCreatorImageDownloadFailed, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return fmt.Errorf("%w: upstream returned HTTP %d", ErrCreatorImageDownloadFailed, resp.StatusCode)
+	}
+	if resp.ContentLength > d.maxBytes {
+		return ErrCreatorImageDownloadTooLarge
+	}
+	probe := make([]byte, min(int64(512), d.maxBytes+1))
+	n, readErr := io.ReadFull(resp.Body, probe)
+	if readErr != nil && readErr != io.ErrUnexpectedEOF && readErr != io.EOF {
+		return fmt.Errorf("%w: %v", ErrCreatorImageDownloadFailed, readErr)
+	}
+	if int64(n) > d.maxBytes {
+		return ErrCreatorImageDownloadTooLarge
+	}
+	if n == 0 {
+		return ErrCreatorImageDownloadInvalidContent
+	}
+	contentType, extension := creatorImageContentType(probe[:n], resp.Header.Get("Content-Type"))
+	if contentType == "" {
+		return ErrCreatorImageDownloadInvalidContent
+	}
+	resp.Header.Set("Content-Type", contentType)
+	resp.Header.Set("X-Creator-Image-Extension", extension)
+	reader := &creatorImageLimitedReader{reader: io.MultiReader(bytes.NewReader(probe[:n]), resp.Body), remaining: d.maxBytes}
+	return write(resp, reader)
+}
+
+// Read checks one extra upstream byte at the limit without forwarding it.
+type creatorImageLimitedReader struct {
+	reader    io.Reader
+	remaining int64
+}
+
+func (r *creatorImageLimitedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining == 0 {
+		var probe [1]byte
+		n, err := r.reader.Read(probe[:])
+		if n > 0 {
+			return 0, ErrCreatorImageDownloadTooLarge
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	return n, err
 }
 
 type CreatorImageDownloader struct {

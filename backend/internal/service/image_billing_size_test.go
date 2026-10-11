@@ -111,3 +111,30 @@ func TestResolveImageBillingSize(t *testing.T) {
 		})
 	}
 }
+
+func TestApplyGrokImageBillingUsesRequestedTier(t *testing.T) {
+	for _, tc := range []struct {
+		name, resolution, input, output, tier, source string
+	}{
+		{"1k larger original", "1k", "1024x688", "1248x832", "1K", ImageSizeSourceInput},
+		{"1k portrait", "1k", "768x1024", "864x1152", "1K", ImageSizeSourceInput},
+		{"1k legacy tier", "", "1K", "1280x720", "1K", ImageSizeSourceInput},
+		{"1k pixel fallback", "", "1024x688", "1248x832", "1K", ImageSizeSourceInput},
+		{"explicit 2k overrides smaller size", "2K", "1024x1024", "1024x1024", "2K", ImageSizeSourceInput},
+		{"missing request uses original", "", "", "1248x832", "2K", ImageSizeSourceOutput},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := &OpenAIForwardResult{Model: "grok-imagine-image-2.0", ImageCount: 2, ImageInputSize: tc.input, ImageRequestedResolution: tc.resolution, ImageOutputSizes: []string{tc.output, tc.output}}
+			ApplyOpenAIImageBillingResolution(result)
+			require.Equal(t, tc.tier, result.ImageSize)
+			require.Equal(t, tc.output, result.ImageOutputSize)
+			require.Equal(t, tc.input, result.ImageInputSize)
+			require.Equal(t, tc.source, result.ImageSizeSource)
+			if tc.source == ImageSizeSourceInput {
+				require.Nil(t, result.ImageSizeBreakdown)
+			}
+			ApplyOpenAIImageBillingResolution(result)
+			require.Equal(t, tc.tier, result.ImageSize, "repeated resolution must not upgrade the tier")
+		})
+	}
+}

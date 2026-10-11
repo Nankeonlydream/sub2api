@@ -1,12 +1,16 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import {
   clearCreatorHistory,
+  CREATOR_HISTORY_CHANGE_KEY,
+  getCreatorHistory,
   listCreatorHistory,
   putCreatorHistory,
   removeCreatorHistory,
   sortCreatorHistory,
+  saveCreatorVideoThumbnail,
   subscribeCreatorHistory,
+  subscribeExternalCreatorHistory,
   type CreatorHistoryItem,
 } from '@/services/creatorHistory'
 
@@ -31,6 +35,29 @@ function createItem(
 }
 
 describe('creatorHistory', () => {
+  it('receives small cross-window change notifications and detaches listeners', () => {
+    const received = vi.fn()
+    const unsubscribe = subscribeExternalCreatorHistory(received)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'unrelated', newValue: '{}' }))
+    window.dispatchEvent(new StorageEvent('storage', { key: CREATOR_HISTORY_CHANGE_KEY, newValue: 'invalid' }))
+    window.dispatchEvent(new StorageEvent('storage', { key: CREATOR_HISTORY_CHANGE_KEY, newValue: '{"type":"put"}' }))
+    expect(received).not.toHaveBeenCalled()
+    const change = { type: 'put', id: 'other-window' }
+    window.dispatchEvent(new StorageEvent('storage', { key: CREATOR_HISTORY_CHANGE_KEY, newValue: JSON.stringify(change) }))
+    expect(received).toHaveBeenCalledWith(change)
+    unsubscribe()
+    window.dispatchEvent(new StorageEvent('storage', { key: CREATOR_HISTORY_CHANGE_KEY, newValue: '{"type":"clear"}' }))
+    expect(received).toHaveBeenCalledTimes(1)
+  })
+
+  it('reads a single work without exposing mutable stored outputs', async () => {
+    await putCreatorHistory(createItem('single-read', 100))
+    const item = await getCreatorHistory('single-read')
+    item!.outputs.push('mutation')
+    expect((await getCreatorHistory('single-read'))?.outputs).toEqual(['https://example.com/single-read.png'])
+    expect(await getCreatorHistory('missing')).toBeUndefined()
+  })
+
   it('notifies mounted consumers when a background result is saved and unsubscribes cleanly', async () => {
     const received: CreatorHistoryItem[] = []
     const unsubscribe = subscribeCreatorHistory(item => { received.push(item) })
@@ -96,6 +123,19 @@ describe('creatorHistory', () => {
     const secondRead = await listCreatorHistory()
 
     expect(secondRead[0].videoBlobs).toEqual([videoBlob])
+  })
+
+  it('patches only an existing matching video revision when saving a cover', async () => {
+    const cover = 'data:image/webp;base64,cover'
+    await putCreatorHistory(createItem('video-cover', 100, { type: 'video', videoBlobs: [new Blob(['video'])] }))
+    await saveCreatorVideoThumbnail('video-cover', 100, cover)
+    expect(await getCreatorHistory('video-cover')).toMatchObject({ videoThumbnail: cover, updatedAt: 100 })
+    await putCreatorHistory(createItem('video-cover', 100, { type: 'video', updatedAt: 200 }))
+    await saveCreatorVideoThumbnail('video-cover', 100, cover)
+    expect((await getCreatorHistory('video-cover'))?.videoThumbnail).toBeUndefined()
+    await removeCreatorHistory('video-cover')
+    await saveCreatorVideoThumbnail('video-cover', 200, cover)
+    expect(await getCreatorHistory('video-cover')).toBeUndefined()
   })
 
   it('keeps per-shot video parameters in detached arrays', async () => {

@@ -27,6 +27,7 @@ var grokImagineAspectRatioValues = []struct {
 	{"9:19.5", 9.0 / 19.5},
 	{"20:9", 20.0 / 9.0},
 	{"9:20", 9.0 / 20.0},
+	{"21:9", 21.0 / 9.0},
 }
 
 func applyGrokImagineImageGeometry(body []byte) ([]byte, error) {
