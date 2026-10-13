@@ -2,9 +2,9 @@
 /docs-local/
 .codex
 
-# ===================
+# ============
 # Go 后端
-# ===================
+# ============
 # 二进制文件
 *.exe
 *.exe~
@@ -29,9 +29,9 @@ vendor/
 # Go 编译缓存
 backend/.gocache/
 
-# ===================
+# ============
 # Node.js / Vue 前端
-# ===================
+# ============
 node_modules/
 frontend/node_modules/
 frontend/dist/
@@ -46,9 +46,9 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# ===================
+# ============
 # 环境配置
-# ===================
+# ============
 .env
 .env.local
 .env.*.local
@@ -56,9 +56,9 @@ pnpm-debug.log*
 !.env.example
 docker-compose.override.yml
 
-# ===================
+# ============
 # IDE / 编辑器
-# ===================
+# ============
 .idea/
 .vscode/
 *.swp
@@ -68,16 +68,16 @@ docker-compose.override.yml
 .settings/
 .classpath
 
-# ===================
+# ============
 # 操作系统
-# ===================
+# ============
 .DS_Store
 Thumbs.db
 Desktop.ini
 
-# ===================
+# ============
 # 临时文件
-# ===================
+# ============
 tmp/
 temp/
 *.tmp
@@ -88,9 +88,9 @@ temp/
 .dev/
 .serena/
 
-# ===================
+# ============
 # 构建产物
-# ===================
+# ============
 dist/
 build/
 release/
@@ -106,16 +106,16 @@ backend/internal/web/dist/*
 # 后端运行时缓存数据
 backend/data/
 
-# ===================
+# ============
 # 本地配置文件（包含敏感信息）
-# ===================
+# ============
 backend/config.yaml
 deploy/config.yaml
 backend/.installed
 
-# ===================
+# ============
 # 其他
-# ===================
+# ============
 tests
 !deploy/tests/
 !deploy/tests/**
@@ -199,7 +199,9 @@ issues/
 
 !docs/harvest-gateway-borrow.md
 !docs/screenshots/harvest-gateway-borrow/
+!docs/screenshots/harvest-settings-cleanup/
 !docs/screenshots/channel-monitor-v3/
+!docs/screenshots/channel-monitor-v3-idle-probe/
 !docs/screenshots/monitor-client-rejections/
 !docs/screenshots/usage-tps-single-token/
 !docs/screenshots/support-tickets/
@@ -214,3 +216,6 @@ issues/
 /deploy/creator/release.json
 /deploy/creator/Dockerfile
 /deploy/creator/__pycache__/
+
+!docs/astra-candy-beta.md
+!docs/screenshots/astra-candy-beta/
