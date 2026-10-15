@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/iotest"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
@@ -251,6 +252,69 @@ func TestForwardGrokMediaContentPreservesRangeNotSatisfiable(t *testing.T) {
 	require.Equal(t, "bytes */100", recorder.Header().Get("Content-Range"))
 	require.Equal(t, "bytes", recorder.Header().Get("Accept-Ranges"))
 	require.True(t, IsResponseCommitted(c))
+}
+
+func TestForwardGrokMediaContentDoesNotBillFailedDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name, contentType, body string
+		status, expectedLength  int
+		readError               bool
+	}{
+		{name: "empty", contentType: "video/mp4", status: http.StatusOK},
+		{name: "json error", contentType: "application/json", body: `{"error":"render failed"}`, status: http.StatusOK},
+		{name: "html error", contentType: "text/html", body: "upstream unavailable", status: http.StatusOK},
+		{name: "truncated", contentType: "video/mp4", body: "short", status: http.StatusOK, expectedLength: 100},
+		{name: "unexpected partial", contentType: "video/mp4", body: "short", status: http.StatusPartialContent},
+		{name: "interrupted body", contentType: "video/mp4", body: "partial", status: http.StatusOK, readError: true},
+		{name: "http error", contentType: "application/json", body: `{"error":"download failed"}`, status: http.StatusBadGateway},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			content := io.Reader(strings.NewReader(tc.body))
+			if tc.readError {
+				content = io.MultiReader(content, iotest.ErrReader(io.ErrUnexpectedEOF))
+			}
+			upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{
+				grokMediaContentStatusResponse(`{"status":"done","video":{"url":"https://vidgen.x.ai/task.mp4","duration":8}}`),
+				{StatusCode: tc.status, Header: http.Header{"Content-Type": []string{tc.contentType}},
+					Body: io.NopCloser(content), ContentLength: int64(tc.expectedLength)},
+			}}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			c, _ := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task/content", nil)
+			result, err := svc.ForwardGrokMedia(context.Background(), c, grokMediaContentTestAccount(), GrokMediaEndpointVideoContent, "task", nil, "")
+			require.Error(t, err)
+			require.Nil(t, result, "failed delivery must not reach usage billing")
+		})
+	}
+}
+
+func TestForwardGrokMediaContentMarksFullDeliveryForBilling(t *testing.T) {
+	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{
+		grokMediaContentStatusResponse(`{"status":"done","video":{"url":"https://vidgen.x.ai/task.mp4","duration":8}}`),
+		{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"video/mp4"}},
+			Body: io.NopCloser(strings.NewReader("full-video")), ContentLength: 10},
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	c, recorder := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task/content", nil)
+	result, err := svc.ForwardGrokMedia(context.Background(), c, grokMediaContentTestAccount(), GrokMediaEndpointVideoContent, "task", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, "full-video", recorder.Body.String())
+	require.Equal(t, 1, result.VideoCount)
+	require.True(t, result.VideoContentDelivered)
+}
+
+func TestForwardGrokMediaContentRangeErrorDoesNotBill(t *testing.T) {
+	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{
+		grokMediaContentStatusResponse(`{"status":"done","video":{"url":"https://vidgen.x.ai/task.mp4","duration":8}}`),
+		{StatusCode: http.StatusRequestedRangeNotSatisfiable, Header: http.Header{"Content-Type": []string{"text/plain"}},
+			Body: io.NopCloser(strings.NewReader("bad range"))},
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	c, recorder := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task/content", map[string]string{"Range": "bytes=500-600"})
+	result, err := svc.ForwardGrokMedia(context.Background(), c, grokMediaContentTestAccount(), GrokMediaEndpointVideoContent, "task", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusRequestedRangeNotSatisfiable, recorder.Code)
+	require.Zero(t, result.VideoCount)
+	require.False(t, result.VideoContentDelivered)
 }
 
 func TestForwardGrokMediaContentFetchesValidatedSignedURLWithoutCredentials(t *testing.T) {

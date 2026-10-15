@@ -378,8 +378,8 @@ func (s *OpenAIGatewayService) SelectMediaVideoRequestAccount(
 }
 
 // GrokVideoPendingBilling is the create-time snapshot used when status polling
-// first observes a completed video URL. Status may omit model/duration; we fall
-// back to this snapshot, then defaults.
+// observes a completed video URL or delivers a Creator video. Status may omit
+// model/duration; we fall back to this snapshot, then defaults.
 type GrokVideoPendingBilling struct {
 	Model                string `json:"model"`
 	BillingModel         string `json:"billing_model,omitempty"`
@@ -387,9 +387,11 @@ type GrokVideoPendingBilling struct {
 	VideoResolution      string `json:"video_resolution,omitempty"`
 	VideoDurationSeconds int    `json:"video_duration_seconds,omitempty"`
 	OriginalModel        string `json:"original_model,omitempty"`
+	// Creator downloads the full video before treating generation as successful.
+	BillOnContent bool `json:"bill_on_content,omitempty"`
 	// CreatedAt is when the gateway accepted the async create (RFC3339Nano UTC).
 	// duration_ms for deferred billing is measured from this instant until the
-	// first official done+video.url observation (status poll or content download),
+	// first billable completion (full content delivery for Creator videos),
 	// not the latency of that single discovery request alone.
 	CreatedAt string `json:"created_at,omitempty"`
 }
@@ -561,7 +563,7 @@ func StableGrokVideoBillingRequestID(taskRequestID string) string {
 // document a resolution field — bill resolution from the create-time request snapshot.
 
 // IsGrokVideoStatusBillable matches official success: status == "done" AND non-empty video.url.
-// pending / expired / failed, or done without a video URL, are not billable.
+// Failed, moderated, errored, or missing-output results are not billable.
 func IsGrokVideoStatusBillable(statusBody []byte) bool {
 	if len(statusBody) == 0 || !gjson.ValidBytes(statusBody) {
 		return false
@@ -569,7 +571,16 @@ func IsGrokVideoStatusBillable(statusBody []byte) bool {
 	if !isOfficialGrokVideoStatusDone(statusBody) {
 		return false
 	}
-	return strings.TrimSpace(gjson.GetBytes(statusBody, "video.url").String()) != ""
+	if moderation := gjson.GetBytes(statusBody, "video.respect_moderation"); moderation.Type == gjson.False {
+		return false
+	}
+	for _, path := range []string{"error", "video.error"} {
+		if failure := gjson.GetBytes(statusBody, path); failure.Exists() && failure.Type != gjson.Null && failure.Type != gjson.False && strings.TrimSpace(failure.String()) != "" {
+			return false
+		}
+	}
+	videoURL := gjson.GetBytes(statusBody, "video.url")
+	return videoURL.Type == gjson.String && strings.TrimSpace(videoURL.String()) != ""
 }
 
 func isOfficialGrokVideoStatusDone(statusBody []byte) bool {
@@ -923,16 +934,16 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 	if err := writeGrokMediaContentResponse(c, contentResp); err != nil {
 		return nil, err
 	}
-	// Content download is an alternate completion observation: when status body is
-	// official done+video.url, attach billable units so the handler can claim once
-	// (same path as status polling). Pending snapshot is merged in the handler.
+	// Attach billable units only after valid video content is copied successfully.
+	// Creator requires a full response; range reads remain available for playback.
+	// Pending snapshot is merged in the handler.
 	result := &OpenAIForwardResult{
 		RequestID:       contentRequestID,
 		UpstreamHeaders: contentResp.Header,
 		ResponseHeaders: contentResp.Header.Clone(),
 		Duration:        time.Since(startTime),
 	}
-	if billed := ExtractGrokVideoBillingFromStatusBody(statusBody, nil, requestID); billed != nil {
+	if billed := ExtractGrokVideoBillingFromStatusBody(statusBody, nil, requestID); billed != nil && (contentResp.StatusCode == http.StatusOK || contentResp.StatusCode == http.StatusPartialContent) {
 		result.ResponseID = firstNonEmpty(billed.ResponseID, strings.TrimSpace(requestID))
 		result.Model = billed.Model
 		result.BillingModel = billed.BillingModel
@@ -940,6 +951,7 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 		result.VideoCount = billed.VideoCount
 		result.VideoResolution = billed.VideoResolution
 		result.VideoDurationSeconds = billed.VideoDurationSeconds
+		result.VideoContentDelivered = contentResp.StatusCode == http.StatusOK
 	}
 	return result, nil
 }
@@ -1504,6 +1516,26 @@ func writeGrokMediaContentResponse(c *gin.Context, resp *http.Response) error {
 	if c == nil || resp == nil || resp.Body == nil {
 		return fmt.Errorf("grok media content response is incomplete")
 	}
+	content := io.Reader(resp.Body)
+	isVideoResponse := resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent
+	if isVideoResponse {
+		contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+		if contentType != "" {
+			mediaType, _, err := mime.ParseMediaType(contentType)
+			if err != nil || (!strings.HasPrefix(mediaType, "video/") && mediaType != "application/octet-stream") {
+				return fmt.Errorf("grok media content returned an invalid video format")
+			}
+		}
+		if resp.StatusCode == http.StatusPartialContent && strings.TrimSpace(c.GetHeader("Range")) == "" {
+			return fmt.Errorf("grok media content returned an unexpected partial video")
+		}
+		// Do not commit a successful response for an empty or unreadable body.
+		var firstByte [1]byte
+		if _, err := io.ReadFull(resp.Body, firstByte[:]); err != nil {
+			return fmt.Errorf("grok media video content is empty or unreadable: %w", err)
+		}
+		content = io.MultiReader(bytes.NewReader(firstByte[:]), resp.Body)
+	}
 
 	for _, name := range []string{
 		"Content-Type",
@@ -1524,8 +1556,22 @@ func writeGrokMediaContentResponse(c *gin.Context, resp *http.Response) error {
 	}
 	c.Status(resp.StatusCode)
 	MarkResponseCommitted(c)
-	_, err := io.Copy(c.Writer, resp.Body)
-	return err
+	written, err := io.Copy(c.Writer, content)
+	if err != nil {
+		return err
+	}
+	if isVideoResponse {
+		expected := resp.ContentLength
+		if value := strings.TrimSpace(resp.Header.Get("Content-Length")); value != "" {
+			if length, parseErr := strconv.ParseInt(value, 10, 64); parseErr == nil {
+				expected = length
+			}
+		}
+		if expected > 0 && written != expected {
+			return fmt.Errorf("grok media video content is incomplete: received %d of %d bytes", written, expected)
+		}
+	}
+	return nil
 }
 
 func rewriteGrokMediaVideoContentURLs(body []byte, requestID, proxyURL string) []byte {

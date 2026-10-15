@@ -5,7 +5,7 @@ import type { ApiKey } from '@/types'
 
 const loaded = ref(false)
 const loading = ref(false)
-const hasAllowedBatchImageKey = ref(false)
+const hasAllowedBatchImageKey =   ref(false)
 let pendingLoad: Promise<boolean> | null = null
 const pageSize = 100
 

@@ -274,6 +274,7 @@ describe('creator gateway API', () => {
     expect(result).toEqual({ request_id: 'video-123', id: 'video-123' })
     const [url, init] = vi.mocked(fetch).mock.calls[0]
     expect(String(url)).toMatch(/\/v1\/videos\/generations$/)
+    expect(init?.headers).toMatchObject({ 'X-Sub2API-Creator': 'video' })
     expect(JSON.parse(String(init?.body))).toEqual({
       model: 'grok-imagine-video-1.5',
       prompt: 'camera moves forward',
@@ -358,6 +359,30 @@ describe('creator gateway API', () => {
     expect(String(vi.mocked(fetch).mock.calls[1][0])).toMatch(
       /\/v1\/videos\/task%2F1\/content$/,
     )
+    for (const [, init] of vi.mocked(fetch).mock.calls) {
+      expect(init?.headers).toMatchObject({ 'X-Sub2API-Creator': 'video' })
+    }
+  })
+
+  it.each([
+    { status: 'done', video: { url: '/v1/videos/task/content', respect_moderation: false } },
+    { status: 'done', video: { url: '/v1/videos/task/content', error: { message: 'render failed' } } },
+  ])('treats a rejected video as failed even when a URL is returned: %j', async body => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse(body))
+    const { getCreatorVideoStatus } = await import('@/api/creator')
+    await expect(getCreatorVideoStatus('sk-video', 'task')).resolves.toMatchObject({ status: 'failed', error: expect.anything() })
+  })
+
+  it('rejects a top-level video generation error even when status is done', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ status: 'done', error: { message: 'render failed' }, video: { url: '/v1/videos/task/content' } }))
+    const { getCreatorVideoStatus } = await import('@/api/creator')
+    await expect(getCreatorVideoStatus('sk-video', 'task')).rejects.toThrow('render failed')
+  })
+
+  it('rejects a partial video body when requesting the complete file', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce({ ok: true, status: 206, blob: vi.fn() } as unknown as Response)
+    const { getCreatorVideoContent } = await import('@/api/creator')
+    await expect(getCreatorVideoContent('sk-video', 'task')).rejects.toThrow('视频内容不完整')
   })
 
   it('downloads cached video bytes without contacting the task endpoint or sending credentials', async () => {

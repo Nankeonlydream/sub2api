@@ -406,7 +406,7 @@ export async function createCreatorVideo(
   }
   const body = await fetchJSON<any>(buildGatewayUrl('/v1/videos/generations'), {
     method: 'POST',
-    headers: authHeaders(apiKey, { 'Content-Type': 'application/json' }),
+    headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'video' }),
     body: JSON.stringify(payload),
   })
   const id = String(
@@ -427,7 +427,7 @@ export async function getCreatorVideoStatus(
 ): Promise<VideoStatusResult> {
   const body = await fetchJSON<any>(
     buildGatewayUrl(`/v1/videos/${encodeURIComponent(requestId)}`),
-    { headers: authHeaders(apiKey) },
+    { headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'video' }) },
   )
   const nested = body?.video || body?.data || {}
   const nestedVideo = nested?.video || {}
@@ -449,6 +449,9 @@ export async function getCreatorVideoStatus(
   const progress = Number.isFinite(parsedProgress)
     ? Math.max(0, Math.min(100, !progressIsPercentage && parsedProgress > 0 && parsedProgress < 1 ? parsedProgress * 100 : parsedProgress))
     : undefined
+  const moderationRejected = nested?.respect_moderation === false || nestedVideo?.respect_moderation === false
+  const error = body?.error || nested?.error || nestedVideo?.error
+    || (moderationRejected ? { message: '视频未通过上游内容审核，生成失败' } : undefined)
   return {
     ...body,
     id: String(
@@ -460,21 +463,20 @@ export async function getCreatorVideoStatus(
         nested?.task_id ||
         requestId,
     ),
-    status: String(body?.status || nested?.status || nestedVideo?.status || ''),
+    status: error ? 'failed' : String(body?.status || nested?.status || nestedVideo?.status || ''),
     ...(progress !== undefined ? { progress } : {}),
     ...(url ? { url: String(url) } : {}),
-    ...(body?.error || nested?.error || nestedVideo?.error
-      ? { error: body?.error || nested?.error || nestedVideo?.error }
-      : {}),
+    ...(error ? { error } : {}),
   }
 }
 
 export async function getCreatorVideoContent(apiKey: string, requestId: string): Promise<Blob> {
   const response = await fetch(
     buildGatewayUrl(`/v1/videos/${encodeURIComponent(requestId)}/content`),
-    { headers: authHeaders(apiKey) },
+    { headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'video' }) },
   )
   if (!response.ok) throw await parseCreatorError(response)
+  if (response.status === 206) throw new Error('视频内容不完整，请稍后重试')
   const blob = await response.blob()
   if (!blob.size) throw new Error('视频内容为空，请稍后重试')
   if (blob.type.includes('json') || blob.type.startsWith('text/')) {

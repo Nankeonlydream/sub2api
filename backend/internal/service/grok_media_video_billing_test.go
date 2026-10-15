@@ -53,6 +53,24 @@ func TestIsGrokVideoStatusBillable(t *testing.T) {
 	require.False(t, IsGrokVideoStatusBillable([]byte(`{"status":"completed","video":{"url":"https://vidgen.x.ai/x.mp4"}}`)))
 }
 
+func TestGrokVideoFailureWithURLDoesNotProduceBillableUnits(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{
+		`{"status":"failed","video":{"url":"https://vidgen.x.ai/x.mp4"}}`,
+		`{"status":"expired","video":{"url":"https://vidgen.x.ai/x.mp4"}}`,
+		`{"status":"done","error":{"message":"render failed"},"video":{"url":"https://vidgen.x.ai/x.mp4"}}`,
+		`{"status":"done","video":{"url":"https://vidgen.x.ai/x.mp4","error":"render failed"}}`,
+		`{"status":"done","video":{"url":"https://vidgen.x.ai/x.mp4","respect_moderation":false}}`,
+		`{"status":"done","video":{"url":123}}`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			require.False(t, IsGrokVideoStatusBillable([]byte(body)))
+			require.Nil(t, ExtractGrokVideoBillingFromStatusBody([]byte(body), &GrokVideoPendingBilling{Model: "grok-imagine-video-1.5", VideoDurationSeconds: 8}, "task"))
+			require.Zero(t, grokMediaUsageFromResponse(GrokMediaEndpointVideoStatus, GrokMediaRequestInfo{}, []byte(body)).VideoCount)
+		})
+	}
+}
+
 func TestExtractGrokVideoBillingFromStatusBodyPrefersUpstreamParams(t *testing.T) {
 	t.Parallel()
 	pending := &GrokVideoPendingBilling{

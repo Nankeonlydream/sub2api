@@ -2164,6 +2164,26 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
+  it('stops an expired video task before fetching a stale content URL', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    getVideoStatus.mockResolvedValueOnce({ id: 'video-task-1', status: 'expired', url: '/v1/videos/video-task-1/content' })
+    const wrapper = mount(CreatorStudioView, {
+      global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } },
+    })
+    await flushPromises()
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('镜头向前推进')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(getVideoContent).not.toHaveBeenCalled()
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'failed' }))
+    expect(showError).toHaveBeenCalledWith('视频生成失败')
+    wrapper.unmount()
+  })
+
   it('retries transient upstream errors while submitting a video shot', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])

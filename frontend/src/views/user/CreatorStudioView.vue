@@ -2687,7 +2687,7 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
       && rawProgress !== ''
       && Number.isFinite(Number(rawProgress))
     const reportedProgress = hasReportedProgress ? Number(rawProgress) : Number.NaN
-    if (['failed', 'error', 'cancelled', 'canceled'].includes(normalized)) {
+    if (['failed', 'error', 'cancelled', 'canceled', 'expired'].includes(normalized)) {
       throw new Error(errorMessage(status.error, '视频生成失败'))
     }
     if (['completed', 'succeeded', 'success', 'done'].includes(normalized) || status.url) {

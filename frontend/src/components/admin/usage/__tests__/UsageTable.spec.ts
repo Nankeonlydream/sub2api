@@ -991,10 +991,10 @@ describe('admin UsageTable latency TPS', () => {
     const cell = tpsCell(wrapper, 'req-tps-stream')
     expect(cell.text()).toBe('27.9 t/s')
     expect(cell.attributes('title')).toBe('usage.latencyTpsHint')
-    expect(cell.classes()).toContain('text-emerald-600')
+    expect(cell.classes()).toContain('text-black')
   })
 
-  it('colors the TPS text and the bottom bar segment red below 10 t/s and yellow below 20 t/s', () => {
+  it('keeps TPS text black while the bottom bar segment is red below 10 t/s and yellow below 20 t/s', () => {
     const wrapper = mountLatency([
       // first token 12s (warn), total 17s (good), 1.5 t/s (critical)
       { request_id: 'req-tps-slow', output_tokens: 25, duration_ms: 17_000, first_token_ms: 12_000 },
@@ -1003,13 +1003,13 @@ describe('admin UsageTable latency TPS', () => {
     ])
 
     expect(tpsCell(wrapper, 'req-tps-slow').text()).toBe('1.5 t/s')
-    expect(tpsCell(wrapper, 'req-tps-slow').classes()).toContain('text-red-600')
+    expect(tpsCell(wrapper, 'req-tps-slow').classes()).toContain('text-black')
     expect(barClasses(wrapper, 'req-tps-slow')).toEqual(
       expect.arrayContaining(['from-amber-400', 'via-emerald-500', 'to-red-500']),
     )
 
     expect(tpsCell(wrapper, 'req-tps-mid').text()).toBe('12.5 t/s')
-    expect(tpsCell(wrapper, 'req-tps-mid').classes()).toContain('text-amber-600')
+    expect(tpsCell(wrapper, 'req-tps-mid').classes()).toContain('text-black')
     expect(barClasses(wrapper, 'req-tps-mid')).toEqual(
       expect.arrayContaining(['from-emerald-500', 'via-emerald-500', 'to-amber-400']),
     )
@@ -1052,7 +1052,7 @@ describe('admin UsageTable latency TPS', () => {
     for (const requestId of ['req-tps-terminal', 'req-tps-same-ms']) {
       expect(tpsCell(wrapper, requestId).text()).toBe('10.8 t/s')
       expect(tpsCell(wrapper, requestId).attributes('title')).toBe('usage.latencyTpsHint')
-      expect(tpsCell(wrapper, requestId).classes()).toContain('text-amber-600')
+      expect(tpsCell(wrapper, requestId).classes()).toContain('text-black')
       expect(barClasses(wrapper, requestId)).toContain('to-amber-400')
     }
   })

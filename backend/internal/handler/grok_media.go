@@ -493,8 +493,8 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 					zap.Error(err),
 				)
 			}
-			// Defer billing until status polling observes video.url. Persist create-time
-			// model/duration/resolution so status can still price if upstream omits them.
+			// Defer billing until completion (full content delivery for Creator).
+			// Persist model/duration/resolution for status bodies that omit pricing units.
 			// Retry once: missing pending causes silent underpricing (status omits resolution).
 			pending := service.GrokVideoPendingBilling{
 				Model:                requestModel,
@@ -503,6 +503,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				VideoResolution:      result.VideoResolution,
 				VideoDurationSeconds: result.VideoDurationSeconds,
 				OriginalModel:        clientRequestedModel(c, requestModel),
+				BillOnContent:        strings.EqualFold(c.GetHeader("X-Sub2API-Creator"), "video"),
 				// Wall-clock start for usage duration_ms: create accepted → first done discovery.
 				CreatedAt: videoCreateStartedAt,
 			}
@@ -523,13 +524,17 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				}
 			}
 		}
-		// Status poll OR content download can observe official done+video.url.
-		// Both paths share the same claim key so the customer is charged once.
+		// Completion paths share one claim key so the customer is charged once.
 		if endpoint == service.SeedanceEndpointStatus {
 			if billResult := prepareSeedanceCompletionBilling(requestCtx, h, apiKey, subject, requestID, result); billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, requestID)
 			}
 		} else if endpoint == service.GrokMediaEndpointVideoStatus || endpoint == service.GrokMediaEndpointVideoContent {
+			// Creator status polling must not charge before its full content fetch.
+			// The persisted flag also protects lookups that omit the header.
+			if strings.EqualFold(c.GetHeader("X-Sub2API-Creator"), "video") && !result.VideoContentDelivered {
+				return
+			}
 			taskID := strings.TrimSpace(requestID)
 			if billResult := prepareGrokVideoCompletionBilling(requestCtx, h, reqLog, apiKey, subject, taskID, result); billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, taskID)
@@ -637,6 +642,9 @@ func prepareGrokVideoCompletionBilling(
 	if loadErr != nil {
 		reqLog.Warn("grok_media.video_pending_billing_load_failed", zap.String("request_id", taskRequestID), zap.Error(loadErr))
 	}
+	if pending != nil && pending.BillOnContent && !statusResult.VideoContentDelivered {
+		return nil
+	}
 	if pending == nil {
 		// Status omits resolution; without pending we would silently default to 480p and underbill.
 		// Allow billing only when official status carries duration (still may default resolution).
@@ -702,9 +710,8 @@ func prepareGrokVideoCompletionBilling(
 	merged.VideoResolution = service.NormalizeVideoBillingResolutionOrDefault(merged.VideoResolution)
 	// Official default duration is 8s when neither status nor create provided it.
 	merged.VideoDurationSeconds = service.NormalizeVideoBillingDurationSecondsOrDefault(merged.VideoDurationSeconds)
-	// E2E latency for async video: create accept → this discovery of done+url.
-	// Bill on discovery (status/content), not after further client polls; duration
-	// must not be only the single discovery hop (~hundreds of ms).
+	// E2E latency: create accept → billable completion (content for Creator).
+	// Do not measure only the latency of this single status/content request.
 	if pending != nil {
 		if e2e := service.GrokVideoE2EDuration(pending.CreatedAt, time.Now()); e2e > 0 {
 			merged.Duration = e2e

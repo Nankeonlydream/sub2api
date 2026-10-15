@@ -401,6 +401,46 @@ func TestGrokMediaVideoLookupOwnerIsolation(t *testing.T) {
 	}
 }
 
+func TestCreatorVideoBillsOnlyAfterFullContentDelivery(t *testing.T) {
+	h, _, bindings, _ := newGrokMediaSlotHandler(t, false, false)
+	c, _ := grokMediaSlotContext(context.Background(), true)
+	c.Request.Header.Set("X-Sub2API-Creator", "video")
+	h.GrokVideoGeneration(c)
+	key, ok := middleware2.GetAPIKeyFromContext(c)
+	require.True(t, ok)
+	pending, err := h.gatewayService.LoadGrokVideoPendingBilling(context.Background(), "task", 10, key.ID)
+	require.NoError(t, err)
+	require.NotNil(t, pending)
+	require.True(t, pending.BillOnContent)
+	require.Empty(t, bindings.billed, "submitting a task must not charge")
+
+	subject := middleware2.AuthSubject{UserID: 10, Concurrency: 5}
+	result := service.ExtractGrokVideoBillingFromStatusBody([]byte(`{"status":"done","video":{"url":"https://vidgen.x.ai/task.mp4","duration":6}}`), pending, "task")
+	// No header is required here: the saved create-time flag protects all polls.
+	for range 3 {
+		require.Nil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result))
+	}
+	require.Empty(t, bindings.billed, "status completion must not charge before content is delivered")
+
+	result.VideoContentDelivered = true
+	require.NotNil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result))
+	require.Len(t, bindings.billed, 1)
+	require.Nil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result), "repeated downloads must not charge twice")
+}
+
+func TestCreatorVideoStatusHeaderDefersBillingWithoutPendingSnapshot(t *testing.T) {
+	h, _, bindings, upstream := newGrokMediaSlotHandler(t, false, false)
+	upstream.call = func(*http.Request, int64) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"status":"done","video":{"url":"/v1/videos/task/content","duration":6}}`))}, nil
+	}
+	c, recorder := grokMediaSlotContext(context.Background(), false)
+	c.Request.Header.Set("X-Sub2API-Creator", "video")
+	h.GrokVideoStatus(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Empty(t, bindings.billed)
+}
+
 func TestGrokMediaVideoCompletionStillClaimsBillingOnce(t *testing.T) {
 	h, _, bindings, _ := newGrokMediaSlotHandler(t, false, false)
 	c, _ := grokMediaSlotContext(context.Background(), false)
