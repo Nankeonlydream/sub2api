@@ -252,7 +252,8 @@
             <span
               v-if="formatUsageOutputTps(row)"
               data-testid="latency-tps"
-              class="col-start-3 row-start-3 font-medium tabular-nums text-black"
+              class="col-start-3 row-start-3 font-medium tabular-nums"
+              :class="LATENCY_TEXT_CLASSES[tpsSeverity(usageOutputTps(row) ?? 0)]"
               :title="t('usage.latencyTpsHint')"
             >{{ formatUsageOutputTps(row) }}</span>
             <span v-else data-testid="latency-tps" class="col-start-3 row-start-3 text-gray-400 dark:text-gray-500">-</span>
