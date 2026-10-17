@@ -131,6 +131,22 @@ describe('creator gateway API', () => {
     })
   })
 
+  it.each(['1024x1024', '2048x1152', '3840x2160'])(
+    'prefers included image bytes over an inaccessible relay URL at %s', async size => {
+      vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{
+        url: 'http://203.0.113.10:33339/v1/images/result.png',
+        b64_json: 'aW1hZ2U=',
+        mime_type: 'image/png',
+      }] }))
+      const { generateCreatorImage } = await import('@/api/creator')
+      const result = await generateCreatorImage('sk-image', {
+        model: 'gpt-image-2.5-sunburst', prompt: 'size regression', size,
+      })
+      expect(result.data[0].url).toBe('data:image/png;base64,aW1hZ2U=')
+      expect(fetch).toHaveBeenCalledTimes(1)
+    },
+  )
+
   it('uses multipart edits when reference files are present', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse({ data: [{ url: 'https://cdn.example/edited.png' }] }),

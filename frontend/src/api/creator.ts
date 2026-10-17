@@ -204,7 +204,9 @@ function normalizeOpenAIImages(body: any, fallbackMimeType: string): ImageGenera
       typeof item?.mime_type === 'string' && item.mime_type.trim()
         ? item.mime_type.trim()
         : fallbackMimeType
-    const url = directURL || (b64 ? `data:${mimeType};base64,${b64}` : '')
+    // Compatible relays can return both fields. Their URL may require upstream
+    // authentication, use HTTP or expire; the included bytes are self-contained.
+    const url = b64 ? `data:${mimeType};base64,${b64}` : directURL
     return url ? [{ ...item, url, mime_type: mimeType }] : []
   })
 
