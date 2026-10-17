@@ -25,6 +25,8 @@ export interface CreatorHistoryItem {
   shotResolutions?: string[]
   shotGenerationMethods?: CreatorVideoGenerationMethod[]
   shotReferenceCounts?: number[]
+  /** Image-to-video only: false when the source was cropped to the chosen ratio. */
+  shotFollowSourceAspects?: boolean[]
   shotActualOutputSizes?: string[]
   mergeError?: string
   groupId?: number

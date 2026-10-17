@@ -152,25 +152,27 @@ async function toggleFullscreen() {
 </script>
 
 <style scoped>
-.creator-video-player { position: relative; display: grid; overflow: hidden; background: #101b1a; isolation: isolate; }
-video { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: min(58vh, 620px); border-radius: inherit; object-fit: contain; opacity: 0; transition: opacity 180ms ease; }
+/* Size overlay controls from the player's own width so they stay proportional at any zoom level or card size. */
+/* The black fill lives on the video itself, not the clipping container: a dark container shows through the anti-aliased rounded corners as a thin black arc. */
+.creator-video-player { --play-size: clamp(36px, 8cqi, 56px); position: relative; display: grid; overflow: hidden; isolation: isolate; container-type: inline-size; }
+video { position: relative; z-index: 1; display: block; width: 100%; height: 100%; max-height: min(58vh, 620px); border-radius: inherit; background: #000; object-fit: contain; opacity: 0; transition: opacity 180ms ease; }
 video.video-ready { opacity: 1; }
-.video-badge { position: absolute; z-index: 3; top: 16px; right: 16px; display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid rgb(255 255 255 / 20%); border-radius: 10px; color: #fff; background: rgb(15 23 23 / 48%); backdrop-filter: blur(10px); font-size: 11px; line-height: 1; pointer-events: none; }
+.video-badge { position: absolute; z-index: 3; top: 16px; right: 16px; display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid rgb(255 255 255 / 20%); border-radius: var(--creator-radius-small, 8px); color: #fff; background: rgb(15 23 23 / 48%); backdrop-filter: blur(10px); font-size: 11px; line-height: 1; pointer-events: none; }
 .video-badge > span { margin-left: 3px; color: rgb(255 255 255 / 80%); font-variant-numeric: tabular-nums; }
 .video-play-toggle { position: absolute; z-index: 2; inset: 0; display: grid; place-items: center; width: 100%; height: 100%; border: 0; background: transparent; cursor: pointer; }
-.video-play-symbol { display: grid; place-items: center; width: 68px; height: 68px; border: 1px solid rgb(255 255 255 / 60%); border-radius: 50%; color: #fff; background: rgb(15 23 23 / 42%); backdrop-filter: blur(12px); box-shadow: 0 6px 24px rgb(0 0 0 / 18%); transition: opacity 160ms ease, transform 160ms ease, background 160ms ease; }
-.video-play-symbol > svg { width: 28px; height: 28px; }
+.video-play-symbol { display: grid; place-items: center; width: var(--play-size); height: var(--play-size); border: 1px solid rgb(255 255 255 / 60%); border-radius: 50%; color: #fff; background: rgb(15 23 23 / 42%); backdrop-filter: blur(12px); box-shadow: 0 6px 24px rgb(0 0 0 / 18%); transition: opacity 160ms ease, transform 160ms ease, background 160ms ease; }
+.video-play-symbol > svg { width: calc(var(--play-size) * .4); height: calc(var(--play-size) * .4); }
 .video-play-toggle:hover .video-play-symbol { transform: scale(1.06); background: rgb(15 23 23 / 60%); }
 .is-playing .video-play-symbol { opacity: 0; }
 .is-playing:hover .video-play-symbol, .video-play-toggle:focus-visible .video-play-symbol { opacity: 1; }
 .video-play-toggle:focus-visible { outline: 3px solid #7ce5d5; outline-offset: -4px; }
-.video-fullscreen { position: absolute; z-index: 3; right: 16px; bottom: 16px; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid rgb(255 255 255 / 25%); border-radius: 10px; color: #fff; background: rgb(15 23 23 / 48%); backdrop-filter: blur(10px); opacity: 0; transition: opacity 160ms ease; }
+.video-fullscreen { position: absolute; z-index: 3; right: 16px; bottom: 16px; display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid rgb(255 255 255 / 25%); border-radius: var(--creator-radius-small, 8px); color: #fff; background: rgb(15 23 23 / 48%); backdrop-filter: blur(10px); opacity: 0; transition: opacity 160ms ease; }
 .video-fullscreen > svg { width: 19px; height: 19px; }
 .creator-video-player:hover .video-fullscreen, .video-fullscreen:focus-visible { opacity: 1; }
 .video-fullscreen:focus-visible { outline: 2px solid #7ce5d5; outline-offset: 3px; }
-.video-playback-error { position: absolute; z-index: 3; bottom: 16px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 110px); padding: 7px 10px; border-radius: 8px; color: #fff; background: rgb(15 23 23 / 70%); font-size: 11px; text-align: center; pointer-events: none; }
+.video-playback-error { position: absolute; z-index: 3; bottom: 16px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 110px); padding: 7px 10px; border-radius: var(--creator-radius-small, 8px); color: #fff; background: rgb(15 23 23 / 70%); font-size: 11px; text-align: center; pointer-events: none; }
 .video-load-error { position: absolute; z-index: 2; inset: 0; display: grid; justify-items: center; align-content: center; gap: 12px; color: #dcebe8; background: #142321; font-size: 13px; }
-.video-load-error button { padding: 8px 14px; border: 1px solid #65988e; border-radius: 10px; color: #dcebe8; background: #233e37; }
+.video-load-error button { padding: 8px 14px; border: 1px solid #65988e; border-radius: var(--creator-radius, 12px); color: #dcebe8; background: #233e37; }
 .creator-video-player:fullscreen { width: 100%; height: 100%; max-height: none !important; aspect-ratio: auto !important; margin: 0; border-radius: 0; background: #000; }
 .creator-video-player:fullscreen video { max-height: none !important; }
 @media (hover: none) { .video-fullscreen { opacity: 1; } }

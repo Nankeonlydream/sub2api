@@ -125,6 +125,8 @@ type grokMediaSlotBindings struct {
 	key     string
 	billed  map[string]bool
 	pending map[string][]byte
+	// honorCancel mimics Redis by failing calls whose context is canceled.
+	honorCancel bool
 }
 
 func (s *grokMediaSlotBindings) SetGrokVideoPendingBilling(_ context.Context, key string, body []byte, _ time.Duration) error {
@@ -134,7 +136,10 @@ func (s *grokMediaSlotBindings) SetGrokVideoPendingBilling(_ context.Context, ke
 	s.pending[key] = append([]byte(nil), body...)
 	return nil
 }
-func (s *grokMediaSlotBindings) GetGrokVideoPendingBilling(_ context.Context, key string) ([]byte, error) {
+func (s *grokMediaSlotBindings) GetGrokVideoPendingBilling(ctx context.Context, key string) ([]byte, error) {
+	if s.honorCancel && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
 	return s.pending[key], nil
 }
 
@@ -158,7 +163,10 @@ func (s *grokMediaSlotBindings) DeleteSessionAccountID(context.Context, int64, s
 	return nil
 }
 
-func (s *grokMediaSlotBindings) ClaimGrokVideoBilled(_ context.Context, key string, _ time.Duration) (bool, error) {
+func (s *grokMediaSlotBindings) ClaimGrokVideoBilled(ctx context.Context, key string, _ time.Duration) (bool, error) {
+	if s.honorCancel && ctx.Err() != nil {
+		return false, ctx.Err()
+	}
 	if s.billed == nil {
 		s.billed = make(map[string]bool)
 	}
@@ -428,6 +436,53 @@ func TestCreatorVideoBillsOnlyAfterFullContentDelivery(t *testing.T) {
 	require.Nil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result), "repeated downloads must not charge twice")
 }
 
+func TestLegacyCreatorVideoDefersBillingWithoutCreatorSnapshot(t *testing.T) {
+	for _, snapshot := range []string{"missing", "legacy"} {
+		t.Run(snapshot, func(t *testing.T) {
+			h, _, bindings, upstream := newGrokMediaSlotHandler(t, false, false)
+			c, recorder := grokMediaSlotContext(context.Background(), false)
+			key, ok := middleware2.GetAPIKeyFromContext(c)
+			require.True(t, ok)
+			key.Name = "创作中心 · Grok Heavy"
+			if snapshot == "legacy" {
+				require.NoError(t, h.gatewayService.StoreGrokVideoPendingBilling(context.Background(), "task", 10, key.ID, service.GrokVideoPendingBilling{
+					Model: "grok-imagine-video-1.5", VideoResolution: "720p", VideoDurationSeconds: 6,
+				}))
+			}
+			statusBody := ` {"status":"done","video":{"url":"/v1/videos/task/content","duration":6}}`
+			upstream.call = func(req *http.Request, _ int64) (*http.Response, error) {
+				if strings.HasSuffix(req.URL.Path, "/content") {
+					return &http.Response{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(strings.NewReader(`{"error":{"message":"Upstream service temporarily unavailable"}}`))}, nil
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+					Body: io.NopCloser(strings.NewReader(statusBody))}, nil
+			}
+			h.GrokVideoStatus(c)
+			require.Equal(t, http.StatusOK, recorder.Code)
+			require.Empty(t, bindings.billed, "legacy Creator polling must not charge before the download")
+
+			result := service.ExtractGrokVideoBillingFromStatusBody([]byte(statusBody), nil, "task")
+			subject := middleware2.AuthSubject{UserID: 10, Concurrency: 5}
+			require.Nil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result))
+
+			download, response := grokMediaSlotContext(context.Background(), false)
+			download.Request.URL.Path += "/content"
+			downloadKey, ok := middleware2.GetAPIKeyFromContext(download)
+			require.True(t, ok)
+			downloadKey.Name = key.Name
+			h.GrokVideoContent(download)
+			require.Equal(t, http.StatusBadGateway, response.Code)
+			require.Empty(t, bindings.billed, "failed content retrieval must leave the billing claim untouched")
+
+			result.VideoContentDelivered = true
+			require.NotNil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result))
+			require.Nil(t, prepareGrokVideoCompletionBilling(context.Background(), h, zap.NewNop(), key, subject, "task", result))
+			require.Len(t, bindings.billed, 1, "a successful later download charges exactly once")
+		})
+	}
+}
+
 func TestCreatorVideoStatusHeaderDefersBillingWithoutPendingSnapshot(t *testing.T) {
 	h, _, bindings, upstream := newGrokMediaSlotHandler(t, false, false)
 	upstream.call = func(*http.Request, int64) (*http.Response, error) {
@@ -459,4 +514,33 @@ func TestGrokMediaVideoCompletionStillClaimsBillingOnce(t *testing.T) {
 		}
 	}
 	require.Len(t, bindings.billed, 1)
+}
+
+func TestCreatorVideoContentBillsAfterClientClosesRequest(t *testing.T) {
+	h, _, bindings, upstream := newGrokMediaSlotHandler(t, false, false)
+	bindings.honorCancel = true
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c, recorder := grokMediaSlotContext(ctx, false)
+	c.Request.URL.Path += "/content"
+	key, ok := middleware2.GetAPIKeyFromContext(c)
+	require.True(t, ok)
+	key.Name = "创作中心 · Grok"
+	require.NoError(t, h.gatewayService.StoreGrokVideoPendingBilling(context.Background(), "task", 10, key.ID, service.GrokVideoPendingBilling{
+		Model: "grok-imagine-video-1.5", VideoResolution: "720p", VideoDurationSeconds: 8, BillOnContent: true,
+	}))
+	upstream.call = func(req *http.Request, _ int64) (*http.Response, error) {
+		if strings.HasSuffix(req.URL.Path, "/content") {
+			// The browser drops the request once the video has been delivered.
+			cancel()
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"video/mp4"}},
+				Body: io.NopCloser(strings.NewReader("full-video")), ContentLength: 10}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(`{"status":"done","video":{"url":"/v1/videos/task/content"}}`))}, nil
+	}
+	h.GrokVideoContent(c)
+	require.Equal(t, http.StatusOK, recorder.Code)
+	require.Equal(t, "full-video", recorder.Body.String())
+	require.Len(t, bindings.billed, 1, "delivered video must be billed even after the client disconnects")
 }

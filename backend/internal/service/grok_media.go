@@ -17,6 +17,7 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/xai"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
+	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -917,6 +918,19 @@ func (s *OpenAIGatewayService) forwardGrokMediaVideoContent(
 
 	contentResp, err := s.httpUpstream.Do(contentReq, proxyURL, account.ID, account.Concurrency)
 	s.rateLimitService.observeQualityResponse(contentReq.Context(), account, contentResp, err)
+	// A relay may finish (and charge for) the task yet fail its own /content
+	// proxy. Fall back to the public CDN link it exposes so the user still
+	// receives the video instead of losing an already-paid generation.
+	if !signedContent && (err != nil || contentResp.StatusCode >= 500) {
+		if fallbackURL := grokMediaRelayPublicVideoURL(statusBody, s.cfg); fallbackURL != "" {
+			if fallbackResp := s.fetchGrokMediaPublicVideo(upstreamCtx, c, fallbackURL, proxyURL, account); fallbackResp != nil {
+				if contentResp != nil {
+					_ = contentResp.Body.Close()
+				}
+				contentResp, err = fallbackResp, nil
+			}
+		}
+	}
 	SetOpsLatencyMs(c, OpsUpstreamLatencyMsKey, time.Since(upstreamStart).Milliseconds())
 	if err != nil {
 		return nil, s.handleOpenAIUpstreamTransportError(ctx, c, account, err, false)
@@ -979,6 +993,63 @@ func validateGrokSignedVideoURL(rawURL string) (string, error) {
 		return "", fmt.Errorf("grok media status returned an unsupported video content URL")
 	}
 	return parsed.String(), nil
+}
+
+// grokMediaRelayPublicVideoURL returns the public download link some relays
+// add next to their protected video.url. It must be HTTPS on a public host;
+// the fetch additionally pins every resolved address to public ranges.
+func grokMediaRelayPublicVideoURL(body []byte, cfg *config.Config) string {
+	rawURL := strings.TrimSpace(gjson.GetBytes(body, "video_url").String())
+	if rawURL == "" {
+		return ""
+	}
+	opts := urlvalidator.ValidationOptions{}
+	if cfg != nil && cfg.Security.URLAllowlist.Enabled {
+		opts.AllowedHosts = cfg.Security.URLAllowlist.UpstreamHosts
+	}
+	validated, err := urlvalidator.ValidateHTTPSURL(rawURL, opts)
+	if err != nil {
+		return ""
+	}
+	parsed, err := url.Parse(validated)
+	if err != nil || parsed.User != nil {
+		return ""
+	}
+	return validated
+}
+
+// fetchGrokMediaPublicVideo downloads a relay's public video link without
+// account credentials. It returns nil unless the response is a video body.
+func (s *OpenAIGatewayService) fetchGrokMediaPublicVideo(
+	ctx context.Context,
+	c *gin.Context,
+	videoURL, proxyURL string,
+	account *Account,
+) *http.Response {
+	req, err := http.NewRequestWithContext(
+		WithHTTPUpstreamPublicHostsOnly(WithHTTPUpstreamRedirectsDisabled(ctx)),
+		http.MethodGet,
+		videoURL,
+		nil,
+	)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Accept", "*/*")
+	if c != nil {
+		if rangeHeader := strings.TrimSpace(c.GetHeader("Range")); rangeHeader != "" {
+			req.Header.Set("Range", rangeHeader)
+		}
+	}
+	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	if err != nil || resp == nil {
+		return nil
+	}
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		_ = resp.Body.Close()
+		return nil
+	}
+	return resp
 }
 
 // grokMediaVideoSourceURL picks the anonymous xAI media URL from a status body:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -503,7 +504,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				VideoResolution:      result.VideoResolution,
 				VideoDurationSeconds: result.VideoDurationSeconds,
 				OriginalModel:        clientRequestedModel(c, requestModel),
-				BillOnContent:        strings.EqualFold(c.GetHeader("X-Sub2API-Creator"), "video"),
+				BillOnContent:        isCreatorVideoRequest(c, apiKey),
 				// Wall-clock start for usage duration_ms: create accepted → first done discovery.
 				CreatedAt: videoCreateStartedAt,
 			}
@@ -532,11 +533,16 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		} else if endpoint == service.GrokMediaEndpointVideoStatus || endpoint == service.GrokMediaEndpointVideoContent {
 			// Creator status polling must not charge before its full content fetch.
 			// The persisted flag also protects lookups that omit the header.
-			if strings.EqualFold(c.GetHeader("X-Sub2API-Creator"), "video") && !result.VideoContentDelivered {
+			if isCreatorVideoRequest(c, apiKey) && !result.VideoContentDelivered {
 				return
 			}
 			taskID := strings.TrimSpace(requestID)
-			if billResult := prepareGrokVideoCompletionBilling(requestCtx, h, reqLog, apiKey, subject, taskID, result); billResult != nil {
+			// Content billing runs after the video is streamed, when the client has
+			// usually closed the request; a canceled context would drop the bill.
+			billingCtx, cancelBilling := context.WithTimeout(context.WithoutCancel(requestCtx), 10*time.Second)
+			billResult := prepareGrokVideoCompletionBilling(billingCtx, h, reqLog, apiKey, subject, taskID, result)
+			cancelBilling()
+			if billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, taskID)
 			}
 		} else if shouldRecordGrokMediaUsage(endpoint, requestModel, result) {
@@ -582,6 +588,28 @@ func grokMediaScheduleModel(account *service.Account, routingModel string, resul
 		return strings.TrimSpace(routingModel)
 	}
 	return account.GetMappedModel(routingModel)
+}
+
+// Older Creator tabs predate the explicit header and their pending snapshots
+// may have no BillOnContent flag. Protect those requests using the existing
+// Creator key naming convention, with same-origin Referer for renamed keys.
+func isCreatorVideoRequest(c *gin.Context, apiKey *service.APIKey) bool {
+	if isCreatorStudioAPIKey(apiKey) {
+		return true
+	}
+	if c == nil || c.Request == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Sub2API-Creator")), "video") {
+		return true
+	}
+	referer, err := url.Parse(c.Request.Referer())
+	return err == nil && (referer.Scheme == "http" || referer.Scheme == "https") &&
+		strings.EqualFold(referer.Host, c.Request.Host) && strings.TrimRight(referer.Path, "/") == "/creator"
+}
+
+func isCreatorStudioAPIKey(apiKey *service.APIKey) bool {
+	return apiKey != nil && strings.HasPrefix(strings.TrimSpace(apiKey.Name), "创作中心 ·")
 }
 
 func isGrokVideoCreateEndpoint(endpoint service.GrokMediaEndpoint) bool {
@@ -642,7 +670,7 @@ func prepareGrokVideoCompletionBilling(
 	if loadErr != nil {
 		reqLog.Warn("grok_media.video_pending_billing_load_failed", zap.String("request_id", taskRequestID), zap.Error(loadErr))
 	}
-	if pending != nil && pending.BillOnContent && !statusResult.VideoContentDelivered {
+	if (isCreatorStudioAPIKey(apiKey) || pending != nil && pending.BillOnContent) && !statusResult.VideoContentDelivered {
 		return nil
 	}
 	if pending == nil {

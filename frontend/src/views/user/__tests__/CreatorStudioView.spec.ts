@@ -172,6 +172,28 @@ const AppLayoutStub = {
   template: '<div><slot /></div>',
 }
 
+type StudioWrapper = ReturnType<typeof mount>
+
+function videoParamsDialog(wrapper: StudioWrapper) {
+  return wrapper.findAllComponents(BaseDialog).find(dialog => dialog.props('title') === '设置视频参数')!
+}
+
+async function setVideoParams(wrapper: StudioWrapper, params: { ratio?: string, resolution?: string }) {
+  await wrapper.get('#video-params').trigger('click')
+  const dialog = videoParamsDialog(wrapper)
+  if (params.resolution) await dialog.get(`.image-resolution-grid button[data-resolution="${params.resolution}"]`).trigger('click')
+  if (params.ratio) await dialog.get(`.image-ratio-grid button[data-ratio="${params.ratio}"]`).trigger('click')
+  await dialog.get('.image-size-confirm').trigger('click')
+}
+
+async function videoResolutionChoices(wrapper: StudioWrapper) {
+  await wrapper.get('#video-params').trigger('click')
+  const dialog = videoParamsDialog(wrapper)
+  const choices = dialog.findAll('.image-resolution-grid button').map(button => button.attributes('data-resolution'))
+  await dialog.get('.image-size-cancel').trigger('click')
+  return choices
+}
+
 describe('CreatorStudioView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -882,6 +904,41 @@ describe('CreatorStudioView', () => {
     expect(wrapper.text()).toContain('还没有图片作品')
   })
 
+  it('sizes portrait image result frames to the requested ratio instead of letterboxing', async () => {
+    const work = {
+      id: 'portrait-grid',
+      type: 'image',
+      status: 'completed',
+      prompt: '夜晚的旧宅琴房',
+      model: 'grok-imagine-image',
+      provider: 'Grok 生图',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,UE5H', 'data:image/png;base64,UE5I'],
+      aspectRatio: '3:4',
+      resolution: '1K',
+    } as const
+    listHistory.mockResolvedValue([work])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const frames = wrapper.findAll('.result-grid .result-media')
+    expect(frames).toHaveLength(2)
+    for (const frame of frames) {
+      expect(frame.classes()).toContain('fitted')
+      expect(frame.classes()).not.toContain('landscape')
+      expect(frame.attributes('style')).toContain('aspect-ratio: 3 / 4')
+    }
+  })
+
   it('restores the historical group, model, prompt, ratio, resolution, and count when selected', async () => {
     const work = {
       id: 'grok-history-settings',
@@ -1245,6 +1302,28 @@ describe('CreatorStudioView', () => {
     anchorClick.mockRestore()
   })
 
+  it('offers every official video aspect ratio and submits ultra-wide ratios', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+
+    await wrapper.get('#video-params').trigger('click')
+    const ratios = videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio'))
+    expect(ratios).toEqual(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2'])
+    await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
+
+    await setVideoParams(wrapper, { ratio: '5:2' })
+    expect(wrapper.get('#video-params').text()).toContain('5:2')
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('海边公路航拍')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(createVideo).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({ aspectRatio: '5:2' }))
+    wrapper.unmount()
+  })
+
   it('loads completed video through the authenticated content endpoint', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
@@ -1298,18 +1377,16 @@ describe('CreatorStudioView', () => {
     await wrapper.findAll('.mode-option')[1].trigger('click')
     await flushPromises()
 
-    const resolution = wrapper.get<HTMLSelectElement>('#video-resolution')
-    const option1080p = resolution.find('option[value="1080p"]')
-    expect(option1080p.exists()).toBe(false)
+    expect(await videoResolutionChoices(wrapper)).toEqual(['480p', '720p'])
 
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video-1.5')
     await flushPromises()
-    expect(resolution.find('option[value="1080p"]').exists()).toBe(true)
+    expect(await videoResolutionChoices(wrapper)).toEqual(['480p', '720p', '1080p'])
 
-    await resolution.setValue('1080p')
+    await setVideoParams(wrapper, { resolution: '1080p' })
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video')
     await flushPromises()
-    expect(resolution.element.value).toBe('720p')
+    expect(wrapper.get('#video-params').attributes('data-resolution')).toBe('720p')
     wrapper.unmount()
   })
 
@@ -1352,8 +1429,8 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('reference')
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video-1.5')
-    expect(wrapper.get<HTMLSelectElement>('#video-aspect').element.value).toBe('2:3')
-    expect(wrapper.get<HTMLSelectElement>('#video-resolution').element.value).toBe('1080p')
+    expect(wrapper.get('#video-params').attributes('data-ratio')).toBe('2:3')
+    expect(wrapper.get('#video-params').attributes('data-resolution')).toBe('1080p')
     expect(wrapper.get('.reference-field').text()).toContain('当时使用了 3 张参考图')
     wrapper.unmount()
   })
@@ -1978,9 +2055,11 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('#creator-model').text()).toContain('grok-imagine-video')
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('text')
     expect(wrapper.find('.reference-field').exists()).toBe(false)
-    expect(wrapper.get<HTMLSelectElement>('#video-aspect').findAll('option').map(option => option.element.value)).toEqual([
-      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3',
+    await wrapper.get('#video-params').trigger('click')
+    expect(videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio'))).toEqual([
+      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2',
     ])
+    await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
 
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video-1.5')
     await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('image')
@@ -2036,6 +2115,7 @@ describe('CreatorStudioView', () => {
     await wrapper.findAll('.mode-option')[1].trigger('click')
     await flushPromises()
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video-1.5')
+    await setVideoParams(wrapper, { ratio: '4:3' })
     await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('image')
 
     const references = [
@@ -2051,8 +2131,17 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video-1.5')
     expect(showError).toHaveBeenCalledWith('已保留前 1 张有效参考图')
 
+    // Image-to-video follows the source image by default, so the ratio grid stays locked.
+    expect(wrapper.get('#video-params').text()).toContain('跟随原图')
+    await wrapper.get('#video-params').trigger('click')
+    const params = videoParamsDialog(wrapper)
+    expect(params.get('[data-aspect-source="follow"]').classes()).toContain('active')
+    expect(params.get('.video-aspect-source-hint').text()).toContain('跟随原图')
+    expect(params.findAll('.image-ratio-grid button').every(button => button.attributes('disabled') !== undefined)).toBe(true)
+    expect(params.find('.image-ratio-grid button.active').exists()).toBe(false)
+    await params.get('.image-size-cancel').trigger('click')
+
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('让源图中的人物自然转身')
-    await wrapper.get<HTMLSelectElement>('#video-aspect').setValue('4:3')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     await vi.waitFor(() => expect(createVideo).toHaveBeenCalledTimes(1))
@@ -2063,7 +2152,63 @@ describe('CreatorStudioView', () => {
       imageDataUrl: expect.stringMatching(/^data:image\/png;base64,/),
       referenceImageDataUrls: undefined,
     }))
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ shotFollowSourceAspects: [true] }))
     wrapper.unmount()
+  })
+
+  it('crops the image-to-video source to a custom ratio when the user opts out of following it', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video-1.5' }])
+    const header = new Uint8Array(24)
+    header.set([137, 80, 78, 71, 13, 10, 26, 10])
+    header.set([73, 72, 68, 82], 12)
+    new DataView(header.buffer).setUint32(16, 1600)
+    new DataView(header.buffer).setUint32(20, 900)
+    const cropped = 'data:image/png;base64,Y3JvcHBlZA=='
+    vi.stubGlobal('Image', class {
+      naturalWidth = 1600
+      naturalHeight = 900
+      onload?: () => void
+      set src(_source: string) { queueMicrotask(() => this.onload?.()) }
+    })
+    const drawImage = vi.fn()
+    const context = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    const dataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(cropped)
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('.mode-option')[1].trigger('click')
+      await flushPromises()
+      await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('image')
+      const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+      Object.defineProperty(input.element, 'files', { configurable: true, value: [new File([header], 'wide.png', { type: 'image/png' })] })
+      await input.trigger('change')
+      await flushPromises()
+
+      await wrapper.get('#video-params').trigger('click')
+      const params = videoParamsDialog(wrapper)
+      await params.get('[data-aspect-source="custom"]').trigger('click')
+      expect(params.get('.video-aspect-source-hint').text()).toContain('居中裁剪')
+      expect(params.findAll('.image-ratio-grid button').every(button => button.attributes('disabled') === undefined)).toBe(true)
+      await params.get('.image-ratio-grid button[data-ratio="9:16"]').trigger('click')
+      await params.get('.image-size-confirm').trigger('click')
+      expect(wrapper.get('#video-params').text()).toContain('9:16')
+
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('竖屏镜头缓慢推进')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      await vi.waitFor(() => expect(createVideo).toHaveBeenCalledTimes(1))
+
+      // 1600x900 center-cropped to 9:16 keeps the full height: 506x900 from x=547.
+      expect(drawImage).toHaveBeenCalledWith(expect.anything(), 547, 0, 506, 900, 0, 0, 506, 900)
+      expect(createVideo).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({ aspectRatio: '9:16', imageDataUrl: cropped }))
+      expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ shotFollowSourceAspects: [false] }))
+    } finally {
+      wrapper.unmount()
+      context.mockRestore()
+      dataURL.mockRestore()
+      vi.unstubAllGlobals()
+    }
   })
 
   it('keeps seven reference images and submits them through reference-to-video', async () => {
@@ -2091,7 +2236,7 @@ describe('CreatorStudioView', () => {
     expect(showError).toHaveBeenCalledWith('已保留前 7 张有效参考图')
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('保持这些人物、服装和产品一致')
-    await wrapper.get<HTMLSelectElement>('#video-aspect').setValue('2:3')
+    await setVideoParams(wrapper, { ratio: '2:3' })
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
     await vi.waitFor(() => expect(createVideo).toHaveBeenCalledTimes(1))
@@ -2288,7 +2433,7 @@ describe('CreatorStudioView', () => {
 
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第一个图生镜头')
     await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('image')
-    await wrapper.get<HTMLSelectElement>('#video-aspect').setValue('9:16')
+    await setVideoParams(wrapper, { ratio: '9:16' })
     const firstSource = new File(['first-source'], 'first-source.png', { type: 'image/png' })
     const input = wrapper.get<HTMLInputElement>('input[type="file"]')
     Object.defineProperty(input.element, 'files', { configurable: true, value: [firstSource] })
@@ -2303,8 +2448,8 @@ describe('CreatorStudioView', () => {
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个参考图镜头')
     await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('reference')
     await flushPromises()
-    await wrapper.get<HTMLSelectElement>('#video-aspect').setValue('16:9')
-    await wrapper.get<HTMLSelectElement>('#video-resolution').setValue('1080p')
+    await setVideoParams(wrapper, { ratio: '16:9' })
+    await setVideoParams(wrapper, { resolution: '1080p' })
     const secondReferences = [
       new File(['second-a'], 'second-a.png', { type: 'image/png' }),
       new File(['second-b'], 'second-b.png', { type: 'image/png' }),
@@ -2315,14 +2460,14 @@ describe('CreatorStudioView', () => {
 
     await wrapper.findAll('.sequence-shot')[0].trigger('click')
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('image')
-    expect(wrapper.get<HTMLSelectElement>('#video-aspect').element.value).toBe('9:16')
-    expect(wrapper.get<HTMLSelectElement>('#video-resolution').element.value).toBe('720p')
+    expect(wrapper.get('#video-params').attributes('data-ratio')).toBe('9:16')
+    expect(wrapper.get('#video-params').attributes('data-resolution')).toBe('720p')
     expect(wrapper.findAll('.reference-item')).toHaveLength(1)
 
     await wrapper.findAll('.sequence-shot')[1].trigger('click')
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('reference')
-    expect(wrapper.get<HTMLSelectElement>('#video-aspect').element.value).toBe('16:9')
-    expect(wrapper.get<HTMLSelectElement>('#video-resolution').element.value).toBe('1080p')
+    expect(wrapper.get('#video-params').attributes('data-ratio')).toBe('16:9')
+    expect(wrapper.get('#video-params').attributes('data-resolution')).toBe('1080p')
     expect(wrapper.findAll('.reference-item')).toHaveLength(2)
     expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('grok-imagine-video-1.5')
 
@@ -2381,7 +2526,8 @@ describe('CreatorStudioView', () => {
       size: '1024x1024',
       responseFormat: 'b64_json',
     }))
-    expect(wrapper.get<HTMLElement>('.result-media').attributes('style')).toBeUndefined()
+    expect(wrapper.get<HTMLElement>('.result-media').attributes('style')).toContain('aspect-ratio: 1 / 1')
+    expect(wrapper.get('.result-media').classes()).toContain('fitted')
     expect(wrapper.get('.result-media img').exists()).toBe(true)
     expect(wrapper.get('.result-parameters').text()).toContain('完成耗时')
     expect(wrapper.get('.result-parameters').text()).toContain('参考图')
@@ -3146,12 +3292,20 @@ describe('CreatorStudioView', () => {
     expect(total()).toBe('$0.80')
     await wrapper.get('button[title="增加时长"]').trigger('click')
     expect(total()).toBe('$0.90')
-    await wrapper.get('#video-resolution').setValue('480p')
+    await wrapper.get('#video-params').trigger('click')
+    const params = videoParamsDialog(wrapper)
+    expect(params.get('.image-resolution-grid button[data-resolution="480p"]').text()).toContain('$0.45 / 9 秒')
+    expect(params.get('.video-params-cost strong').text()).toBe('$0.90 USD')
+    await params.get('.image-resolution-grid button[data-resolution="480p"]').trigger('click')
+    expect(params.get('.video-params-cost strong').text()).toBe('$0.45 USD')
+    expect(total()).toBe('$0.90')
+    await params.get('.image-size-cancel').trigger('click')
+    await setVideoParams(wrapper, { resolution: '480p' })
     expect(total()).toBe('$0.45')
     await wrapper.get('.toggle-row input').setValue(true)
-    await wrapper.get('#video-resolution').setValue('720p')
+    await setVideoParams(wrapper, { resolution: '720p' })
     await wrapper.get('.sequence-add').trigger('click')
-    await wrapper.get('#video-resolution').setValue('480p')
+    await setVideoParams(wrapper, { resolution: '480p' })
     expect(total()).toBe('$1.20')
     await wrapper.get('button[title="增加时长"]').trigger('click')
     expect(total()).toBe('$1.25')
@@ -3194,7 +3348,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('.selected-shot-editor').exists()).toBe(false)
     expect(wrapper.get('.prompt-field label').text()).toBe('视频描述')
     expect(wrapper.get('.prompt-field > small').text()).toContain('镜头 1')
-    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 8 秒')
+    expect(wrapper.get('.video-duration-estimate .video-duration-value').text()).toBe('8 秒')
     expect(wrapper.get('.video-duration-estimate').text()).toContain('单段视频')
     await wrapper.get('.sequence-add').trigger('click')
     expect(wrapper.findAll('.sequence-shot')).toHaveLength(2)
@@ -3202,17 +3356,17 @@ describe('CreatorStudioView', () => {
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头的右侧编辑文案')
     expect(wrapper.findAll('.sequence-shot-prompt')[1].text()).toBe('第二个镜头的右侧编辑文案')
     expect(wrapper.find('.sequence-shot textarea, .sequence-shot input').exists()).toBe(false)
-    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 16 秒')
-    expect(wrapper.get('.video-duration-estimate').text()).toContain('按镜头顺序拼接')
+    expect(wrapper.get('.video-duration-estimate .video-duration-value').text()).toBe('16 秒')
+    expect(wrapper.get('.video-duration-estimate').text()).toContain('2 个镜头 · 按镜头顺序拼接')
 
     await wrapper.findAll('.sequence-shot')[0].trigger('click')
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('')
     await wrapper.get('.field-block .stepper button:last-child').trigger('click')
-    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 17 秒')
+    expect(wrapper.get('.video-duration-estimate .video-duration-value').text()).toBe('17 秒')
     expect(wrapper.find('.settings-panel input[type="range"]').exists()).toBe(false)
     await wrapper.get('button[title="减少时长"]').trigger('click')
     expect(wrapper.findAll('.sequence-shot')[0].text()).toContain('8 秒')
-    expect(wrapper.get('.video-duration-estimate').text()).toContain('预计总时长 16 秒')
+    expect(wrapper.get('.video-duration-estimate .video-duration-value').text()).toBe('16 秒')
     await wrapper.findAll('.sequence-shot')[1].trigger('click')
     expect(wrapper.get('.field-block .stepper strong').text()).toBe('8 秒')
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二个镜头的右侧编辑文案')

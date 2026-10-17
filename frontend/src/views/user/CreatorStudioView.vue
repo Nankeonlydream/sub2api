@@ -309,7 +309,7 @@
               <CreatorImage
                 v-if="selectedWork.type === 'image'"
                 class="result-media"
-                :class="{ landscape: resultIsLandscape(selectedWork) }"
+                :class="{ landscape: resultIsLandscape(selectedWork), fitted: resultIsFitted(selectedWork) }"
                 :style="resultMediaStyle(selectedWork)"
                 :src="output"
                 :cache-key="`${selectedWork.id}:${selectedWork.updatedAt}:${index}`"
@@ -587,9 +587,10 @@
           </article>
 
           <div class="quick-templates">
-            <span>其他企划</span>
-            <button v-for="template in activeTemplates.slice(0, 10)" :key="template.title" type="button" @click="useTemplate(template)">
-              <span>{{ template.title }}</span> <Icon name="arrowRight" size="xs" />
+            <span class="quick-templates-label">其他企划</span>
+            <button v-for="template in activeTemplates.slice(0, 10)" :key="template.title" type="button" :title="template.subtitle" @click="useTemplate(template)">
+              <span><strong>{{ template.title }}</strong><small>{{ template.tag }}</small></span>
+              <Icon name="arrowRight" size="xs" />
             </button>
           </div>
         </div>
@@ -729,13 +730,30 @@
             ></textarea>
           </div>
 
-          <div v-if="studioMode === 'video'" class="field-block">
-            <label for="video-generation-method">生成方式</label>
-            <select id="video-generation-method" v-model="activeVideoGenerationMethod" class="studio-input" :disabled="processingReferenceImages">
-              <option value="text">文生视频 · 只用提示词</option>
-              <option value="image">图生视频 · 1 张源图</option>
-              <option value="reference">参考图生视频 · 最多 7 张</option>
-            </select>
+          <div v-if="studioMode === 'video'" class="two-column-fields video-method-fields">
+            <div class="field-block">
+              <label for="video-generation-method">生成方式</label>
+              <select id="video-generation-method" v-model="activeVideoGenerationMethod" class="studio-input" :disabled="processingReferenceImages">
+                <option value="text">文生视频 · 只用提示词</option>
+                <option value="image">图生视频 · 1 张源图</option>
+                <option value="reference">参考图生视频 · 最多 7 张</option>
+              </select>
+            </div>
+            <div class="field-block">
+              <label for="video-params">视频参数</label>
+              <button
+                id="video-params"
+                type="button"
+                class="studio-input image-size-trigger"
+                aria-haspopup="dialog"
+                :data-ratio="activeVideoAspectRatio"
+                :data-resolution="activeVideoResolution"
+                @click="openVideoParamsDialog"
+              >
+                <span>{{ videoAspectFollowsSource ? '跟随原图' : activeVideoAspectRatio }} · {{ activeVideoResolution }}</span>
+                <Icon name="chevronDown" size="sm" />
+              </button>
+            </div>
           </div>
 
           <div v-if="referenceFieldVisible" class="field-block reference-field">
@@ -818,29 +836,6 @@
           </template>
 
           <template v-else>
-            <div class="two-column-fields">
-              <div class="field-block">
-                <label for="video-aspect">视频比例</label>
-                <select id="video-aspect" v-model="activeVideoAspectRatio" class="studio-input">
-                  <option value="1:1">1:1 方形</option>
-                  <option value="16:9">16:9 横屏</option>
-                  <option value="9:16">9:16 竖屏</option>
-                  <option value="4:3">4:3 横向</option>
-                  <option value="3:4">3:4 竖向</option>
-                  <option value="3:2">3:2 横向</option>
-                  <option value="2:3">2:3 竖向</option>
-                </select>
-              </div>
-              <div class="field-block">
-                <label for="video-resolution">清晰度</label>
-                <select id="video-resolution" v-model="activeVideoResolution" class="studio-input">
-                  <option value="480p">480p</option>
-                  <option value="720p">720p</option>
-                  <option v-if="videoSupports1080p" value="1080p">1080p</option>
-                </select>
-              </div>
-            </div>
-
             <div class="field-block">
               <label>{{ professionalVideo ? `镜头 ${selectedShotIndex + 1} 时长` : '视频时长' }}</label>
               <div class="stepper video-control-row">
@@ -848,11 +843,6 @@
                 <strong>{{ configuredVideoDuration }} 秒</strong>
                 <button type="button" title="增加时长" :disabled="configuredVideoDuration >= 15" @click="adjustVideoDuration(1)"><Icon name="plus" size="sm" /></button>
               </div>
-            </div>
-
-            <div class="video-duration-estimate video-control-row" aria-label="预计总时长">
-              <span>预计总时长 <strong>{{ estimatedVideoDuration }} 秒</strong></span>
-              <small>{{ estimatedVideoMode }}</small>
             </div>
 
             <label class="toggle-row professional-toggle video-control-row">
@@ -893,6 +883,10 @@
             <span v-else class="button-spinner"></span>
             {{ selectedGeneration ? '正在生成...' : '开始生成' }}
           </button>
+          <div v-if="studioMode === 'video'" class="video-duration-estimate video-control-row" aria-label="成片时长">
+            <span>成片时长 <strong class="video-duration-value">{{ estimatedVideoDuration }} 秒</strong></span>
+            <small>{{ estimatedVideoMode }}</small>
+          </div>
           <p v-if="professionalVideoReferenceError" class="generation-requirement">{{ professionalVideoReferenceError }}</p>
         </div>
       </aside>
@@ -908,6 +902,7 @@
       title="设置图像尺寸"
       width="normal"
       appearance="soft"
+      content-class="creator-dialog"
       :close-on-click-outside="true"
       @close="imageSizeDialogOpen = false"
     >
@@ -988,6 +983,87 @@
         <button type="button" class="image-size-confirm" @click="confirmImageSize">确定</button>
       </template>
     </BaseDialog>
+
+    <BaseDialog
+      :show="videoParamsDialogOpen"
+      title="设置视频参数"
+      width="normal"
+      appearance="soft"
+      content-class="creator-dialog"
+      :close-on-click-outside="true"
+      @close="videoParamsDialogOpen = false"
+    >
+      <div class="image-size-dialog video-params-dialog">
+        <p class="image-size-current">当前：<strong>{{ videoAspectFollowsSource ? '跟随原图' : videoAspectLabel(activeVideoAspectRatio) }} · {{ activeVideoResolution }} · {{ configuredVideoDuration }} 秒</strong></p>
+        <section class="image-size-section">
+          <h4>清晰度</h4>
+          <div class="image-resolution-grid" :style="{ gridTemplateColumns: 'repeat(' + videoResolutionOptions.length + ', minmax(0, 1fr))' }">
+            <button
+              v-for="resolution in videoResolutionOptions"
+              :key="resolution"
+              type="button"
+              :data-resolution="resolution"
+              :class="{ active: videoResolutionDraft === resolution }"
+              @click="videoResolutionDraft = resolution"
+            ><span>{{ resolution }}</span><small class="image-tier-price">{{ videoResolutionPriceLabel(resolution) }}</small></button>
+          </div>
+        </section>
+        <section class="image-size-section">
+          <h4>视频比例</h4>
+          <div v-if="videoUsesSourceImage" class="image-size-mode-tabs video-aspect-source-tabs" role="tablist" aria-label="视频比例来源">
+            <button
+              type="button"
+              role="tab"
+              data-aspect-source="follow"
+              :aria-selected="videoFollowSourceDraft"
+              :class="{ active: videoFollowSourceDraft }"
+              @click="videoFollowSourceDraft = true"
+            >跟随原图</button>
+            <button
+              type="button"
+              role="tab"
+              data-aspect-source="custom"
+              :aria-selected="!videoFollowSourceDraft"
+              :class="{ active: !videoFollowSourceDraft }"
+              @click="videoFollowSourceDraft = false"
+            >自定义比例</button>
+          </div>
+          <p v-if="videoUsesSourceImage" class="image-size-tier-hint video-aspect-source-hint">
+            {{ videoFollowSourceDraft ? '图生视频会跟随原图比例输出。' : '原图会按所选比例居中裁剪后再生成视频。' }}
+          </p>
+          <div class="image-ratio-grid video-ratio-grid">
+            <button
+              v-for="option in videoAspectOptions"
+              :key="option.value"
+              type="button"
+              :data-ratio="option.value"
+              :class="{ active: !videoAspectDraftFollowsSource && videoAspectDraft === option.value }"
+              :disabled="videoAspectDraftFollowsSource"
+              :title="videoAspectDraftFollowsSource ? '跟随原图' : undefined"
+              @click="videoAspectDraft = option.value"
+            >
+              <i :style="ratioShapeStyle(option.value)"></i>
+              <span>{{ option.value }}</span>
+            </button>
+          </div>
+        </section>
+        <div class="image-size-result video-params-result">
+          <div>
+            <span>将使用</span>
+            <strong>{{ videoAspectDraftFollowsSource ? '跟随原图' : videoAspectLabel(videoAspectDraft) }} · {{ videoResolutionDraft }}</strong>
+          </div>
+          <div class="video-params-cost" title="已计入当前适用倍率，最终以使用记录为准">
+            <span>{{ videoParamsCostNote }}</span>
+            <strong>{{ videoParamsDraftCost }}</strong>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <button type="button" class="image-size-cancel" @click="videoParamsDialogOpen = false">取消</button>
+        <button type="button" class="image-size-confirm" @click="confirmVideoParams">确定</button>
+      </template>
+    </BaseDialog>
     </section>
   </AppLayout>
 </template>
@@ -1062,6 +1138,8 @@ interface VideoShot {
   generationMethod: VideoGenerationMethod
   referenceImages: ReferenceImage[]
   aspectRatio: string
+  /** Image-to-video: keep the source shape, or crop it to aspectRatio. */
+  followSourceAspect: boolean
   resolution: string
 }
 
@@ -1090,6 +1168,7 @@ interface VideoGenerationSnapshot {
     duration: number
     resolution: string
     aspectRatio: string
+    followSourceAspect: boolean
     generationMethod: VideoGenerationMethod
     referenceFiles: File[]
   }>
@@ -1215,6 +1294,18 @@ const defaultAspectOptions = [
   { value: '9:16', label: '9:16 竖屏' },
 ]
 
+const videoAspectOptions = [
+  { value: '1:1', label: '1:1 方形' },
+  { value: '16:9', label: '16:9 横屏' },
+  { value: '9:16', label: '9:16 竖屏' },
+  { value: '4:3', label: '4:3 横向' },
+  { value: '3:4', label: '3:4 竖向' },
+  { value: '3:2', label: '3:2 横向' },
+  { value: '2:3', label: '2:3 竖向' },
+  { value: '21:9', label: '21:9 超宽' },
+  { value: '5:2', label: '5:2 超宽' },
+]
+
 const image2RatioOptions = [
   { value: '1:1', label: '1:1 方形' },
   { value: '3:2', label: '3:2 横向' },
@@ -1280,6 +1371,10 @@ const imageSizeMode = ref<ImageSizeMode>('ratio')
 const imageCustomWidth = ref(1024)
 const imageCustomHeight = ref(1024)
 const imageSizeDialogOpen = ref(false)
+const videoParamsDialogOpen = ref(false)
+const videoAspectDraft = ref('16:9')
+const videoFollowSourceDraft = ref(true)
+const videoResolutionDraft = ref('720p')
 const imageSizeDraftMode = ref<ImageSizeMode>('ratio')
 const imageSizeDraftResolution = ref('1K')
 const imageSizeDraftRatio = ref('1:1')
@@ -1287,6 +1382,7 @@ const imageSizeDraftWidth = ref(1024)
 const imageSizeDraftHeight = ref(1024)
 const videoResolution = ref('720p')
 const videoGenerationMethod = ref<VideoGenerationMethod>('text')
+const videoFollowSourceAspect = ref(true)
 const imageQuality = ref('auto')
 const outputFormat = ref('png')
 const outputCount = ref(1)
@@ -1299,6 +1395,7 @@ const videoShots = ref<VideoShot[]>([{
   generationMethod: 'text',
   referenceImages: [],
   aspectRatio: '16:9',
+  followSourceAspect: true,
   resolution: '720p',
 }])
 const selectedShotId = ref(videoShots.value[0].id)
@@ -1427,6 +1524,20 @@ const activeVideoAspectRatio = computed({
     else aspectRatio.value = value
   },
 })
+const activeVideoFollowSourceAspect = computed({
+  get: () => professionalVideo.value
+    ? selectedShot.value?.followSourceAspect ?? true
+    : videoFollowSourceAspect.value,
+  set: value => {
+    if (professionalVideo.value && selectedShot.value) selectedShot.value.followSourceAspect = value
+    else videoFollowSourceAspect.value = value
+  },
+})
+// xAI ignores aspect_ratio for image-to-video and keeps the source image's shape.
+// Users can keep that default or have the source cropped to a chosen ratio.
+const videoUsesSourceImage = computed(() => activeVideoGenerationMethod.value === 'image' && activeReferenceImages.value.length > 0)
+const videoAspectFollowsSource = computed(() => videoUsesSourceImage.value && activeVideoFollowSourceAspect.value)
+const videoAspectDraftFollowsSource = computed(() => videoUsesSourceImage.value && videoFollowSourceDraft.value)
 const activeVideoResolution = computed({
   get: () => professionalVideo.value
     ? selectedShot.value?.resolution || '720p'
@@ -1615,9 +1726,42 @@ const videoPricingNote = computed(() => {
   if (videoPricingLoading.value) return '正在获取价格'
   if (videoEstimatedAmount.value == null) return '价格暂未获取'
   return professionalVideo.value
-    ? `${videoShots.value.length} 个镜头 · 共 ${estimatedVideoDuration.value} 秒 · 按各镜头清晰度汇总`
-    : `${videoResolution.value} · ${videoDuration.value} 秒 · 已计入当前适用倍率`
+    ? '按各镜头清晰度汇总 · 已计入当前适用倍率'
+    : `${videoResolution.value} · 已计入当前适用倍率`
 })
+// Price of one shot at the current (or selected shot's) duration.
+function videoShotPrice(resolution: string, duration: number) {
+  const cost = videoPricing.value?.prices[resolution]?.[Number(duration) - 1]
+  return cost != null && Number.isFinite(cost) ? cost : null
+}
+function videoResolutionPriceLabel(resolution: string) {
+  if (videoPricingLoading.value) return '正在查询…'
+  const cost = videoShotPrice(resolution, configuredVideoDuration.value)
+  return cost == null ? '价格待确认' : `${formatScaled(cost, 1, 2)} / ${configuredVideoDuration.value} 秒`
+}
+// Dialog quote: in the professional workspace only the selected shot changes,
+// so the total keeps the other shots' saved resolutions.
+const videoParamsDraftAmount = computed(() => {
+  if (!videoPricing.value) return null
+  const shots = professionalVideo.value
+    ? videoShots.value.map(shot => shot.id === selectedShot.value?.id ? { ...shot, resolution: videoResolutionDraft.value } : shot)
+    : [{ resolution: videoResolutionDraft.value, duration: videoDuration.value }]
+  if (!shots.length) return null
+  let total = 0
+  for (const shot of shots) {
+    const cost = videoShotPrice(shot.resolution, shot.duration)
+    if (cost == null) return null
+    total += cost
+  }
+  return total
+})
+const videoParamsDraftCost = computed(() => {
+  if (videoPricingLoading.value) return '正在查询…'
+  return videoParamsDraftAmount.value == null ? '暂无法预估' : `${formatScaled(videoParamsDraftAmount.value, 1, 2)} USD`
+})
+const videoParamsCostNote = computed(() => professionalVideo.value
+  ? `预计费用 · ${videoShots.value.length} 个镜头 · 共 ${estimatedVideoDuration.value} 秒`
+  : `预计费用 · ${videoResolutionDraft.value} · ${videoDuration.value} 秒`)
 async function loadVideoPricing() {
   videoPricingRequest?.abort()
   const request = new AbortController()
@@ -1636,7 +1780,7 @@ async function loadVideoPricing() {
     if (videoPricingRequest === request) videoPricingLoading.value = false
   }
 }
-const estimatedVideoMode = computed(() => professionalVideo.value && videoShots.value.length > 1 ? '按镜头顺序拼接' : '单段视频')
+const estimatedVideoMode = computed(() => professionalVideo.value && videoShots.value.length > 1 ? `${videoShots.value.length} 个镜头 · 按镜头顺序拼接` : '单段视频')
 const effectivePrompt = computed(() => {
   if (studioMode.value === 'video' && professionalVideo.value) {
     return videoShots.value[0]?.prompt.trim() || ''
@@ -1936,6 +2080,7 @@ async function switchMode(mode: StudioMode) {
   aspectRatio.value = mode === 'image' ? '1:1' : '16:9'
   if (mode === 'video') {
     videoGenerationMethod.value = 'text'
+    videoFollowSourceAspect.value = true
     selectedShotId.value = videoShots.value[0]?.id || ''
   }
   await nextTick()
@@ -2188,6 +2333,24 @@ function confirmImageSize() {
   imageSizeDialogOpen.value = false
 }
 
+function videoAspectLabel(ratio: string) {
+  return videoAspectOptions.find(option => option.value === ratio)?.label || ratio
+}
+
+function openVideoParamsDialog() {
+  videoAspectDraft.value = activeVideoAspectRatio.value
+  videoFollowSourceDraft.value = activeVideoFollowSourceAspect.value
+  videoResolutionDraft.value = activeVideoResolution.value
+  videoParamsDialogOpen.value = true
+}
+
+function confirmVideoParams() {
+  activeVideoAspectRatio.value = videoAspectDraft.value
+  activeVideoFollowSourceAspect.value = videoFollowSourceDraft.value
+  activeVideoResolution.value = videoResolutionDraft.value
+  videoParamsDialogOpen.value = false
+}
+
 function ratioShapeStyle(ratio: string) {
   const [width, height] = ratio.split(':').map(Number)
   if (!width || !height) return undefined
@@ -2234,6 +2397,7 @@ async function generateFromCurrentSettings(source: string) {
           duration: Number(shot.duration),
           resolution: shot.resolution,
           aspectRatio: shot.aspectRatio,
+          followSourceAspect: shot.followSourceAspect,
           generationMethod: shot.generationMethod,
           referenceFiles: shot.referenceImages.map(reference => reference.file),
         }))
@@ -2242,6 +2406,7 @@ async function generateFromCurrentSettings(source: string) {
           duration: videoDuration.value,
           resolution: videoResolution.value,
           aspectRatio: aspectRatio.value,
+          followSourceAspect: videoFollowSourceAspect.value,
           generationMethod: videoGenerationMethod.value,
           referenceFiles: referenceImages.value.map(reference => reference.file),
         }]
@@ -2308,6 +2473,7 @@ async function generateFromCurrentSettings(source: string) {
     shotResolutions: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.resolution) : undefined,
     shotGenerationMethods: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.generationMethod) : undefined,
     shotReferenceCounts: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.referenceFiles.length) : undefined,
+    shotFollowSourceAspects: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.followSourceAspect) : undefined,
     version: 'v1',
     source,
   }
@@ -2514,6 +2680,20 @@ async function normalizeCreatorImageOutput(output: string, requestedRatio: strin
   })
 }
 
+// Image-to-video keeps the source shape, so a custom ratio is applied by
+// center-cropping the source at its own resolution before submission.
+async function cropSourceImageToRatio(source: string, ratio: string) {
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(ratio || '')
+  const size = /^(\d+)x(\d+)$/.exec(await readCreatorImageSize(source))
+  if (!match || !size) return source
+  const targetRatio = Number(match[1]) / Number(match[2])
+  const width = Number(size[1])
+  const height = Number(size[2])
+  const cropWidth = width / height > targetRatio ? Math.round(height * targetRatio) : width
+  const cropHeight = width / height > targetRatio ? height : Math.round(width / targetRatio)
+  return normalizeCreatorImageOutput(source, ratio, `${cropWidth}x${cropHeight}`)
+}
+
 async function normalizeHistoricalImageWork(work: CreatorHistoryItem) {
   if (work.type === 'image' && work.imageCapability !== 'image2') {
     if (work.upstreamImageSizes || !work.outputs.length) return
@@ -2606,7 +2786,10 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
   for (let index = 0; index < shots.length; index++) {
     const shot = shots[index]
     const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
-    const imageDataUrl = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
+    const sourceImage = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
+    const imageDataUrl = sourceImage && !shot.followSourceAspect
+      ? await cropSourceImageToRatio(sourceImage, shot.aspectRatio)
+      : sourceImage
     const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
     task.phase = 'submitting'
     task.hasExactProgress = false
@@ -2757,6 +2940,7 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
     shotResolutions: work.shotResolutions ? [...work.shotResolutions] : undefined,
     shotGenerationMethods: work.shotGenerationMethods ? [...work.shotGenerationMethods] : undefined,
     shotReferenceCounts: work.shotReferenceCounts ? [...work.shotReferenceCounts] : undefined,
+    shotFollowSourceAspects: work.shotFollowSourceAspects ? [...work.shotFollowSourceAspects] : undefined,
     shotActualOutputSizes: work.shotActualOutputSizes ? [...work.shotActualOutputSizes] : undefined,
   }
 }
@@ -3088,6 +3272,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       videoResolution.value = historicalVideoResolution
       videoGenerationMethod.value = work.videoGenerationMethod
         || (work.referenceCount ? 'image' : 'text')
+      videoFollowSourceAspect.value = work.shotFollowSourceAspects?.[0] ?? true
     }
 
     const historicalGroup = groups.value.find(group => group.id === work.groupId)
@@ -3108,6 +3293,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
         generationMethod: work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text',
         referenceImages: [],
         aspectRatio: work.shotAspectRatios?.[index] || work.aspectRatio || '16:9',
+        followSourceAspect: work.shotFollowSourceAspects?.[index] ?? true,
         resolution: work.shotResolutions?.[index] || historicalVideoResolution,
       }))
       selectedShotId.value = videoShots.value[0].id
@@ -3282,10 +3468,11 @@ function newCreation() {
     videoShots.value = [{
       id: crypto.randomUUID(), prompt: '', duration: videoDuration.value,
       generationMethod: 'text', referenceImages: [],
-      aspectRatio: aspectRatio.value, resolution: videoResolution.value,
+      aspectRatio: aspectRatio.value, followSourceAspect: true, resolution: videoResolution.value,
     }]
     selectedShotId.value = videoShots.value[0].id
     videoGenerationMethod.value = 'text'
+    videoFollowSourceAspect.value = true
   }
   restoreSettingsScroll()
 }
@@ -3344,6 +3531,9 @@ function shotDurationLabel(work: CreatorHistoryItem, index: number) {
 }
 
 function workAspectRatio(work: CreatorHistoryItem, index?: number) {
+  const shotIndex = index ?? 0
+  const method = work.shotGenerationMethods?.[shotIndex] || work.videoGenerationMethod
+  if (work.type === 'video' && method === 'image' && work.shotFollowSourceAspects?.[shotIndex] === true) return '跟随原图'
   return index === undefined
     ? work.aspectRatio || '自动画幅'
     : work.shotAspectRatios?.[index] || work.aspectRatio || '自动画幅'
@@ -3400,6 +3590,12 @@ function resultIsLandscape(work: CreatorHistoryItem) {
   return work.type === 'image' && !!match && Number(match[1]) > Number(match[2])
 }
 
+// Portrait and square images with a known ratio size the frame to the image so
+// narrow grid cards do not letterbox; auto-ratio images keep the fixed frame.
+function resultIsFitted(work: CreatorHistoryItem) {
+  return work.type === 'image' && !resultIsLandscape(work) && /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.test(work.aspectRatio || '')
+}
+
 function resultMediaStyle(work: CreatorHistoryItem, index?: number) {
   if (work.type === 'video') {
     return {
@@ -3407,7 +3603,7 @@ function resultMediaStyle(work: CreatorHistoryItem, index?: number) {
       maxHeight: 'min(58vh, 620px)',
     }
   }
-  return resultIsLandscape(work) ? { aspectRatio: resultAspectRatio(work) } : undefined
+  return resultIsLandscape(work) || resultIsFitted(work) ? { aspectRatio: resultAspectRatio(work) } : undefined
 }
 
 function handleVideoMetadata(event: Event, work: CreatorHistoryItem, index = 0, scope = 'segment') {
@@ -3480,6 +3676,7 @@ function addShot() {
     generationMethod: previous?.generationMethod || videoGenerationMethod.value,
     referenceImages: [],
     aspectRatio: previous?.aspectRatio || aspectRatio.value || '16:9',
+    followSourceAspect: previous?.followSourceAspect ?? true,
     resolution: previous?.resolution || videoResolution.value,
   }
   videoShots.value.push(shot)
@@ -3691,6 +3888,7 @@ onDeactivated(() => {
   window.removeEventListener('paste', handlePaste)
   stopTemplateAutoplay()
   imageSizeDialogOpen.value = false
+  videoParamsDialogOpen.value = false
   previewUrl.value = ''
   studioElement.value?.querySelectorAll<HTMLVideoElement>('video').forEach(video => video.pause())
 })
@@ -3725,16 +3923,21 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.creator-studio {
+/* Dialogs teleport to <body>, so they need their own copy of the design tokens. */
+.creator-studio,
+:global(.creator-dialog) {
   --creator-accent: #0f9f8f;
   --creator-accent-strong: #087f74;
   --creator-accent-soft: #e8faf6;
   --creator-line: #dfe8e7;
   --creator-muted: #738096;
   --creator-radius: 12px;
-  --creator-radius-inner: 12px;
+  --creator-radius-small: 8px;
   --creator-surface-radius: 16px;
   --creator-radius-large: var(--creator-surface-radius);
+}
+
+.creator-studio {
   --creator-workspace-gutter: 2rem;
   --creator-workspace-width: calc(100% - 4rem);
   position: relative;
@@ -3778,7 +3981,7 @@ onBeforeUnmount(() => {
 }
 
 .studio-title { gap: 10px; font-size: 16px; font-weight: 700; }
-.studio-title-icon { justify-content: center; width: 30px; height: 30px; color: var(--creator-accent-strong); background: var(--creator-accent-soft); border-radius: 7px; }
+.studio-title-icon { justify-content: center; width: 30px; height: 30px; color: var(--creator-accent-strong); background: var(--creator-accent-soft); border-radius: var(--creator-radius-small); }
 
 .mode-switch {
   display: grid;
@@ -3796,7 +3999,7 @@ onBeforeUnmount(() => {
   gap: 8px;
   min-height: 40px;
   border: 1px solid transparent;
-  border-radius: var(--creator-radius-large);
+  border-radius: var(--creator-radius);
   color: #718096;
   font-size: 13px;
   font-weight: 650;
@@ -3810,7 +4013,7 @@ onBeforeUnmount(() => {
   width: 30px;
   height: 30px;
   border: 1px solid #d2dfde;
-  border-radius: var(--creator-radius-inner);
+  border-radius: var(--creator-radius-small);
   color: #72859a;
   background: #f8fbfb;
   transition: 160ms ease;
@@ -3826,18 +4029,18 @@ onBeforeUnmount(() => {
 .mode-option-video.active .mode-option-icon { border-color: #b9d3ff; color: #2563eb; background: #eff6ff; }
 
 .toolbar-actions { justify-content: flex-end; gap: 8px; }
-.new-creation-link { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid #9cd9cf; border-radius: 10px; background: #effbf8; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.new-creation-link { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid #9cd9cf; border-radius: var(--creator-radius); background: #effbf8; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .new-creation-link:hover { background: #dcf7ef; border-color: var(--creator-accent); }
 .new-creation-link:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 3px; }
 .generation-tasks { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 10px 20px; border-bottom: 1px solid var(--creator-line); overflow-x: auto; }
 .generation-tasks-label { flex-shrink: 0; font-size: 12px; color: var(--creator-muted); }
-.generation-task { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; max-width: 220px; padding: 8px 12px; border: 1px solid var(--creator-line); border-radius: 8px; font-size: 12px; color: var(--creator-accent-strong); }
+.generation-task { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; max-width: 220px; padding: 8px 12px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius); font-size: 12px; color: var(--creator-accent-strong); }
 .generation-task > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .generation-task .button-spinner { border-color: #c6e8df; border-top-color: var(--creator-accent); flex-shrink: 0; width: 12px; height: 12px; }
 .generation-task.active, .generation-task:hover { background: var(--creator-accent-soft); border-color: var(--creator-accent); }
 .generation-task:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
 .pending-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.generation-new-creation { min-height: 40px; gap: 8px; padding: 0 16px; border-color: var(--creator-accent); border-radius: var(--creator-radius-large); background: var(--creator-accent); color: #fff; font-size: 13px; font-weight: 600; box-shadow: 0 6px 16px rgb(15 159 143 / 20%); transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
+.generation-new-creation { min-height: 40px; gap: 8px; padding: 0 16px; border-color: var(--creator-accent); border-radius: var(--creator-radius); background: var(--creator-accent); color: #fff; font-size: 13px; font-weight: 600; box-shadow: 0 6px 16px rgb(15 159 143 / 20%); transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
 .generation-new-creation:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); box-shadow: 0 8px 20px rgb(15 159 143 / 25%); }
 .ready-status {
   white-space: nowrap;
@@ -3862,7 +4065,7 @@ onBeforeUnmount(() => {
   width: 36px;
   height: 36px;
   border: 0;
-  border-radius: 11px;
+  border-radius: var(--creator-radius);
   color: #455468;
   background: transparent;
   transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease;
@@ -3882,7 +4085,7 @@ onBeforeUnmount(() => {
   width: 34px;
   height: 34px;
   border: 1px solid #dbe5e4;
-  border-radius: 7px;
+  border-radius: var(--creator-radius);
   color: #536176;
   background: #fff;
   transition: 150ms ease;
@@ -3915,7 +4118,7 @@ onBeforeUnmount(() => {
   gap: 6px;
   padding: 0 10px;
   border-color: #dbe5e4;
-  border-radius: 10px;
+  border-radius: var(--creator-radius);
   color: #64748b;
   background: #fff;
   font-size: 12px;
@@ -3931,10 +4134,10 @@ onBeforeUnmount(() => {
 .settings-heading h2 { margin: 0; color: #172033; font-size: 16px; font-weight: 750; }
 .history-heading p,
 .settings-heading p { margin: 3px 0 0; color: var(--creator-muted); font-size: 12px; }
-.history-count { display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border-radius: 7px; color: #8794a8; background: #f1f5f8; font-size: 12px; font-weight: 700; }
+.history-count { display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border-radius: var(--creator-radius-small); color: #8794a8; background: #f1f5f8; font-size: 12px; font-weight: 700; }
 .collapse-action { width: 34px; }
-.history-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 16px 14px; padding: 4px; border: 1px solid var(--creator-line); border-radius: 8px; background: #f2f7f6; }
-.history-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; border-radius: 6px; color: #8090a6; font-size: 12px; font-weight: 650; }
+.history-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 16px 14px; padding: 4px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius-large); background: #f2f7f6; }
+.history-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; border-radius: var(--creator-radius); color: #8090a6; font-size: 12px; font-weight: 650; }
 .history-tabs button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 2px 8px rgb(30 72 67 / 8%); }
 
 .history-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 12px 18px; scrollbar-color: #c5cbd1 transparent; scrollbar-width: thin; }
@@ -3942,12 +4145,12 @@ onBeforeUnmount(() => {
 .history-list::-webkit-scrollbar-track { background: transparent; }
 .history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
 .history-list::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
-.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: 8px; text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
+.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: var(--creator-radius); text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
 .history-item:hover { border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
 .history-item.active { border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
 .history-item-hitbox { position: absolute; z-index: 1; inset: 0; border-radius: inherit; }
 .history-item-hitbox:focus-visible { outline: 2px solid #39b9a5; outline-offset: -3px; }
-.history-preview { position: relative; display: grid; place-items: center; width: 52px; height: 52px; overflow: hidden; border-radius: 6px; color: #8da09e; background: #e8f0ef; }
+.history-preview { position: relative; display: grid; place-items: center; width: 52px; height: 52px; overflow: hidden; border-radius: var(--creator-radius-small); color: #8da09e; background: #e8f0ef; }
 .history-preview img,
 .history-preview video { width: 100%; height: 100%; object-fit: cover; }
 .history-status { position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; }
@@ -3964,12 +4167,12 @@ onBeforeUnmount(() => {
 .history-item:hover .history-item-actions,
 .history-item:focus-within .history-item-actions,
 .history-item.active .history-item-actions { opacity: 1; pointer-events: auto; }
-.history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: 6px; color: #8295a4; }
+.history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: var(--creator-radius-small); color: #8295a4; }
 .history-item-actions .history-delete { width: 28px; height: 28px; border-radius: 50%; }
 .history-item-actions button:hover { color: var(--creator-accent-strong); background: rgb(255 255 255 / 78%); }
 .history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
 .history-empty { display: grid; justify-items: center; padding: 90px 22px 30px; text-align: center; color: #92a0b3; }
-.history-empty > span { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 14px; border-radius: 8px; background: #f3f7f7; }
+.history-empty > span { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 14px; border-radius: var(--creator-radius); background: #f3f7f7; }
 .history-empty strong { color: #58667a; font-size: 14px; }
 .history-empty p { margin: 7px 0 0; font-size: 12px; }
 
@@ -4004,10 +4207,10 @@ onBeforeUnmount(() => {
   /* Historical results should start at the top of the scrollable canvas. */
   margin-block: 0;
 }
-.inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 64px; }
+.inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 24px; }
 .inspiration-intro { text-align: center; }
 .inspiration-mark,
-.generation-orbit { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: 20px; color: var(--creator-accent-strong); background: #e8fbf7; }
+.generation-orbit { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #e8fbf7; }
 .eyebrow { margin: 18px 0 10px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: 0; }
 .inspiration-intro h2,
 .generation-state h2,
@@ -4015,7 +4218,7 @@ onBeforeUnmount(() => {
 .inspiration-intro > p:last-child,
 .generation-state > p:not(.eyebrow) { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
 
-.featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-surface-radius); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
+.featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-radius-large); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
 .brief-topline { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; min-height: 60px; margin: 0 24px; border-bottom: 1px solid #2b3e3b; color: #9db3af; font-size: 11px; font-weight: 700; }
 .brief-topline > span:first-child { display: flex; align-items: center; gap: 6px; color: #b5d8d1; }
 .brief-topline > div { display: flex; gap: 7px; }
@@ -4023,14 +4226,14 @@ onBeforeUnmount(() => {
 .brief-stage { height: 256px; overflow: hidden; }
 .brief-body { display: grid; grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr); height: 100%; min-height: 0; padding: 24px; }
 .brief-summary { display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding-right: 24px; border-right: 1px solid #33423f; }
-.brief-summary > span { display: inline-flex; padding: 5px 9px; border: 1px solid #9a7744; border-radius: 6px; color: #d6b374; background: #28251e; font-size: 10px; }
+.brief-summary > span { display: inline-flex; padding: 5px 9px; border: 1px solid #9a7744; border-radius: var(--creator-radius-small); color: #d6b374; background: #28251e; font-size: 10px; }
 .brief-summary h3 { margin: 16px 0 7px; color: #fff; font-size: 28px; font-weight: 760; }
 .brief-summary p { margin: 0; color: #a7b6b3; font-size: 12px; line-height: 1.7; }
 .brief-summary small { display: block; margin-top: auto; padding-top: 16px; color: #788b87; font-size: 10px; }
 .brief-copy { display: flex; align-items: flex-start; flex-direction: column; min-width: 0; min-height: 0; padding-left: 24px; }
 .brief-copy > small { flex-shrink: 0; color: #c2d3cf; font-size: 10px; font-weight: 800; letter-spacing: 0; }
 .brief-copy p { flex: 1; align-self: stretch; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #5c716d transparent; margin: 14px 0; color: #d2dedb; font-size: 13px; line-height: 1.8; }
-.brief-copy button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: 7px; color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; }
+.brief-copy button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: var(--creator-radius); color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; }
 .brief-copy button:hover { background: #edcc82; }
 .brief-slide-enter-active,
 .brief-slide-leave-active { transition: opacity 220ms ease, transform 220ms ease; }
@@ -4045,20 +4248,31 @@ onBeforeUnmount(() => {
 .brief-range::-moz-range-thumb { width: 8px; height: 8px; border: 2px solid #101d1b; border-radius: 50%; background: #dfba69; box-shadow: 0 0 0 1px rgb(223 186 105 / 35%); }
 .brief-range:hover::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgb(223 186 105 / 14%); }
 .brief-range:focus-visible { outline: 2px solid #dfba69; outline-offset: 4px; }
-.brief-position { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; min-width: 64px; justify-content: center; padding: 5px 8px; border: 1px solid #354a44; border-radius: 8px; background: #192b25; font-size: 11px; font-variant-numeric: tabular-nums; }
+.brief-position { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; min-width: 64px; justify-content: center; padding: 5px 8px; border: 1px solid #354a44; border-radius: var(--creator-radius); background: #192b25; font-size: 11px; font-variant-numeric: tabular-nums; }
 .brief-position strong { color: #dfba69; font-weight: 650; }
 .brief-position > span { color: #91a59e; }
-.quick-templates { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin-top: 16px; }
-.quick-templates > span { grid-column: 1 / -1; color: #93a0b0; font-size: 11px; }
-.quick-templates button { display: inline-flex; align-items: center; justify-content: space-between; gap: 5px; min-width: 0; min-height: 34px; padding: 0 11px; border: 1px solid #d7e5e2; border-radius: 7px; color: #52716d; background: #fff; font-size: 11px; font-weight: 650; }
-.quick-templates button > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.quick-templates button > svg { flex-shrink: 0; }
-.quick-templates button:hover { border-color: #93d9ce; color: var(--creator-accent-strong); }
+.quick-templates { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 22px; }
+/* Section label with a hairline rule, so the chips read as a group rather than a form. */
+.quick-templates-label { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; color: #7d8b9c; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.quick-templates-label::after { content: ''; flex: 1; height: 1px; background: #e1eae8; }
+.quick-templates button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius); background: #fff; text-align: left; transition: border-color 160ms ease, background 160ms ease, transform 160ms ease; }
+.quick-templates button > span { display: grid; gap: 3px; min-width: 0; }
+.quick-templates button strong { overflow: hidden; color: #2f4642; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
+.quick-templates button small { overflow: hidden; color: #94a3a0; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.quick-templates button > svg { flex-shrink: 0; color: var(--creator-accent); opacity: 0; transform: translateX(-4px); transition: opacity 160ms ease, transform 160ms ease; }
+.quick-templates button:hover,
+.quick-templates button:focus-visible { border-color: #93d9ce; background: #f6fcfb; transform: translateY(-1px); }
+.quick-templates button:hover strong,
+.quick-templates button:focus-visible strong { color: var(--creator-accent-strong); }
+.quick-templates button:hover > svg,
+.quick-templates button:focus-visible > svg { opacity: 1; transform: none; }
+@media (hover: none) { .quick-templates button > svg { opacity: .6; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .quick-templates button, .quick-templates button > svg { transition: none; transform: none; } }
 
 .generation-state { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 16px; padding-block: 24px; text-align: center; }
 .generation-state > p:not(.eyebrow) { margin: 0; }
 .generation-orbit { position: relative; width: 76px; height: 76px; margin-bottom: 0; border-radius: 50%; animation: creatorPulse 2.2s ease-in-out infinite; }
-.generation-orbit::before { position: absolute; inset: 8px; border: 1px solid #9ee8dc; border-radius: 16px; background: #edfcf8; content: ''; }
+.generation-orbit::before { position: absolute; inset: 8px; border: 1px solid #9ee8dc; border-radius: var(--creator-radius-large); background: #edfcf8; content: ''; }
 .generation-orbit::after { position: absolute; inset: -5px; border: 2px solid #a9f0e4; border-right-color: var(--creator-accent-strong); border-radius: 50%; content: ''; animation: creatorSpin 2.4s linear infinite; }
 .generation-orbit > svg { position: relative; z-index: 1; }
 .generation-metrics { display: flex; align-items: center; gap: 10px; min-height: 30px; margin: 0; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; }
@@ -4084,16 +4298,16 @@ onBeforeUnmount(() => {
 .result-heading-actions .icon-action { flex-shrink: 0; width: 34px; height: 34px; }
 .result-heading-actions .primary-soft { border-color: var(--creator-accent); color: #fff; background: var(--creator-accent); }
 .result-heading-actions .primary-soft:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); }
-.complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
+.complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
 .complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #dce7e5; }
 .complete-video-card > header > div { min-width: 0; }
 .complete-video-card > header .eyebrow { margin: 0 0 4px; font-weight: 600; }
 .complete-video-card > header h3 { margin: 0; color: #172033; font-size: 16px; font-weight: 700; line-height: 1.4; }
 .complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; font-weight: 400; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius); white-space: nowrap; color: #5d716d; background: #f7faf9; font-size: 10px; }
+.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-small); white-space: nowrap; color: #5d716d; background: #f7faf9; font-size: 10px; }
 .complete-video-frame,
-.video-result-frame { position: relative; width: 100%; overflow: hidden; background: #101b1a; }
-.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: inherit; max-height: min(58vh, 620px); }
+.video-result-frame { position: relative; width: 100%; overflow: hidden; }
+.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
 .video-result-frame { display: grid; border-radius: inherit; max-height: min(58vh, 620px); }
 .video-loading-overlay,
 .video-loading-media { color: #dcebe8; background: #142321; }
@@ -4129,7 +4343,10 @@ onBeforeUnmount(() => {
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .result-grid.single { grid-template-columns: minmax(0, 1fr); }
 .result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
-.result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: 6px; color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
+/* Media sits flush against the card edge: round only the top corners (outer radius minus the 1px border) so it meets the caption without a gap. */
+.result-card > .result-media,
+.result-card > .video-result-frame { border-radius: calc(var(--creator-radius-large) - 1px) calc(var(--creator-radius-large) - 1px) 0 0; }
+.result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: var(--creator-radius-small); color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
 .result-media {
   position: relative;
   display: grid;
@@ -4140,6 +4357,7 @@ onBeforeUnmount(() => {
   background: #e8f0ee;
 }
 .result-media.landscape { height: auto; }
+.result-media.fitted { height: auto; max-height: clamp(340px, 70vh, 720px); }
 .result-media img {
   position: absolute;
   inset: 0;
@@ -4150,7 +4368,7 @@ onBeforeUnmount(() => {
 }
 .result-media.landscape img { object-fit: cover; }
 .result-media.video { display: block; width: 100%; height: auto; object-fit: contain; }
-.result-actions { justify-content: space-between; gap: 16px; min-height: 76px; padding: 11px 10px 11px 14px; color: #64748b; font-size: 13px; }
+.result-actions { justify-content: space-between; gap: 16px; min-height: 76px; padding: 12px 14px 12px 16px; border-top: 1px solid #e6eeec; color: #64748b; font-size: 13px; }
 .result-description { min-width: 0; flex: 1; }
 .result-description strong { color: var(--creator-accent-strong); font-size: 14px; }
 .result-description span { margin-left: 6px; color: #718096; font-size: 12px; }
@@ -4160,7 +4378,7 @@ onBeforeUnmount(() => {
 .result-workspace .icon-action,
 .result-workspace .secondary-command { border-radius: var(--creator-radius); }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
-.result-error { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #e7b4ae; border-radius: 8px; color: #b64b42; background: #fff8f7; text-align: center; }
+.result-error { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #e7b4ae; border-radius: var(--creator-radius-large); color: #b64b42; background: #fff8f7; text-align: center; }
 .result-error strong { margin-top: 14px; color: #7b312b; }
 .result-error p { margin: 7px 0 18px; color: #98635e; font-size: 12px; }
 .result-error.muted { border-color: #cbdad7; color: #758a87; background: #f5f9f8; }
@@ -4169,18 +4387,18 @@ onBeforeUnmount(() => {
 .status-check-icon { animation: creatorSpin .85s linear infinite; }
 .status-check-command { display: inline-flex; align-items: center; gap: 7px; border-color: #8eddd0; color: var(--creator-accent-strong); background: #effbf8; }
 .status-check-command:disabled { cursor: wait; opacity: .68; }
-.video-status-feedback { display: flex; align-items: flex-start; gap: 7px; width: min(460px, 100%); margin-top: 13px; padding: 10px 12px; border: 1px solid #cce4df; border-radius: 7px; color: #52706b; background: #fff; font-size: 11px; line-height: 1.6; text-align: left; }
+.video-status-feedback { display: flex; align-items: flex-start; gap: 7px; width: min(460px, 100%); margin-top: 13px; padding: 10px 12px; border: 1px solid #cce4df; border-radius: var(--creator-radius); color: #52706b; background: #fff; font-size: 11px; line-height: 1.6; text-align: left; }
 .video-status-feedback svg { flex: 0 0 auto; margin-top: 2px; }
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { margin-top: 14px; }
-.result-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-.result-card,
-.result-stat-grid article { border-radius: var(--creator-radius); }
-.result-stat-grid article { min-width: 0; min-height: 78px; padding: 14px; border: 1px solid #d6e2e0; background: rgb(255 255 255 / 72%); }
+/* One grouped panel with hairline dividers instead of six separate tiles. */
+.result-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #e2ebe9; }
+.result-card { border-radius: var(--creator-radius-large); }
+.result-stat-grid article { min-width: 0; padding: 14px 16px; background: #fbfdfd; }
 .result-stat-grid span,
 .result-parameter-details div > span { display: block; color: #64748b; font-size: 10px; }
 .result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.result-parameter-details { margin-top: 9px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius); background: rgb(255 255 255 / 72%); }
+.result-parameter-details { margin-top: 10px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #fbfdfd; }
 .result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 16px; color: #526176; font-size: 12px; cursor: pointer; list-style: none; }
 .result-parameter-details summary::-webkit-details-marker { display: none; }
 .result-parameter-details summary svg { color: var(--creator-accent-strong); transition: transform 160ms ease; }
@@ -4190,7 +4408,7 @@ onBeforeUnmount(() => {
 .result-parameter-details > div:last-child { padding-bottom: 17px; }
 .result-parameter-details p { margin: 7px 0 0; color: #334155; font-size: 12px; line-height: 1.75; }
 .result-parameter-details .full-prompt { white-space: pre-wrap; }
-.secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: 7px; background: #fff; font-size: 12px; font-weight: 700; }
+.secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: var(--creator-radius); background: #fff; font-size: 12px; font-weight: 700; }
 .canvas-footnote { flex: 0 0 auto; gap: 6px; margin: 0 24px 14px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #9aa8b8; font-size: 10px; }
 
 .professional-workspace { align-self: stretch; margin-top: 28px; margin-bottom: 70px; padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
@@ -4202,7 +4420,7 @@ onBeforeUnmount(() => {
 .sequence-eyebrow { display: flex; align-items: center; gap: 6px; margin: 0 0 7px; color: var(--creator-accent-strong); font-size: 8px; font-weight: 850; }
 .sequence-eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: #39d6bd; box-shadow: 0 0 0 4px #e0faf5; }
 .sequence-header h2 { display: flex; align-items: center; gap: 10px; margin: 0; color: #1f2d3d; font-size: 16px; font-weight: 780; }
-.sequence-header h2 span { display: inline-flex; min-height: 28px; align-items: center; padding: 0 10px; border: 1px solid #b9e1da; border-radius: 7px; color: var(--creator-accent-strong); background: #effbf8; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.sequence-header h2 span { display: inline-flex; min-height: 28px; align-items: center; padding: 0 10px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
 .sequence-header > div:first-child > p:last-child { margin: 5px 0 0; color: #8a98aa; font-size: 9px; }
 .sequence-header dl { display: flex; margin: 0; }
 .sequence-header dl > div { min-width: 76px; padding: 0 15px; border-left: 1px solid #dae5e3; }
@@ -4212,10 +4430,10 @@ onBeforeUnmount(() => {
 .sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 8px; color: #8fa0b4; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .sequence-ruler i { height: 1px; background: repeating-linear-gradient(90deg, #b9d6d1 0 1px, transparent 1px 22%); border-bottom: 1px solid #d4e3e0; }
 .sequence-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 2px 2px 8px; }
-.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 132px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius); background: #fff; }
+.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 132px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius-large); background: #fff; }
 .sequence-shot::before { position: absolute; top: 39px; bottom: 10px; left: 28px; width: 1px; background: #d9e8e5; content: ''; }
-.sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: 6px; color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
-.sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
+.sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
+.sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
 .sequence-shot-preview::before { position: absolute; top: 11px; left: 10px; width: 38px; height: 15px; border-top: 1px solid #bddbd5; border-left: 1px solid #bddbd5; transform: skewX(-28deg); content: ''; }
 .sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 34px; height: 34px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
 .sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 7px; font-weight: 750; font-variant-numeric: tabular-nums; }
@@ -4225,13 +4443,13 @@ onBeforeUnmount(() => {
 .sequence-shot-content > header > span { display: flex; align-items: center; gap: 3px; color: #91a0b2; font-size: 7px; }
 .sequence-shot-content > header > span i { width: 5px; height: 5px; border-radius: 50%; background: #c4d0d8; }
 .sequence-shot-content > header > div { display: flex; gap: 1px; margin-left: auto; }
-.sequence-shot-content > header button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: 5px; color: #718096; }
+.sequence-shot-content > header button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: var(--creator-radius-small); color: #718096; }
 .sequence-shot-content > header button:hover:not(:disabled) { color: var(--creator-accent-strong); background: #eff9f7; }
 .sequence-shot-content > header button:disabled { opacity: .25; }
 .sequence-shot-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; flex: none; margin: 0; padding: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #344054; font-size: 10px; line-height: 1.5; }
 .sequence-shot-prompt.empty { color: #a7b3c0; }
 .sequence-shot-content footer { display: flex; flex-shrink: 0; margin-top: auto; flex-wrap: wrap; align-items: center; gap: 4px; }
-.sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: 5px; color: #607b76; background: #f5faf9; font-size: 7px; }
+.sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius-small); color: #607b76; background: #f5faf9; font-size: 7px; }
 .sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; }
 .sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 8px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
@@ -4263,12 +4481,12 @@ onBeforeUnmount(() => {
 .settings-scroll::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
 .settings-heading { justify-content: space-between; margin-bottom: 16px; }
 .settings-heading > svg { color: var(--creator-accent-strong); }
-.capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: 8px; background: #eff5f4; }
-.capability-switch button { min-height: 45px; border-radius: inherit; color: #6e7e93; font-size: 12px; font-weight: 700; white-space: nowrap; }
+.capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: var(--creator-radius-large); background: #eff5f4; }
+.capability-switch button { min-height: 45px; border-radius: var(--creator-radius); color: #6e7e93; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .capability-switch button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 3px 12px rgb(26 76 70 / 9%); }
 .online-dot { display: inline-block; width: 7px; height: 7px; margin-left: 4px; border-radius: 50%; background: #0db884; }
 .video-capability-card { display: flex; align-items: center; gap: 11px; min-height: 62px; margin-bottom: 18px; padding: 9px 12px; border: 1px solid #9ee6da; border-radius: var(--creator-radius); background: #f2fcf9; }
-.video-capability-icon { display: grid; flex: 0 0 36px; place-items: center; width: 36px; height: 36px; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: #cff8ef; }
+.video-capability-icon { display: grid; flex: 0 0 36px; place-items: center; width: 36px; height: 36px; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #cff8ef; }
 .video-capability-card strong,
 .video-capability-card small { display: block; }
 .video-capability-card strong { color: #263548; font-size: 13px; font-weight: 750; }
@@ -4279,7 +4497,7 @@ onBeforeUnmount(() => {
 .field-block > small,
 .field-row small { display: block; margin-top: 6px; color: #8492a6; font-size: 10px; line-height: 1.5; }
 .creator-field-hint { color: var(--creator-accent-strong) !important; }
-.studio-input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #d7e0e7; border-radius: 8px; outline: none; color: #1b2638; background: #fff; font-size: 12px; transition: 150ms ease; }
+.studio-input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #d7e0e7; border-radius: var(--creator-radius); outline: none; color: #1b2638; background: #fff; font-size: 12px; transition: 150ms ease; }
 .studio-input:focus { border-color: #6dd4c4; box-shadow: 0 0 0 3px rgb(41 185 164 / 12%); }
 .studio-input:disabled { cursor: not-allowed; color: #97a3b2; background: #f4f6f7; }
 .model-input { height: 42px; contain: layout; }
@@ -4292,81 +4510,87 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-size-dialog { color: #354258; }
 .image-size-current { margin: 0 0 16px; color: #91a0b3; font-size: 12px; }
 .image-size-current strong { color: #627086; font-variant-numeric: tabular-nums; }
-.image-size-mode-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-bottom: 22px; padding: 5px; border-radius: 16px; background: #eef4f3; }
-.image-size-mode-tabs button { min-height: 46px; border-radius: 12px; color: #68788e; font-size: 13px; font-weight: 750; }
+.image-size-mode-tabs { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; margin-bottom: 22px; padding: 5px; border-radius: var(--creator-radius-large); background: #eef4f3; }
+.image-size-mode-tabs button { min-height: 46px; border-radius: var(--creator-radius); color: #68788e; font-size: 13px; font-weight: 750; }
 .image-size-mode-tabs button.active { color: #172236; background: #fff; box-shadow: 0 4px 14px rgb(25 58 54 / 9%); }
+.video-aspect-source-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 0; }
 .image-size-section + .image-size-section { margin-top: 20px; }
 .image-size-section h4,
 .image-custom-size h4 { margin: 0 0 10px; color: #8796a9; font-size: 12px; font-weight: 750; }
 .image-resolution-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 9px; }
-.image-resolution-grid button { min-height: 50px; border: 1px solid #d8e2e1; border-radius: 14px; color: #65758a; background: #fff; font-size: 14px; font-weight: 800; transition: 150ms ease; }
+.image-resolution-grid button { min-height: 50px; border: 1px solid #d8e2e1; border-radius: var(--creator-radius); color: #65758a; background: #fff; font-size: 14px; font-weight: 800; transition: 150ms ease; }
 .image-resolution-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
 .image-ratio-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
-.image-ratio-grid button { display: grid; min-height: 80px; place-items: center; align-content: center; gap: 7px; border: 1px solid #d8e2e8; border-radius: 14px; color: #66768c; background: #fff; font-size: 12px; font-weight: 750; transition: 150ms ease; }
+.video-ratio-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.video-aspect-source-hint { margin: -2px 0 10px; color: var(--creator-accent-strong); }
+.image-ratio-grid button { display: grid; min-height: 80px; place-items: center; align-content: center; gap: 7px; border: 1px solid #d8e2e8; border-radius: var(--creator-radius); color: #66768c; background: #fff; font-size: 12px; font-weight: 750; transition: 150ms ease; }
 .image-ratio-grid button:disabled { opacity: .4; cursor: not-allowed; }
 .image-size-tier-hint { margin-top: 10px; color: #66768c; font-size: 12px; line-height: 1.6; }
 .image-ratio-grid button i { display: block; box-sizing: border-box; border: 2px solid #95a4b7; border-radius: 3px; }
 .image-ratio-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
 .image-ratio-grid button.active i { border-color: #4f9e94; }
-.custom-ratio-command { width: 100%; min-height: 42px; margin-top: 10px; border: 1px solid #d8e3e1; border-radius: 14px; color: #6a7a8e; background: #fff; font-size: 12px; font-weight: 700; }
+.custom-ratio-command { width: 100%; min-height: 42px; margin-top: 10px; border: 1px solid #d8e3e1; border-radius: var(--creator-radius); color: #6a7a8e; background: #fff; font-size: 12px; font-weight: 700; }
 .image-size-auto-panel { display: grid; min-height: 280px; place-items: center; align-content: center; gap: 12px; text-align: center; }
-.image-size-auto-panel > span { display: grid; place-items: center; width: 64px; height: 64px; border-radius: 20px; color: #087f74; background: #e7f8f5; }
+.image-size-auto-panel > span { display: grid; place-items: center; width: 64px; height: 64px; border-radius: var(--creator-radius-large); color: #087f74; background: #e7f8f5; }
 .image-size-auto-panel strong { color: #334155; font-size: 15px; }
 .image-size-auto-panel p { max-width: 330px; margin: 0; color: #93a2b5; font-size: 12px; line-height: 1.7; }
 .image-custom-size > div { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr); align-items: end; gap: 12px; }
 .image-custom-size label { color: #607087; font-size: 12px; font-weight: 700; }
-.image-custom-size input { width: 100%; min-height: 50px; margin-top: 8px; padding: 0 14px; border: 1px solid #d7e0e7; border-radius: 14px; outline: 0; color: #314057; background: #fff; font-size: 14px; }
+.image-custom-size input { width: 100%; min-height: 50px; margin-top: 8px; padding: 0 14px; border: 1px solid #d7e0e7; border-radius: var(--creator-radius); outline: 0; color: #314057; background: #fff; font-size: 14px; }
 .image-custom-size > div > span { padding-bottom: 15px; color: #a1afbf; font-weight: 800; }
-.image-custom-size > p { margin: 14px 0 0; padding: 13px 15px; border: 1px solid #d8e8e4; border-radius: 14px; color: #64758b; background: #f6faf9; font-size: 11px; line-height: 1.75; }
-.image-size-result { margin-top: 22px; padding: 17px 18px; border-radius: 16px; background: #f4f8f7; }
+.image-custom-size > p { margin: 14px 0 0; padding: 13px 15px; border: 1px solid #d8e8e4; border-radius: var(--creator-radius); color: #64758b; background: #f6faf9; font-size: 11px; line-height: 1.75; }
+.image-size-result { margin-top: 22px; padding: 17px 18px; border-radius: var(--creator-radius-large); background: #f4f8f7; }
 .image-size-result span,
 .image-size-result strong { display: block; }
 .image-size-result span { color: #92a0b2; font-size: 11px; }
 .image-size-result strong { margin-top: 7px; color: #152136; font-size: 18px; font-variant-numeric: tabular-nums; }
+.video-params-result { display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
+.video-params-cost { text-align: right; }
+.video-params-cost strong { color: #087f74; }
 .image-size-cancel,
-.image-size-confirm { min-width: 0; min-height: 48px; flex: 1; border-radius: 14px; font-size: 14px; font-weight: 750; transition: 150ms ease; }
+.image-size-confirm { min-width: 0; min-height: 48px; flex: 1; border-radius: var(--creator-radius); font-size: 14px; font-weight: 750; transition: 150ms ease; }
 .image-size-cancel { color: #687990; background: #f1f5f9; }
 .image-size-confirm { color: #fff; background: #087f74; }
 .image-size-cancel:hover { color: #45566c; background: #e8eef4; }
 .image-size-confirm:hover { background: #066d64; box-shadow: 0 8px 18px rgb(8 127 116 / 20%); }
-.key-ready { gap: 9px; min-height: 62px; margin-bottom: 18px; padding: 10px 12px; border: 1px solid #9ce2bf; border-radius: 8px; color: #27835c; background: #f0fcf5; }
+.key-ready { gap: 9px; min-height: 62px; margin-bottom: 18px; padding: 10px 12px; border: 1px solid #9ce2bf; border-radius: var(--creator-radius-large); color: #27835c; background: #f0fcf5; }
 .key-ready > div { min-width: 0; flex: 1; }
 .key-ready strong,
 .key-ready span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .key-ready strong { color: #256c4e; font-size: 12px; }
 .key-ready span { margin-top: 3px; color: #67917c; font-size: 10px; }
 .key-ready > small { color: #779488; font-size: 10px; }
-.key-needed { margin-bottom: 18px; padding: 14px; border: 1px solid #eecf67; border-radius: 8px; background: #fffbed; }
+.key-needed { margin-bottom: 18px; padding: 14px; border: 1px solid #eecf67; border-radius: var(--creator-radius-large); background: #fffbed; }
 .key-needed-title { align-items: flex-start; gap: 12px; }
-.key-needed-title > span { display: grid; flex: 0 0 42px; place-items: center; width: 42px; height: 42px; border-radius: 8px; color: var(--creator-accent-strong); background: #fff; }
+.key-needed-title > span { display: grid; flex: 0 0 42px; place-items: center; width: 42px; height: 42px; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #fff; }
 .key-needed-title strong { font-size: 13px; }
 .key-needed-title p { margin: 4px 0; color: #7c8799; font-size: 12px; }
 .key-needed-title small { color: #9ba5b4; font-size: 10px; }
 .key-needed > button,
-.generate-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 46px; margin-top: 13px; border-radius: 8px; color: #fff; background: var(--creator-accent); font-size: 13px; font-weight: 750; box-shadow: 0 5px 12px rgb(15 159 143 / 18%); transition: 150ms ease; }
+.generate-button { display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%; min-height: 46px; margin-top: 13px; border-radius: var(--creator-radius); color: #fff; background: var(--creator-accent); font-size: 13px; font-weight: 750; box-shadow: 0 5px 12px rgb(15 159 143 / 18%); transition: 150ms ease; }
 .key-needed > button:hover,
 .generate-button:hover { background: var(--creator-accent-strong); }
 .key-needed > button:disabled,
 .generate-button:disabled { cursor: not-allowed; box-shadow: none; opacity: .45; }
-.generation-requirement { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #f2c14e; border-radius: 8px; color: #9a6200; background: #fffaf0; font-size: 11px; font-weight: 700; text-align: center; }
+.generation-requirement { margin: 10px 0 0; padding: 10px 12px; border: 1px solid #f2c14e; border-radius: var(--creator-radius); color: #9a6200; background: #fffaf0; font-size: 11px; font-weight: 700; text-align: center; }
 .settings-scroll hr { margin: 17px 0; border: 0; border-top: 1px solid var(--creator-line); }
-.prompt-tool { display: block; width: 100%; margin-bottom: 18px; padding: 10px; border: 1px solid #d4e3e0; border-radius: 8px; text-align: left; background: #fbfdfd; }
+.prompt-tool { display: block; width: 100%; margin-bottom: 18px; padding: 10px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-large); text-align: left; background: #fbfdfd; }
 .prompt-tool > header { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; align-items: center; gap: 9px; }
 .prompt-tool.expanded > header { padding-bottom: 9px; border-bottom: 1px solid #e4eceb; }
-.prompt-tool > header > span:first-child { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #8ae6d6; border-radius: 7px; color: var(--creator-accent-strong); background: #ecfcf8; }
+.prompt-tool > header > span:first-child { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #8ae6d6; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #ecfcf8; }
 .prompt-tool header strong,
 .prompt-tool header small { display: block; }
 .prompt-tool header strong { color: #223044; font-size: 12px; }
 .prompt-tool header small { overflow: hidden; margin-top: 3px; color: #8190a2; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .prompt-tool-controls { display: flex; align-items: center; gap: 6px; }
 .prompt-page-actions { display: flex; align-items: center; gap: 4px; color: #7f8da0; font-size: 9px; font-variant-numeric: tabular-nums; }
-.prompt-page-actions button { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid #d4e1df; border-radius: 6px; color: #52716d; background: #fff; }
+.prompt-page-actions button { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid #d4e1df; border-radius: var(--creator-radius-small); color: #52716d; background: #fff; }
 .prompt-page-actions button:hover:not(:disabled) { border-color: #8edacd; color: var(--creator-accent-strong); }
 .prompt-page-actions button:disabled { opacity: .35; }
-.prompt-toggle { min-height: 30px; padding: 0 10px; border: 1px solid #cddddd; border-radius: var(--creator-radius-inner); color: var(--creator-accent-strong); background: #fff; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.prompt-toggle { min-height: 30px; padding: 0 10px; border: 1px solid #cddddd; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #fff; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .prompt-toggle:hover { border-color: #8edacd; background: #f2fbf9; }
 .prompt-template-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; padding-top: 9px; }
-.prompt-template-grid button { min-width: 0; min-height: 48px; padding: 8px 9px; border: 1px solid #dce5eb; border-radius: 7px; text-align: left; background: #fff; transition: 150ms ease; }
+.prompt-template-grid button { min-width: 0; min-height: 48px; padding: 8px 9px; border: 1px solid #dce5eb; border-radius: var(--creator-radius); text-align: left; background: #fff; transition: 150ms ease; }
 .prompt-template-grid button:hover,
 .prompt-template-grid button.active { border-color: #7dd9ca; background: #f1fbf8; }
 .prompt-template-grid strong,
@@ -4378,34 +4602,30 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .reference-field .field-row { margin-bottom: 10px; }
 .prompt-field > small { margin-top: -4px; margin-bottom: 8px; }
 .prompt-input { min-height: 156px; line-height: 1.75; }
-.video-duration-estimate { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 54px; margin: -2px 0 16px; padding: 0 13px; border: 1px solid #d4e3e0; border-radius: 8px; background: #f8fcfb; }
-.video-duration-estimate span { color: #65758a; font-size: 12px; font-weight: 700; }
-.video-duration-estimate strong { margin-left: 5px; color: var(--creator-accent-strong); font-size: 14px; }
-.video-duration-estimate small { color: #8c9bae; font-size: 10px; font-weight: 650; white-space: nowrap; }
 .inline-command { display: inline-flex; align-items: center; gap: 5px; color: #59687b; font-size: 11px; font-weight: 650; }
 .inline-command:hover { color: var(--creator-accent-strong); }
-.upload-zone { display: grid; justify-items: center; width: 100%; min-height: 112px; padding: 15px; border: 1px dashed #b9cad7; border-radius: 8px; color: #8a9bb0; background: #fafcfd; }
+.upload-zone { display: grid; justify-items: center; width: 100%; min-height: 112px; padding: 15px; border: 1px dashed #b9cad7; border-radius: var(--creator-radius-large); color: #8a9bb0; background: #fafcfd; }
 .upload-zone:hover,
 .upload-zone.dragging { border-color: #53cdb9; color: var(--creator-accent-strong); background: #f1fbf8; }
 .upload-zone strong { margin-top: 7px; color: #5c6b7f; font-size: 11px; }
 .upload-zone span { margin-top: 4px; font-size: 9px; }
 .reference-list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 7px; margin-top: 8px; }
-.reference-item { position: relative; aspect-ratio: 1; overflow: hidden; border: 1px solid #d8e2e7; border-radius: 7px; background: #edf2f3; }
+.reference-item { position: relative; aspect-ratio: 1; overflow: hidden; border: 1px solid #d8e2e7; border-radius: var(--creator-radius); background: #edf2f3; }
 .reference-item img { width: 100%; height: 100%; object-fit: cover; }
 .reference-item button { position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border: 0; color: #fff; background: rgb(22 30 42 / 70%); }
 .history-reference-note { margin: 8px 0 0; color: #8a98aa; font-size: 10px; line-height: 1.5; }
 .two-column-fields,
 .advanced-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.advanced-grid { grid-template-columns: minmax(0, 1fr); margin-bottom: 16px; padding: 12px; border: 1px solid #e0e7eb; border-radius: 8px; background: #f8fafb; }
+.advanced-grid { grid-template-columns: minmax(0, 1fr); margin-bottom: 16px; padding: 12px; border: 1px solid #e0e7eb; border-radius: var(--creator-radius-large); background: #f8fafb; }
 .advanced-grid .field-block { margin-bottom: 0; }
 .advanced-grid .field-block.wide { grid-column: 1 / -1; }
-.stepper { min-height: 44px; border: 1px solid #d7e0e7; border-radius: 8px; overflow: hidden; }
+.stepper { min-height: 44px; border: 1px solid #d7e0e7; border-radius: var(--creator-radius); overflow: hidden; }
 .stepper button { display: grid; place-items: center; width: 46px; height: 42px; color: var(--creator-accent-strong); background: #fff; }
 .stepper button:first-child { border-right: 1px solid #e0e6eb; }
 .stepper button:last-child { border-left: 1px solid #e0e6eb; }
 .stepper button:disabled { color: #c2cbd5; }
 .stepper strong { flex: 1; text-align: center; color: #455267; font-size: 13px; }
-.toggle-row { position: relative; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 12px; border: 1px solid #dbe5e3; border-radius: 8px; background: #f8fbfa; cursor: pointer; }
+.toggle-row { position: relative; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 12px; border: 1px solid #dbe5e3; border-radius: var(--creator-radius-large); background: #f8fbfa; cursor: pointer; }
 .toggle-row.wide { grid-column: 1 / -1; margin: 0; }
 .toggle-row span { min-width: 0; }
 .toggle-row strong,
@@ -4418,8 +4638,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .toggle-row input:checked + i { background: var(--creator-accent); }
 .toggle-row input:checked + i::after { transform: translateX(16px); }
 .toggle-row input:disabled + i { opacity: .4; }
-.professional-toggle { display: grid; grid-template-columns: 24px max-content minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #cbd8e8; border-radius: 8px; background: #fafbfe; box-shadow: none; }
-.professional-toggle-icon { display: grid; grid-column: 1; place-items: center; width: 24px; height: 24px; border-radius: 8px; color: #6f86a6; background: #dceaff; }
+.professional-toggle { display: grid; grid-template-columns: 24px max-content minmax(0, 1fr) 16px; align-items: center; gap: 8px; padding: 10px 12px; border: 1px solid #cbd8e8; border-radius: var(--creator-radius-large); background: #fafbfe; box-shadow: none; }
+.professional-toggle-icon { display: grid; grid-column: 1; place-items: center; width: 24px; height: 24px; border-radius: var(--creator-radius-small); color: #6f86a6; background: #dceaff; }
 .professional-toggle-copy { grid-column: 2; white-space: nowrap; }
 .professional-toggle-copy strong { color: #26364f; font-size: 12px; font-weight: 600; line-height: 1.5; }
 .professional-toggle-copy small { display: none; }
@@ -4431,56 +4651,12 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .button-spinner { width: 16px; height: 16px; border: 2px solid rgb(255 255 255 / 45%); border-top-color: #fff; border-radius: 50%; animation: creatorSpin .8s linear infinite; }
 .spinning { animation: creatorSpin .8s linear infinite; }
 
-/* Keep panels and controls on one corner system while preserving circular status UI. */
-.history-item,
-.history-empty > span,
-.result-error,
-.capability-switch,
-.studio-input,
-.key-ready,
-.key-needed,
-.prompt-tool,
-  .upload-zone,
-  .advanced-grid,
-  .stepper,
-  .toggle-row,
-  .generate-button { border-radius: var(--creator-radius); }
-
-.mode-switch,
-.mode-option,
-.mode-option-icon,
-.history-tabs,
-.history-tabs button { border-radius: var(--creator-radius-large); }
-
-.studio-title-icon,
-.connection-action,
-.icon-action,
-.collapse-action,
-.history-reopen,
-.history-count,
-.history-preview,
-.history-item-actions button,
-.brief-topline button,
-.brief-copy button,
-.quick-templates button,
-.secondary-command,
-.key-needed > button,
-.key-needed-title > span,
-.prompt-tool > header > span:first-child,
-.prompt-page-actions button,
-.prompt-toggle,
-.prompt-template-grid button,
-.reference-item,
-.reference-item button,
-.sequence-add,
-.sequence-inline-add,
-.sequence-shot header button { border-radius: var(--creator-radius-inner); }
 
 .settings-heading > svg { width: 16px; height: 16px; }
 
 .modal-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 58%); backdrop-filter: blur(5px); }
 .image-preview { z-index: 80; background: rgb(15 23 42 / 80%); }
-.image-preview-content { --creator-image-background: transparent; --creator-image-text: #dce8e5; width: calc(100vw - 48px); height: calc(100dvh - 96px); max-width: 1600px; border-radius: 12px; }
+.image-preview-content { --creator-image-background: transparent; --creator-image-text: #dce8e5; width: calc(100vw - 48px); height: calc(100dvh - 96px); max-width: 1600px; border-radius: var(--creator-radius-large); }
 .preview-close { position: fixed; top: 18px; right: 18px; border-color: rgb(255 255 255 / 30%); color: #fff; background: rgb(17 24 39 / 75%); }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
@@ -4562,6 +4738,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .sequence-shot-prompt,
 :global(.dark) .result-stat-grid strong,
 :global(.dark) .result-parameter-details p { color: #dbe7e5; }
+:global(.dark) .result-stat-grid { border-color: #334642; background: #334642; }
+:global(.dark) .result-actions { border-top-color: #2a3b38; }
 :global(.dark) .sequence-header h2 span { border-color: #347a6f; color: #83ddd0; background: #15302c; }
 :global(.dark) .prompt-tool { background: #14211f; }
 :global(.dark) .prompt-tool > header { border-color: #334642; }
@@ -4569,6 +4747,15 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .prompt-template-grid strong { color: #d6e0de; }
 :global(.dark) .prompt-template-grid button,
 :global(.dark) .prompt-page-actions button { border-color: #354643; color: #c3cfcc; background: #172321; }
+:global(.dark) .quick-templates-label { color: #8a9c99; }
+:global(.dark) .quick-templates-label::after { background: #2a3b38; }
+:global(.dark) .quick-templates button { border-color: #354643; background: #172321; }
+:global(.dark) .quick-templates button strong { color: #d6e0de; }
+:global(.dark) .quick-templates button small { color: #7f938f; }
+:global(.dark) .quick-templates button:hover,
+:global(.dark) .quick-templates button:focus-visible { border-color: #347a6f; background: #1b2b28; }
+:global(.dark) .quick-templates button:hover strong,
+:global(.dark) .quick-templates button:focus-visible strong { color: #83ddd0; }
 
 @media (max-width: 1380px) {
   .studio-grid { grid-template-columns: 17rem minmax(390px, 1fr) 21rem; }
@@ -4610,6 +4797,7 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .complete-video-card > footer { align-items: flex-start; flex-direction: column; }
   .result-media { height: clamp(280px, 62vh, 460px); }
   .result-media.landscape { height: auto; }
+  .result-media.fitted { height: auto; max-height: clamp(280px, 62vh, 460px); }
   .result-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -4618,6 +4806,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .mode-option span { font-size: 11px; }
   .two-column-fields,
   .advanced-grid { grid-template-columns: 1fr; }
+  .video-params-result { flex-direction: column; align-items: flex-start; }
+  .video-params-cost { text-align: left; }
   .image-ratio-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .image-size-mode-tabs button { padding: 0 5px; font-size: 11px; }
   .image-custom-size > div { grid-template-columns: 1fr; }
@@ -4642,6 +4832,10 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-cost-copy { min-width: 0; }
 .image-cost-label { color: #53647a; font-size: 12px; font-weight: 600; }
 .image-cost-copy p { margin: 4px 0 0; color: #8b98aa; font-size: 11px; line-height: 1.5; }
+.video-duration-estimate { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 0; padding: 0 13px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-large); background: #f8fcfb; }
+.video-duration-estimate span { color: #65758a; font-size: 12px; font-weight: 700; }
+.video-duration-estimate strong { margin-left: 5px; color: var(--creator-accent-strong); font-size: 14px; }
+.video-duration-estimate small { overflow: hidden; color: #8c9bae; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .image-cost-total { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: flex-end; column-gap: 5px; row-gap: 2px; text-align: right; }
 .image-cost-total strong { color: #243448; font-size: 21px; font-weight: 650; letter-spacing: -.6px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
 .image-cost-total > span { color: #97a3b2; font-size: 10px; font-weight: 500; letter-spacing: .3px; }

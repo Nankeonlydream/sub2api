@@ -129,7 +129,7 @@ function markFailed() {
 .creator-image-feedback { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 20px; color: var(--creator-image-text, #617d78); text-align: center; font-size: 12px; }
 .creator-image-feedback strong { color: var(--creator-image-text, #28796d); font-size: 14px; }
 .creator-image-spinner { width: 30px; height: 30px; border: 3px solid #c9e2dc; border-top-color: #149e8c; border-radius: 50%; animation: creator-image-spin 900ms linear infinite; }
-.creator-image-retry { border: 1px solid #8ac7bb; border-radius: 8px; padding: 7px 16px; color: var(--creator-image-text, #28796d); }
+.creator-image-retry { border: 1px solid #8ac7bb; border-radius: var(--creator-radius, 12px); padding: 7px 16px; color: var(--creator-image-text, #28796d); }
 @keyframes creator-image-spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .creator-image-spinner { animation: none; } .creator-image-open img { transition: none; } }
 :global(.dark) .creator-image { background: var(--creator-image-background, #172b27); }

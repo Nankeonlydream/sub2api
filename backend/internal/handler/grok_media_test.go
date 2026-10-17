@@ -3,10 +3,12 @@ package handler
 import (
 	"context"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,6 +17,32 @@ type grokMediaEligibilityProberStub struct {
 	reason   string
 	err      error
 	calls    int
+}
+
+func TestIsCreatorVideoRequest(t *testing.T) {
+	for _, tc := range []struct {
+		name, keyName, header, referer string
+		want                           bool
+	}{
+		{name: "current client", header: " VIDEO ", want: true},
+		{name: "legacy Creator key", keyName: "创作中心 · Grok Heavy", want: true},
+		{name: "renamed key in old tab", keyName: "My key", referer: "https://local.example/creator", want: true},
+		{name: "Creator query string", referer: "https://local.example/creator/?mode=video", want: true},
+		{name: "regular API", keyName: "Production API"},
+		{name: "different page", referer: "https://local.example/usage"},
+		{name: "different origin", referer: "https://other.example/creator"},
+		{name: "similar path", referer: "https://local.example/creator-other"},
+		{name: "invalid referer", referer: "://invalid"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest("GET", "https://local.example/v1/videos/task", nil)
+			c.Request.Header.Set("X-Sub2API-Creator", tc.header)
+			c.Request.Header.Set("Referer", tc.referer)
+			require.Equal(t, tc.want, isCreatorVideoRequest(c, &service.APIKey{Name: tc.keyName}))
+		})
+	}
+	require.False(t, isCreatorVideoRequest(nil, nil))
 }
 
 func (s *grokMediaEligibilityProberStub) ProbeMediaEligibility(context.Context, int64) (bool, string, error) {

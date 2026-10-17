@@ -591,3 +591,59 @@ func TestRewriteGrokMediaVideoContentURLsRewritesSignedVideoURL(t *testing.T) {
 	require.Equal(t, "8", gjson.GetBytes(rewritten, "video.duration").String())
 	require.Equal(t, "done", gjson.GetBytes(rewritten, "status").String())
 }
+
+func TestForwardGrokMediaContentFallsBackToRelayPublicVideoURL(t *testing.T) {
+	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{
+		grokMediaContentStatusResponse(`{"status":"done","video":{"url":"/v1/videos/task-1/content","duration":8},"video_url":"https://cdn.example.com/m/abc"}`),
+		{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"text/plain"}},
+			Body: io.NopCloser(strings.NewReader("error code: 502"))},
+		{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"video/mp4"}},
+			Body: io.NopCloser(strings.NewReader("full-video")), ContentLength: 10},
+	}}
+	svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+	c, recorder := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task-1/content", nil)
+	result, err := svc.ForwardGrokMedia(context.Background(), c, grokMediaContentTestAccount(), GrokMediaEndpointVideoContent, "task-1", nil, "")
+	require.NoError(t, err)
+	require.Equal(t, "full-video", recorder.Body.String())
+	require.True(t, result.VideoContentDelivered)
+	require.Len(t, upstream.requests, 3)
+	fallback := upstream.requests[2]
+	require.Equal(t, "https://cdn.example.com/m/abc", fallback.URL.String())
+	require.Empty(t, fallback.Header.Get("Authorization"), "public CDN fetch must not leak the upstream key")
+	require.True(t, HTTPUpstreamPublicHostsOnly(fallback.Context()))
+	require.True(t, HTTPUpstreamRedirectsDisabled(fallback.Context()))
+}
+
+func TestForwardGrokMediaContentFallbackRejectsUnsafeOrFailedPublicURL(t *testing.T) {
+	for _, tc := range []struct {
+		name, videoURL string
+		fallback       *http.Response
+		wantRequests   int
+	}{
+		{name: "http scheme", videoURL: "http://cdn.example.com/m/abc", wantRequests: 2},
+		{name: "private host", videoURL: "https://127.0.0.1/m/abc", wantRequests: 2},
+		{name: "metadata host", videoURL: "https://169.254.169.254/latest", wantRequests: 2},
+		{name: "fallback error", videoURL: "https://cdn.example.com/m/abc", wantRequests: 3,
+			fallback: &http.Response{StatusCode: http.StatusNotFound, Header: http.Header{}, Body: io.NopCloser(strings.NewReader("nope"))}},
+		{name: "fallback not video", videoURL: "https://cdn.example.com/m/abc", wantRequests: 3,
+			fallback: &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/html"}}, Body: io.NopCloser(strings.NewReader("<html>"))}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			responses := []*http.Response{
+				grokMediaContentStatusResponse(`{"status":"done","video":{"url":"/v1/videos/task-1/content","duration":8},"video_url":"` + tc.videoURL + `"}`),
+				{StatusCode: http.StatusBadGateway, Header: http.Header{"Content-Type": []string{"text/plain"}},
+					Body: io.NopCloser(strings.NewReader("error code: 502"))},
+			}
+			if tc.fallback != nil {
+				responses = append(responses, tc.fallback)
+			}
+			upstream := &grokMediaContentUpstreamStub{responses: responses}
+			svc := &OpenAIGatewayService{cfg: &config.Config{}, httpUpstream: upstream}
+			c, _ := grokMediaContentTestContext(http.MethodGet, "https://api.example/v1/videos/task-1/content", nil)
+			result, err := svc.ForwardGrokMedia(context.Background(), c, grokMediaContentTestAccount(), GrokMediaEndpointVideoContent, "task-1", nil, "")
+			require.Error(t, err)
+			require.Nil(t, result, "failed delivery must not reach usage billing")
+			require.Len(t, upstream.requests, tc.wantRequests)
+		})
+	}
+}
