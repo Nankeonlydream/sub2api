@@ -293,6 +293,25 @@ func TestPinnedOpenAIModelsListMixedAccountsShareColdCacheAcrossGroups(t *testin
 	require.EqualValues(t, 1, oauthCalls.Load())
 }
 
+func TestOpenAIModelsRefreshReusesCacheFilledAfterCallerMiss(t *testing.T) {
+	s := &OpenAIGatewayService{}
+	request := openAIModelsRequest{url: "https://models.example/v1/models", accountID: 2}
+	key := buildOpenAIModelsCacheKey(request)
+	_, state := s.openAIModelsCache.get(key, time.Now())
+	require.NotEqual(t, openAIModelsCacheFresh, state)
+	// A peer completes its refresh before this caller reaches singleflight.
+	cached := &OpenAIModelsResponse{Body: []byte(`{"data":[{"id":"shared-model"}]}`)}
+	s.openAIModelsCache.set(key, cached, time.Now())
+	var calls atomic.Int32
+	result := <-s.refreshCachedOpenAIModels(key, request, func(context.Context, string) (*OpenAIModelsResponse, error) {
+		calls.Add(1)
+		return nil, fmt.Errorf("unexpected duplicate upstream request")
+	})
+	require.NoError(t, result.Err)
+	require.Equal(t, cached, result.Val)
+	require.Zero(t, calls.Load())
+}
+
 func TestFetchOpenAIModelsListResolvesShadowOAuthCredentials(t *testing.T) {
 	_, calls := newCodexModelsOAuthCacheServer(t, `{"models":[{"slug":"parent-model"}]}`)
 	parent := newCodexModelsTestAccount()
