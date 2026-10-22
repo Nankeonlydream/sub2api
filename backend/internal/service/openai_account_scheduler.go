@@ -727,22 +727,24 @@ func (s *defaultOpenAIAccountScheduler) shouldEscapeStickyAccountAt(accountID in
 }
 
 type openAIAccountCandidateScore struct {
-	priorityOAuthSpare    int
-	priorityAPIStandby    bool
-	priorityLatencyFactor float64
-	priorityUnhealthy     bool
-	priorityExploration   bool
-	account               *Account
-	loadInfo              *AccountLoadInfo
-	loadKnown             bool
-	score                 float64
-	priority              int
-	errorRate             float64
-	ttft                  float64
-	hasTTFT               bool
-	rpmCurrent            int
-	rpmLimit              int
-	rpmEnabled            bool
+	priorityOAuthSpare                 int
+	priorityAPIStandby                 bool
+	priorityLatencyFactor              float64
+	priorityUnhealthy                  bool
+	priorityLatencyRecovery            bool
+	priorityRecoveryExplorationPercent int
+	priorityExploration                bool
+	account                            *Account
+	loadInfo                           *AccountLoadInfo
+	loadKnown                          bool
+	score                              float64
+	priority                           int
+	errorRate                          float64
+	ttft                               float64
+	hasTTFT                            bool
+	rpmCurrent                         int
+	rpmLimit                           int
+	rpmEnabled                         bool
 }
 
 type openAIAccountCandidateHeap []openAIAccountCandidateScore

@@ -43,11 +43,11 @@ func (e GrokMediaEndpoint) RequiresRequestBody() bool {
 }
 
 func (e GrokMediaEndpoint) IsVideoLookupRequest() bool {
-	return e == GrokMediaEndpointVideoStatus || e == GrokMediaEndpointVideoContent || e == SeedanceEndpointStatus || e == SeedanceEndpointDelete
+	return e == GrokMediaEndpointVideoStatus || e == GrokMediaEndpointVideoContent || e == SeedanceEndpointStatus || e == SeedanceEndpointDelete || e == MiniMaxH3EndpointStatus || e == MiniMaxH3EndpointContent
 }
 
 func (e GrokMediaEndpoint) IsGenerationRequest() bool {
-	if e == SeedanceEndpointCreate {
+	if e == SeedanceEndpointCreate || e == MiniMaxH3EndpointCreate {
 		return true
 	}
 	switch e {
@@ -382,12 +382,14 @@ func (s *OpenAIGatewayService) SelectMediaVideoRequestAccount(
 // observes a completed video URL or delivers a Creator video. Status may omit
 // model/duration; we fall back to this snapshot, then defaults.
 type GrokVideoPendingBilling struct {
-	Model                string `json:"model"`
-	BillingModel         string `json:"billing_model,omitempty"`
-	UpstreamModel        string `json:"upstream_model,omitempty"`
-	VideoResolution      string `json:"video_resolution,omitempty"`
-	VideoDurationSeconds int    `json:"video_duration_seconds,omitempty"`
-	OriginalModel        string `json:"original_model,omitempty"`
+	// H3 prices requested seconds at submission; later edits cannot reprice a task.
+	MiniMaxH3BaseCost    *float64 `json:"minimax_h3_base_cost,omitempty"`
+	Model                string   `json:"model"`
+	BillingModel         string   `json:"billing_model,omitempty"`
+	UpstreamModel        string   `json:"upstream_model,omitempty"`
+	VideoResolution      string   `json:"video_resolution,omitempty"`
+	VideoDurationSeconds int      `json:"video_duration_seconds,omitempty"`
+	OriginalModel        string   `json:"original_model,omitempty"`
 	// Creator downloads the full video before treating generation as successful.
 	BillOnContent bool `json:"bill_on_content,omitempty"`
 	// CreatedAt is when the gateway accepted the async create (RFC3339Nano UTC).
@@ -466,7 +468,7 @@ func (s *OpenAIGatewayService) StoreGrokVideoPendingBilling(
 	pending.BillingModel = strings.TrimSpace(pending.BillingModel)
 	pending.UpstreamModel = strings.TrimSpace(pending.UpstreamModel)
 	pending.OriginalModel = strings.TrimSpace(pending.OriginalModel)
-	if pending.VideoResolution != "" {
+	if pending.VideoResolution != "" && pending.MiniMaxH3BaseCost == nil {
 		pending.VideoResolution = NormalizeVideoBillingResolutionOrDefault(pending.VideoResolution)
 	}
 	if pending.VideoDurationSeconds > 0 {
