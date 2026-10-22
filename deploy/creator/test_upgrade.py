@@ -37,6 +37,23 @@ class UpgradeTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Shared-network companion'):
             server.validate_companions({'prism-adapter': {'network_mode': 'service:sub2api'}})
 
+    def test_official_return_only_accepts_reviewed_digest_on_left(self):
+        server.validate_current_image(server.LEFT_HOST, server.LEFT_OFFICIAL_IMAGE)
+        for host, ref in [(server.HOST, server.LEFT_OFFICIAL_IMAGE),
+                          (server.LEFT_HOST, 'ghcr.io/wei-shaw/sub2api:latest'),
+                          (server.LEFT_HOST, server.LEFT_OFFICIAL_IMAGE[:-1] + '0')]:
+            with self.subTest(host=host, ref=ref), self.assertRaises(RuntimeError):
+                server.validate_current_image(host, ref)
+        with self.assertRaises(RuntimeError):
+            server.validate_image_ref(server.LEFT_OFFICIAL_IMAGE)
+
+    def test_migration_compatibility_preserves_extra_history_and_rejects_changes(self):
+        applied = {'001_common.sql': 'a' * 64, '242_official_only.sql': 'b' * 64}
+        target = {'001_common.sql': 'a' * 64, '296_new.sql': 'c' * 64}
+        server.validate_migration_compatibility(applied, target)
+        with self.assertRaisesRegex(RuntimeError, '001_common.sql'):
+            server.validate_migration_compatibility(applied, dict(target, **{'001_common.sql': 'd' * 64}))
+
     def test_reject_untrusted_or_mutable_image(self):
         for ref in ['ghcr.io/ranxi2001/sub2api:2.10.4', server.REPOSITORY + ':latest',
                     server.REPOSITORY + ':2.10.4-creator.1;id', server.REPOSITORY + '@sha256:abc']:

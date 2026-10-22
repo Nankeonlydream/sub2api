@@ -16,6 +16,7 @@ HOST = 'iZrj92zzv39jbi7n9fz4fuZ'
 LEFT_HOST = 'iZrj9eby63lh2zp7dbipn8Z'
 HOSTS = {HOST: 'right', LEFT_HOST: 'left'}
 LEFT_LEGACY_IMAGE = 'ghcr.io/ranxi2001/sub2api@sha256:67d3167a638bab1f466384f9db187873e983d776a6a8e741ae6bc2402867e83a'
+LEFT_OFFICIAL_IMAGE = 'ghcr.io/wei-shaw/sub2api@sha256:44b59fc74b0b582750ef5f38146782db177767ef9d3f34351f1c75c157b1bb88'
 REPOSITORY = 'ghcr.io/nankeonlydream/sub2api'
 DEPLOY = Path('/root/sub2api-deploy')
 RELEASES = Path('/root/sub2api-creator-release')
@@ -48,8 +49,13 @@ def validate_image_ref(value):
 
 def validate_current_image(host, value):
     creator = re.fullmatch(re.escape(REPOSITORY) + r'@sha256:[a-f0-9]{64}', value)
-    require(creator or (host == LEFT_HOST and value == LEFT_LEGACY_IMAGE),
+    require(creator or (host == LEFT_HOST and value in (LEFT_LEGACY_IMAGE, LEFT_OFFICIAL_IMAGE)),
             'Unexpected current production image')
+
+
+def validate_migration_compatibility(applied, target):
+    mismatches = sorted(name for name in applied if name in target and applied[name] != target[name])
+    require(not mismatches, 'Applied migration checksum mismatch: ' + ', '.join(mismatches))
 
 
 def validate_companions(services):
@@ -208,6 +214,7 @@ def main():
         require(metadata['version'] in version and metadata['revision'] in version, 'Binary metadata mismatch')
         replacement = replace_image(original, old['Config']['Image'], pinned)
         before = migrations()
+        validate_migration_compatibility(before, metadata['migrations'])
         expected = {n: c for n, c in metadata['migrations'].items() if n not in before}
         log('PENDING_MIGRATIONS ' + json.dumps(sorted(expected)))
         if old['Image'] == image['Id']:
