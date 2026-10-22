@@ -3371,4 +3371,70 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('.field-block .stepper strong').text()).toBe('8 秒')
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二个镜头的右侧编辑文案')
   })
+  it('downloads a URL-only generated image and saves self-contained bytes instead of its expiring URL', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    generateImage.mockResolvedValue({ data: [{ url: 'https://temporary.example/new.png' }] })
+    downloadImage.mockResolvedValue(new Blob(['original'], { type: 'image/png' }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('#creator-prompt').setValue('保存临时链接原图')
+    await wrapper.get('.generate-button').trigger('click')
+    await vi.waitFor(() => expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
+      status: 'completed', outputs: ['data:image/png;base64,b3JpZ2luYWw='],
+    })))
+    expect(downloadImage).toHaveBeenCalledWith(image2Key.key, 'https://temporary.example/new.png')
+    expect(wrapper.get('.result-media img').attributes('src')).toBe('data:image/png;base64,b3JpZ2luYWw=')
+    expect(wrapper.text()).toContain('最多保留 50 张图片')
+    wrapper.unmount()
+  })
+
+  it('recovers a still-valid historical link without generating a new image', async () => {
+    const work = { id: 'recover-original', type: 'image', status: 'completed', prompt: '旧图',
+      model: 'gpt-image-2', provider: 'image2', groupName: image2Group.name, groupId: image2Group.id,
+      createdAt: 1, updatedAt: 1, outputs: ['https://temporary.example/old.png'] }
+    listHistory.mockResolvedValue([work])
+    getHistory.mockResolvedValue(work)
+    putHistory.mockResolvedValue(true)
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    downloadImage.mockResolvedValue(new Blob(['original'], { type: 'image/png' }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await vi.waitFor(() => expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
+      id: work.id, outputs: ['data:image/png;base64,b3JpZ2luYWw='],
+    }), 1))
+    expect(generateImage).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not recreate a historical work deleted while its original is downloading', async () => {
+    const work = { id: 'deleted-during-recovery', type: 'image', status: 'completed', prompt: '删除旧图',
+      model: 'gpt-image-2', provider: 'image2', groupName: image2Group.name,
+      createdAt: 1, updatedAt: 1, outputs: ['https://temporary.example/deleted.png'] }
+    listHistory.mockResolvedValue([work])
+    getHistory.mockResolvedValue(undefined)
+    downloadImage.mockResolvedValue(new Blob(['original'], { type: 'image/png' }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await vi.waitFor(() => expect(getHistory).toHaveBeenCalledWith(work.id))
+    expect(putHistory).not.toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('warns when browser storage only retains a generated work in memory', async () => {
+    putHistory.mockResolvedValue(false)
+    listGroups.mockResolvedValue([image2Group])
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('#creator-prompt').setValue('本地空间不足')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.local-save-warning').text()).toContain('刷新后可能丢失')
+    expect(wrapper.find('.result-media img').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
 })

@@ -72,12 +72,17 @@
       </button>
     </nav>
 
+    <p v-if="localSaveWarning" class="local-save-warning" role="alert">
+      {{ localSaveWarning }}
+      <button v-if="selectedWork?.type === 'image'" type="button" @click="retryLocalImageSave">重试保存原图</button>
+    </p>
     <div class="studio-grid" :class="{ 'history-collapsed': historyCollapsed }">
       <aside id="creator-history-panel" class="history-panel" aria-label="作品历史">
         <div class="history-heading">
           <div>
             <h2>{{ historyFilter === 'image' ? '图片历史' : '视频历史' }}</h2>
             <p>作品仅保存在当前浏览器</p>
+            <p v-if="historyFilter === 'image'">最多保留 50 张图片，超出自动删除最旧图片</p>
           </div>
           <span class="history-count">{{ visibleHistory.length }}</span>
           <button type="button" class="collapse-action" title="收起作品历史" @click="historyCollapsed = true">
@@ -1401,6 +1406,10 @@ const videoShots = ref<VideoShot[]>([{
 const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
+const localSaveWarning = ref('')
+const imageDownloads = new Map<string, Promise<Blob>>()
+const historicalImageSaves = new Map<string, Promise<void>>()
+let historicalImageRecoveryRunning = false
 const referencingOutputKey = ref('')
 const downloadingOutputKey = ref('')
 const activeTemplateIndex = ref(0)
@@ -1973,6 +1982,7 @@ async function refreshStudio() {
     await syncHistory()
     syncSelectedGroup()
     await loadModels()
+    void preserveHistoricalImages()
   } catch (error) {
     appStore.showError(errorMessage(error, '创作中心加载失败'))
   } finally {
@@ -2508,7 +2518,7 @@ async function generateFromCurrentSettings(source: string) {
     task.percent = 100
     task.progress = '作品已完成'
     await persistWork(work)
-    applyHistoryUpdate(cloneWork(work))
+    if (historyItems.value.some(item => item.id === work.id)) applyHistoryUpdate(cloneWork(work))
     appStore.showSuccess('作品生成完成')
   } catch (error) {
     work.status = 'failed'
@@ -2524,6 +2534,71 @@ async function generateFromCurrentSettings(source: string) {
       generationTimer = undefined
     }
   }
+}
+
+function loadCreatorImageBlob(apiKey: string, url: string): Promise<Blob> {
+  const pending = imageDownloads.get(url)
+  if (pending) return pending
+  const download = downloadCreatorImage(apiKey, url).finally(() => {
+    if (imageDownloads.get(url) === download) imageDownloads.delete(url)
+  })
+  imageDownloads.set(url, download)
+  return download
+}
+
+async function localImageOutput(apiKey: string, output: string): Promise<string> {
+  if (!/^https?:\/\//i.test(output)) return output
+  const blob = await loadCreatorImageBlob(apiKey, output)
+  return fileToDataUrl(blob)
+}
+
+async function retryLocalImageSave() {
+  const work = selectedWork.value
+  if (!work || work.type !== 'image') return
+  historicalImageSaves.delete(work.id)
+  localSaveWarning.value = ''
+  await preserveHistoricalImage(work)
+  // Also retry IndexedDB if the image is already self-contained in memory.
+  await persistWork(work)
+}
+
+async function preserveHistoricalImages() {
+  if (historicalImageRecoveryRunning) return
+  historicalImageRecoveryRunning = true
+  try {
+    // Recover still-valid links while the page is open, before they expire.
+    for (const work of [...historyItems.value]) {
+      if (disposed) break
+      await preserveHistoricalImage(work)
+    }
+  } finally { historicalImageRecoveryRunning = false }
+}
+
+function preserveHistoricalImage(work: CreatorHistoryItem): Promise<void> {
+  if (work.type !== 'image' || work.status === 'pending' || !work.outputs.some(output => /^https?:\/\//i.test(output))) return Promise.resolve()
+  const existing = historicalImageSaves.get(work.id)
+  if (existing) return existing
+  const revision = work.updatedAt
+  const outputs = [...work.outputs]
+  const saving = (async () => {
+    try {
+      const key = findKeyForWork(work)
+      const localOutputs: string[] = []
+      for (const output of outputs) localOutputs.push(await localImageOutput(key?.key || '', output))
+      // Do not resurrect an evicted/deleted work or overwrite another tab's edit.
+      const latest = await creatorHistory.get(work.id)
+      if (disposed || !latest || latest.updatedAt !== revision || !historyItems.value.some(item => item.id === work.id)) return
+      const recovered = { ...cloneWork(work), outputs: localOutputs, updatedAt: Math.max(Date.now(), revision + 1) }
+      delete recovered.imagePersistenceError
+      const saved = await persistWork(recovered, revision)
+      if (saved !== undefined) applyHistoryUpdate(recovered)
+    } catch {
+      work.imagePersistenceError = '原图暂时无法保存。上游临时链接可能已失效；已失效且未保存的图片无法从历史记录恢复。'
+      if (selectedWork.value?.id === work.id) localSaveWarning.value = work.imagePersistenceError
+    }
+  })()
+  historicalImageSaves.set(work.id, saving)
+  return saving
 }
 
 async function generateImageWork(work: CreatorHistoryItem, input: ImageGenerationSnapshot, task: GenerationTask) {
@@ -2574,7 +2649,18 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
         : '正在重新调用 Grok 图片模型'
       result = await generate()
     }
-    const batchOutputs = result.data.map(item => item.url).filter(Boolean)
+    task.progress = '图片已生成，正在保存原图到当前浏览器'
+    const batchOutputs: string[] = []
+    for (const item of result.data) {
+      if (!item.url) continue
+      try {
+        batchOutputs.push(await localImageOutput(input.apiKey, item.url))
+      } catch {
+        batchOutputs.push(item.url)
+        work.imagePersistenceError = '原图尚未保存到本地，上游链接可能失效。请重试保存或立即下载原图。'
+        localSaveWarning.value = work.imagePersistenceError
+      }
+    }
     if (input.capability !== 'image2') {
       const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
       work.upstreamImageSizes = [...(work.upstreamImageSizes || []), ...sourceSizes.slice(0, requestCount - outputs.length)]
@@ -2919,13 +3005,20 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
   throw new Error('视频生成等待超时，请稍后刷新历史记录')
 }
 
-async function persistWork(work: CreatorHistoryItem) {
+async function persistWork(work: CreatorHistoryItem, expectedUpdatedAt?: number) {
   if (work.type === 'video') await captureVideoBlobsForPersistence(work)
-  await creatorHistory.put({
+  const storedWork = {
     ...work,
     outputs: work.outputs.filter(output => !output.startsWith('blob:')),
     mergedOutput: work.mergedOutput?.startsWith('blob:') ? undefined : work.mergedOutput,
-  })
+  }
+  const saved = expectedUpdatedAt === undefined
+    ? await creatorHistory.put(storedWork)
+    : await creatorHistory.put(storedWork, expectedUpdatedAt)
+  if (saved === false) {
+    localSaveWarning.value = '浏览器空间不足或本地存储不可用：部分作品仅在本次页面中保留，请立即下载原图；刷新后可能丢失。'
+  }
+  return saved
 }
 
 function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
@@ -3030,7 +3123,11 @@ async function selectWork(work: CreatorHistoryItem) {
     && (work.status === 'pending' || !work.outputs.length || needsMergedVideo)
   if (shouldRefreshVideo) loadingVideoWorkId.value = work.id
   await restoreWorkSettings(work)
-  if (work.type === 'image' && !activeGenerations.has(work.id)) await normalizeHistoricalImageWork(work)
+  if (work.type === 'image' && !activeGenerations.has(work.id)) {
+    await preserveHistoricalImage(work)
+    if (work.imagePersistenceError) localSaveWarning.value = work.imagePersistenceError
+    await normalizeHistoricalImageWork(work)
+  }
   if (shouldRefreshVideo) await refreshVideoWork(work, true)
 }
 
@@ -3404,7 +3501,7 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     } else if (isCrossOriginHttpURL(output)) {
       const key = findKeyForWork(work)
       if (!key) throw new Error('未找到图片对应的可用 Key')
-      blob = await downloadCreatorImage(key.key, output)
+      blob = await loadCreatorImageBlob(key.key, output)
     } else {
       blob = await fetchImageBlob(output)
     }
@@ -3735,7 +3832,7 @@ async function downloadOutput(url: string, work: CreatorHistoryItem, index: numb
     } else if (crossOriginDownload) {
       const key = findKeyForWork(work)
       if (!key) throw new Error('未找到图片对应的可用 Key')
-      temporaryUrl = URL.createObjectURL(await downloadCreatorImage(key.key, url))
+      temporaryUrl = URL.createObjectURL(await loadCreatorImageBlob(key.key, url))
       downloadUrl = temporaryUrl
     } else if (!url.startsWith('blob:') && !url.startsWith('data:')) {
       const response = await fetch(url)
@@ -3797,11 +3894,11 @@ function errorMessage(error: unknown, fallback: string) {
   return fallback
 }
 
-function fileToDataUrl(file: File) {
+function fileToDataUrl(file: Blob) {
   return new Promise<string>((resolve, reject) => {
     const reader = new FileReader()
     reader.onload = () => resolve(String(reader.result || ''))
-    reader.onerror = () => reject(new Error('参考图读取失败'))
+    reader.onerror = () => reject(new Error('图片读取失败'))
     reader.readAsDataURL(file)
   })
 }
@@ -3923,6 +4020,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.local-save-warning { margin: 0; padding: 12px 20px; color: var(--creator-image-text, #8a601a); background: var(--creator-image-background, #fff8e8); font-size: 13px; }
 /* Dialogs teleport to <body>, so they need their own copy of the design tokens. */
 .creator-studio,
 :global(.creator-dialog) {
