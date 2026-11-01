@@ -37,7 +37,7 @@ describe('MiniMax-H3 video pricing', () => {
     expect(wrapper.findAll('input[type="number"]')).toHaveLength(0)
     await wrapper.get('input[type="checkbox"]').setValue(true)
     const next = wrapper.emitted('update:modelValue')![0][0] as ReturnType<typeof createVideoModelPricesForm>
-    expect(next['minimax-h3']).toEqual({ per_second: null })
+    expect(next['minimax-h3']).toEqual({ '768p': null, '1440p': null })
     expect(serializeVideoModelPrices(next)).toEqual(existing)
   })
 
@@ -60,5 +60,40 @@ describe('MiniMax-H3 video pricing', () => {
     const next = wrapper.emitted('update:modelValue')![0][0] as ReturnType<typeof createVideoModelPricesForm>
     expect(serializeVideoModelPrices(next)['minimax-h3']).toEqual({ request_1s: 0 })
     expect(wrapper.get('input[min="0"]').attributes('required')).toBeDefined()
+  })
+
+  it('keeps Zhongheng model prices beside the shared tariff', async () => {
+    const wrapper = render({ 'minimax-h3': { '768p': 0.15, '1440p': 0.225, 'xminimex-h3': 0.26 } })
+    expect((wrapper.get('input[data-model="xminimex-h3"]').element as HTMLInputElement).value).toBe('0.26')
+    await wrapper.get('input[data-model="minimaxh3-768"]').setValue('2.6')
+    let next = wrapper.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    await wrapper.setProps({ modelValue: next })
+    await wrapper.get('input[data-resolution="768p"]').setValue('0.1')
+    next = wrapper.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    await wrapper.setProps({ modelValue: next })
+    await wrapper.get('select').setValue('per_second')
+    next = wrapper.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    expect(serializeVideoModelPrices(next)['minimax-h3']).toEqual({ per_second: 0.1, 'xminimex-h3': 0.26, 'minimaxh3-768': 2.6 })
+
+    // A group selling only Zhongheng models stays enabled and editable.
+    const only = render({ 'minimax-h3': { 'xminimex-h3': 0.26 } })
+    await only.get('input[min="0"]').setValue('0.2')
+    next = only.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    expect(serializeVideoModelPrices(next)['minimax-h3']).toEqual({ per_second: 0.2, 'xminimex-h3': 0.26 })
+  })
+
+  it('saves separate 768p and 1440p per-second prices', async () => {
+    const wrapper = render({ 'minimax-h3': { per_second: 0.15 } })
+    await wrapper.get('select').setValue('per_resolution')
+    let next = wrapper.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    expect(next['minimax-h3']).toEqual({ '768p': 0.15, '1440p': 0.15 })
+    await wrapper.setProps({ modelValue: next })
+    await wrapper.get('input[data-resolution="768p"]').setValue('0.1')
+    next = wrapper.emitted('update:modelValue')!.at(-1)![0] as ReturnType<typeof createVideoModelPricesForm>
+    expect(serializeVideoModelPrices(next)['minimax-h3']).toEqual({ '768p': 0.1, '1440p': 0.15 })
+
+    const reloaded = render({ 'minimax-h3': { '768p': 0.1, '1440p': 0.15 } })
+    expect((reloaded.get('select').element as HTMLSelectElement).value).toBe('per_resolution')
+    expect((reloaded.get('input[data-resolution="1440p"]').element as HTMLInputElement).value).toBe('0.15')
   })
 })

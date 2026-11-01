@@ -35,6 +35,23 @@ describe('CreatorVideoPlayer', () => {
     }
   })
 
+  it('shows a light shimmer skeleton instead of a dark overlay while a slow video loads', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(CreatorVideoPlayer, { props: { src: 'blob:video' } })
+    try {
+      expect(wrapper.find('.video-skeleton').exists()).toBe(false)
+      await vi.advanceTimersByTimeAsync(150)
+      const skeleton = wrapper.get('.video-skeleton')
+      expect(skeleton.attributes('role')).toBe('status')
+      expect(skeleton.text()).toBe('正在加载视频')
+      await wrapper.get('video').trigger('loadeddata')
+      expect(wrapper.find('.video-skeleton').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
   it('plays, pauses and replays through the cover without showing native controls', async () => {
     const wrapper = mount(CreatorVideoPlayer, { props: { src: 'blob:video' } })
     const video = wrapper.get<HTMLVideoElement>('video')
@@ -87,6 +104,62 @@ describe('CreatorVideoPlayer', () => {
     await video.trigger('loadstart')
     expect(wrapper.emitted('loadstart')).toHaveLength(1)
     wrapper.unmount()
+  })
+
+  it('toggles sound and remembers the choice for later players', async () => {
+    localStorage.removeItem('creator-video-muted')
+    const first = mount(CreatorVideoPlayer, { props: { src: 'blob:first' } })
+    await first.get('video').trigger('loadeddata')
+    expect(first.get<HTMLVideoElement>('video').element.muted).toBe(false)
+    await first.get('[aria-label="关闭声音"]').trigger('click')
+    expect(first.get<HTMLVideoElement>('video').element.muted).toBe(true)
+    expect(first.get('.video-sound').attributes('aria-pressed')).toBe('true')
+    expect(localStorage.getItem('creator-video-muted')).toBe('1')
+    const second = mount(CreatorVideoPlayer, { props: { src: 'blob:second' } })
+    await second.get('video').trigger('loadeddata')
+    expect(second.get<HTMLVideoElement>('video').element.muted).toBe(true)
+    await second.get('[aria-label="打开声音"]').trigger('click')
+    expect(second.get<HTMLVideoElement>('video').element.muted).toBe(false)
+    expect(localStorage.getItem('creator-video-muted')).toBe('0')
+    first.unmount()
+    second.unmount()
+  })
+
+  it('reveals controls on the first tap during playback and hides them again after a moment', async () => {
+    vi.useFakeTimers()
+    const wrapper = mount(CreatorVideoPlayer, { props: { src: 'blob:video' } })
+    try {
+      const video = wrapper.get<HTMLVideoElement>('video')
+      let paused = true
+      Object.defineProperty(video.element, 'paused', { get: () => paused })
+      vi.spyOn(video.element, 'play').mockImplementation(async () => {
+        paused = false
+        video.element.dispatchEvent(new Event('play'))
+      })
+      const pause = vi.spyOn(video.element, 'pause').mockImplementation(() => {
+        paused = true
+        video.element.dispatchEvent(new Event('pause'))
+      })
+      await video.trigger('loadeddata')
+      await wrapper.get('.video-play-toggle').trigger('click')
+      await flushPromises()
+      expect(wrapper.classes()).toContain('is-playing')
+      await vi.advanceTimersByTimeAsync(2500)
+      expect(wrapper.classes()).not.toContain('controls-visible')
+
+      await wrapper.get('.video-sound').trigger('pointerdown', { pointerType: 'touch' })
+      await wrapper.get('.video-sound').trigger('click')
+      expect(wrapper.classes()).toContain('controls-visible')
+      expect(video.element.muted).toBe(false)
+      await wrapper.get('.video-play-toggle').trigger('pointerdown', { pointerType: 'touch' })
+      await wrapper.get('.video-play-toggle').trigger('click')
+      expect(pause).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(2500)
+      expect(wrapper.classes()).not.toContain('controls-visible')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
   })
 
   it('opens the whole player in fullscreen so its custom controls remain available', async () => {

@@ -186,7 +186,7 @@ describe('creatorHistory', () => {
     expect(images.map(item => item.id)).toEqual(Array.from({ length: 12 }, (_, index) => `image-${11 - index}`))
     expect(videos.map(item => item.id)).toEqual(Array.from({ length: 12 }, (_, index) => `video-${11 - index}`))
   })
-  it('retains the newest 50 individual images across multi-output works and leaves videos alone', async () => {
+  it('keeps every image across multi-output works without an image cap', async () => {
     await putCreatorHistory(createItem('old-video', 0, { type: 'video' }))
     await putCreatorHistory(createItem('running', 1, { status: 'pending', outputs: ['in-progress'] }))
     for (let index = 0; index < 18; index++) {
@@ -196,9 +196,8 @@ describe('creatorHistory', () => {
     }
     const stored = await listCreatorHistory()
     const images = stored.filter(item => item.type === 'image' && item.status !== 'pending')
-    expect(images.reduce((total, work) => total + work.outputs.length, 0)).toBe(50)
-    expect(images.at(-1)).toMatchObject({ id: 'batch-1', outputs: ['1-1', '1-2'], outputCount: 2 })
-    expect(stored.some(work => work.id === 'batch-0')).toBe(false)
+    expect(images.reduce((total, work) => total + work.outputs.length, 0)).toBe(54)
+    expect(images.at(-1)).toMatchObject({ id: 'batch-0', outputs: ['0-0', '0-1', '0-2'] })
     expect(stored.some(work => work.id === 'old-video')).toBe(true)
     expect(stored.some(work => work.id === 'running')).toBe(true)
   })
@@ -207,8 +206,10 @@ describe('creatorHistory', () => {
     for (let index = 0; index < 50; index++) await putCreatorHistory(createItem(`image-${index}`, index))
     await putCreatorHistory(createItem('image-0', 0, { updatedAt: 10000 }))
     await putCreatorHistory(createItem('image-50', 50))
-    expect(await getCreatorHistory('image-0')).toBeUndefined()
-    expect((await listCreatorHistory()).filter(work => work.type === 'image')).toHaveLength(50)
+    const images = (await listCreatorHistory()).filter(work => work.type === 'image')
+    expect(images).toHaveLength(51)
+    expect(images[0].id).toBe('image-50')
+    expect(images.at(-1)?.id).toBe('image-0')
   })
 
 })

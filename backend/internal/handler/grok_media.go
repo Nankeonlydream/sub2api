@@ -63,6 +63,10 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		platform = service.PlatformMiniMax
 		noAccountCode, noAccountMessage = "minimax_h3_no_eligible_account", "No eligible MiniMax-H3 accounts"
 	}
+	if endpoint.IsSeedanceVideo() {
+		platform = service.PlatformDeepseek
+		noAccountCode, noAccountMessage = "seedance_video_no_eligible_account", "No eligible Seedance video accounts"
+	}
 	streamStarted := false
 	defer h.recoverResponsesPanic(c, &streamStarted)
 
@@ -110,20 +114,32 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 
 	contentType := c.GetHeader("Content-Type")
 	requestInfo := service.ParseGrokMediaRequest(contentType, body)
+	// Relay video families (H3, Seedance) quote a fixed USD base cost at
+	// creation from the group tariff; it is reserved now and billed on completion.
 	var miniMaxH3BaseCost *float64
-	if endpoint.IsMiniMaxH3() {
+	if endpoint.IsMiniMaxH3() || endpoint.IsSeedanceVideo() {
 		requestInfo = service.GrokMediaRequestInfo{}
-		if endpoint == service.MiniMaxH3EndpointCreate {
-			requestInfo, err = service.ParseMiniMaxH3Request(body)
+		if endpoint == service.MiniMaxH3EndpointCreate || endpoint == service.SeedanceVideoEndpointCreate {
+			name, parse := "MiniMax-H3", service.ParseMiniMaxH3Request
+			if endpoint.IsSeedanceVideo() {
+				name, parse = "Seedance", service.ParseSeedanceVideoRequest
+			}
+			requestInfo, err = parse(body)
 			if err != nil {
 				h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 				return
 			}
 			if apiKey.Group == nil {
-				h.errorResponse(c, http.StatusForbidden, "permission_error", "MiniMax-H3 requires a group video price")
+				h.errorResponse(c, http.StatusForbidden, "permission_error", name+" requires a group video price")
 				return
 			}
-			base, quoteErr := service.QuoteMiniMaxH3Video(apiKey.Group.VideoModelPrices, requestInfo.DurationSeconds)
+			var base float64
+			var quoteErr error
+			if endpoint.IsSeedanceVideo() {
+				base, quoteErr = service.QuoteSeedanceVideo(apiKey.Group.VideoModelPrices, requestInfo.Model, requestInfo.DurationSeconds)
+			} else {
+				base, quoteErr = service.QuoteMiniMaxH3Model(apiKey.Group.VideoModelPrices, requestInfo.Model, requestInfo.DurationSeconds)
+			}
 			if quoteErr != nil {
 				h.errorResponse(c, http.StatusBadRequest, "invalid_request_error", quoteErr.Error())
 				return
@@ -154,7 +170,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	setOpsEndpointContext(c, "", int16(service.RequestTypeSync))
 
 	if endpoint.IsGenerationRequest() {
-		if !endpoint.IsMiniMaxH3() && !service.GroupAllowsImageGeneration(apiKey.Group) {
+		if !endpoint.IsMiniMaxH3() && !endpoint.IsSeedanceVideo() && !service.GroupAllowsImageGeneration(apiKey.Group) {
 			h.errorResponse(c, http.StatusForbidden, "permission_error", service.ImageGenerationPermissionMessage())
 			return
 		}
@@ -426,6 +442,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			if endpoint.IsMiniMaxH3() {
 				return h.gatewayService.ForwardMiniMaxH3(requestCtx, c, account, endpoint, requestID, body)
 			}
+			if endpoint.IsSeedanceVideo() {
+				return h.gatewayService.ForwardSeedanceVideo(requestCtx, c, account, endpoint, requestID, body)
+			}
 			return h.gatewayService.ForwardGrokMedia(requestCtx, c, account, endpoint, requestID, body, contentType)
 		}()
 
@@ -561,8 +580,9 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		}
 		// Status poll OR content download can observe official done+video.url.
 		// Both paths share the same claim key so the customer is charged once.
-		if endpoint == service.MiniMaxH3EndpointStatus || endpoint == service.MiniMaxH3EndpointContent {
-			if billResult := prepareMiniMaxH3CompletionBilling(requestCtx, h, apiKey, subject, requestID, result); billResult != nil {
+		if endpoint == service.MiniMaxH3EndpointStatus || endpoint == service.MiniMaxH3EndpointContent ||
+			endpoint == service.SeedanceVideoEndpointStatus || endpoint == service.SeedanceVideoEndpointContent {
+			if billResult := prepareRelayVideoCompletionBilling(requestCtx, h, apiKey, subject, requestID, result); billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, requestID)
 			}
 		} else if endpoint == service.SeedanceEndpointStatus {
@@ -616,6 +636,9 @@ func grokMediaRequiredCapability(endpoint service.GrokMediaEndpoint) service.Ope
 	if endpoint.IsSeedance() {
 		return service.OpenAIEndpointCapabilitySeedance
 	}
+	if endpoint.IsSeedanceVideo() {
+		return service.OpenAIEndpointCapabilitySeedanceVideo
+	}
 	if endpoint.IsGenerationRequest() {
 		return service.OpenAIEndpointCapabilityGrokMediaGeneration
 	}
@@ -656,7 +679,7 @@ func isCreatorStudioAPIKey(apiKey *service.APIKey) bool {
 
 func isGrokVideoCreateEndpoint(endpoint service.GrokMediaEndpoint) bool {
 	switch endpoint {
-	case service.MiniMaxH3EndpointCreate, service.SeedanceEndpointCreate, service.GrokMediaEndpointVideosGenerations,
+	case service.MiniMaxH3EndpointCreate, service.SeedanceEndpointCreate, service.SeedanceVideoEndpointCreate, service.GrokMediaEndpointVideosGenerations,
 		service.GrokMediaEndpointVideosEdits,
 		service.GrokMediaEndpointVideosExtensions:
 		return true

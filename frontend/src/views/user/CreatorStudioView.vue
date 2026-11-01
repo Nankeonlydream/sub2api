@@ -1,7 +1,7 @@
 <template>
   <AppLayout>
     <section ref="studioElement" class="creator-studio card" aria-label="创作中心">
-    <header class="studio-toolbar">
+    <header ref="toolbarElement" class="studio-toolbar" :class="{ 'is-stuck': toolbarStuck }">
       <div class="studio-title">
         <span class="studio-title-icon"><Icon name="sparkles" size="sm" /></span>
         <span>创作中心</span>
@@ -15,10 +15,10 @@
           :aria-expanded="!historyCollapsed"
           @click="historyCollapsed = false"
         >
-          <span class="playground-history-reopen-icon">
-            <Icon name="inbox" size="sm" />
+          <span class="history-entry-surface">
+            <span class="history-entry-icon playground-history-reopen-icon"><Icon name="inbox" size="sm" :stroke-width="1.7" /></span>
+            <span class="history-entry-copy"><small>HISTORY</small><strong>历史记录</strong></span>
           </span>
-          <span>历史记录</span>
         </button>
       </div>
 
@@ -52,40 +52,74 @@
         <button type="button" class="connection-action" title="刷新工作台状态" aria-label="刷新工作台状态" :disabled="bootstrapping" @click="refreshStudio">
           <Icon name="broadcast" size="sm" :class="{ pulsing: bootstrapping }" />
         </button>
+        <button
+          ref="historyToggleElement"
+          type="button"
+          class="history-drawer-toggle"
+          title="作品历史"
+          :aria-label="`打开作品历史${activeGenerations.size ? `，${activeGenerations.size} 个生成中` : ''}`"
+          aria-controls="creator-history-panel"
+          :aria-expanded="historyDrawerOpen"
+          @click="historyDrawerOpen = true"
+        >
+          <span class="history-entry-surface">
+            <span class="history-entry-icon">
+              <Icon name="inbox" size="sm" :stroke-width="1.7" />
+              <span v-if="activeGenerations.size" class="history-drawer-toggle-live" aria-hidden="true"></span>
+            </span>
+            <span class="history-entry-copy"><small>HISTORY</small><strong class="history-drawer-toggle-label">历史记录</strong></span>
+          </span>
+        </button>
       </div>
     </header>
-
-    <nav v-if="activeGenerations.size" class="generation-tasks" aria-label="正在生成的任务">
-      <span class="generation-tasks-label">生成中 {{ activeGenerations.size }}</span>
-      <button
-        v-for="task in activeGenerations.values()"
-        :key="task.id"
-        type="button"
-        class="generation-task"
-        :class="{ active: selectedWork?.id === task.id }"
-        :aria-pressed="selectedWork?.id === task.id"
-        :title="task.prompt"
-        @click="selectGeneration(task.id)"
-      >
-        <span class="button-spinner"></span>
-        <span>{{ task.prompt }}</span>
-      </button>
-    </nav>
 
     <p v-if="localSaveWarning" class="local-save-warning" role="alert">
       {{ localSaveWarning }}
       <button v-if="selectedWork?.type === 'image'" type="button" @click="retryLocalImageSave">重试保存原图</button>
     </p>
     <div class="studio-grid" :class="{ 'history-collapsed': historyCollapsed }">
-      <aside id="creator-history-panel" class="history-panel" aria-label="作品历史">
+      <div
+        v-if="compactHistory"
+        class="history-drawer-backdrop"
+        :class="{ open: historyDrawerOpen }"
+        aria-hidden="true"
+        @click="historyDrawerOpen = false"
+      ></div>
+      <!-- Below 1120px the same panel becomes a fixed drawer (bottom sheet on phones). -->
+      <aside
+        id="creator-history-panel"
+        class="history-panel"
+        :class="{ 'is-drawer': compactHistory, open: compactHistory && historyDrawerOpen, dragging: historyDragOffset > 0 }"
+        :style="historyDragOffset ? { transform: `translateY(${historyDragOffset}px)` } : undefined"
+        :role="compactHistory ? 'dialog' : undefined"
+        :aria-modal="compactHistory ? 'true' : undefined"
+        :aria-hidden="compactHistory && !historyDrawerOpen ? 'true' : undefined"
+        :inert="compactHistory && !historyDrawerOpen ? true : undefined"
+        aria-label="作品历史"
+        @keydown.esc="historyDrawerOpen = false"
+        @touchstart.passive="startHistoryDrag"
+        @touchmove.passive="moveHistoryDrag"
+        @touchend="endHistoryDrag"
+        @touchcancel="endHistoryDrag"
+      >
+        <span class="history-drawer-handle" aria-hidden="true"></span>
         <div class="history-heading">
           <div>
             <h2>{{ historyFilter === 'image' ? '图片历史' : '视频历史' }}</h2>
-            <p>作品仅保存在当前浏览器</p>
-            <p v-if="historyFilter === 'image'">最多保留 50 张图片，超出自动删除最旧图片</p>
           </div>
           <span class="history-count">{{ visibleHistory.length }}</span>
-          <button type="button" class="collapse-action" title="收起作品历史" @click="historyCollapsed = true">
+          <button
+            v-if="compactHistory"
+            ref="historyCloseElement"
+            type="button"
+            class="collapse-action"
+            title="关闭作品历史"
+            aria-label="关闭作品历史"
+            @click="historyDrawerOpen = false"
+          >
+            <Icon name="x" size="sm" />
+          </button>
+          <button v-else type="button" class="collapse-action" title="收起作品历史" @click="historyCollapsed = true">
             <Icon name="chevronLeft" size="sm" />
           </button>
         </div>
@@ -93,25 +127,31 @@
         <div class="history-tabs">
           <button type="button" :class="{ active: historyFilter === 'image' }" @click="historyFilter = 'image'">
             <Icon name="grid" size="xs" /> 图片 {{ imageHistoryCount }}
+            <span v-if="activeGenerationCounts.image" class="history-tab-generating" :title="`${activeGenerationCounts.image} 个图片生成中`">
+              <span class="button-spinner"></span>{{ activeGenerationCounts.image }}
+            </span>
           </button>
           <button type="button" :class="{ active: historyFilter === 'video' }" @click="historyFilter = 'video'">
             <Icon name="play" size="xs" /> 视频 {{ videoHistoryCount }}
+            <span v-if="activeGenerationCounts.video" class="history-tab-generating" :title="`${activeGenerationCounts.video} 个视频生成中`">
+              <span class="button-spinner"></span>{{ activeGenerationCounts.video }}
+            </span>
           </button>
         </div>
 
-        <div v-if="visibleHistory.length && !historyCollapsed" ref="historyListElement" class="history-list">
+        <div v-if="visibleHistory.length && !historyListHidden" ref="historyListElement" class="history-list">
           <div v-if="historyPaddingTop" :style="{ height: `${historyPaddingTop}px` }" aria-hidden="true"></div>
           <article
             v-for="work in renderedHistory"
             :key="work.id"
             class="history-item"
-            :class="{ active: selectedWork?.id === work.id }"
+            :class="{ active: selectedWork?.id === work.id, generating: activeGenerations.has(work.id) }"
           >
             <button
               type="button"
               class="history-item-hitbox"
               :aria-label="`打开作品：${historyWorkTitle(work)}`"
-              @click="selectWork(work)"
+              @click="openHistoryWork(work)"
             ></button>
             <span class="history-preview">
               <CreatorThumbnail v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" :cache-key="`${work.id}:${work.updatedAt}`" />
@@ -123,18 +163,24 @@
                 :cache-key="work.id + ':' + work.updatedAt"
                 @ready="saveVideoThumbnail(work, $event)"
               />
-              <Icon v-else :name="work.type === 'image' ? 'sparkles' : 'play'" size="sm" />
-              <span v-if="work.status === 'pending'" class="history-status pending"></span>
+              <Icon v-else-if="!activeGenerations.has(work.id)" :name="work.type === 'image' ? 'sparkles' : 'play'" size="sm" />
+              <span
+                v-if="activeGenerations.has(work.id)"
+                class="history-generating"
+                :class="{ 'has-preview': work.type === 'image' && Boolean(work.outputs[0]) }"
+                aria-hidden="true"
+              >
+                <span class="history-generating-ring"><Icon :name="work.type === 'image' ? 'sparkles' : 'play'" size="xs" /></span>
+              </span>
+              <span v-else-if="work.status === 'pending'" class="history-status pending"></span>
               <span v-else-if="work.status === 'failed'" class="history-status failed"></span>
             </span>
             <span class="history-copy">
               <strong>{{ historyWorkTitle(work) }}</strong>
-              <small>{{ work.model }} · {{ work.aspectRatio || '自动' }} · {{ workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
+              <small v-if="activeGenerations.has(work.id)" class="history-progress">{{ activeGenerations.get(work.id)?.progress || '生成中' }}</small>
+              <small v-else>{{ modelLabel(work.model) }} · {{ work.aspectRatio || '自动' }} · {{ workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
             </span>
             <span class="history-item-actions">
-              <button type="button" title="打开作品" aria-label="打开作品" @click.stop="selectWork(work)">
-                <Icon name="arrowRight" size="xs" />
-              </button>
               <button
                 type="button"
                 class="history-delete"
@@ -143,7 +189,7 @@
                 :disabled="activeGenerations.has(work.id)"
                 @click.stop="removeWork(work)"
               >
-                <Icon name="x" size="xs" />
+                <Icon name="trash" size="sm" />
               </button>
             </span>
           </article>
@@ -157,63 +203,136 @@
         </div>
       </aside>
 
-      <main class="canvas-panel">
-        <div v-if="selectedGeneration" class="generation-state">
-          <span class="generation-orbit"><Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="lg" /></span>
-          <h2>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
-          <p>{{ generationProgress }}</p>
-          <div class="generation-metrics">
-            <span>已用时</span>
-            <strong>{{ generationElapsedLabel }}</strong>
-            <strong v-if="generationMode === 'video' && generationPhase === 'generating' && generationHasExactProgress" class="generation-percent">{{ generationPercent }}%</strong>
+      <main ref="canvasPanelElement" class="canvas-panel">
+        <div v-if="selectedGeneration && selectedWork" class="generation-state">
+          <div class="generation-stage" :class="`is-${generationMode}`">
+            <span
+              v-for="frame in generationFrames"
+              :key="frame.index"
+              class="generation-frame"
+              :class="`is-${frame.state}`"
+              :style="generationFrameStyle"
+              :aria-hidden="frame.output ? undefined : 'true'"
+            >
+              <img v-if="frame.output" :src="frame.output" alt="" decoding="async" />
+              <!-- Finished images can be previewed, saved or edited while the rest are still drawing. -->
+              <template v-if="frame.output && generationMode === 'image'">
+                <button type="button" class="generation-frame-open" :title="`查看第 ${frame.index + 1} 张`" :aria-label="`查看第 ${frame.index + 1} 张`" @click="openPreview(frame.output)" />
+                <span class="generation-frame-actions">
+                  <button
+                    type="button"
+                    class="generation-frame-action is-preview"
+                    :title="`预览第 ${frame.index + 1} 张`"
+                    :aria-label="`预览第 ${frame.index + 1} 张`"
+                    @click="openPreview(frame.output)"
+                  ><Icon name="eye" size="xs" /></button>
+                  <button
+                    type="button"
+                    class="generation-frame-action generation-frame-download"
+                    :title="downloadingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在下载' : `下载第 ${frame.index + 1} 张`"
+                    :aria-label="`下载第 ${frame.index + 1} 张`"
+                    :disabled="Boolean(downloadingOutputKey)"
+                    @click="downloadOutput(frame.output, selectedWork, frame.index)"
+                  ><Icon name="download" size="xs" /></button>
+                  <button
+                    type="button"
+                    class="generation-frame-action generation-frame-edit"
+                    :title="referencingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在准备编辑' : `编辑第 ${frame.index + 1} 张`"
+                    :aria-label="`编辑第 ${frame.index + 1} 张`"
+                    :disabled="Boolean(referencingOutputKey)"
+                    @click="useOutputAsReference(frame.output, selectedWork, frame.index)"
+                  ><Icon name="edit" size="xs" /></button>
+                </span>
+              </template>
+              <span v-if="frame.state === 'failed'" class="generation-frame-failed"><Icon name="exclamationTriangle" size="sm" />未生成</span>
+              <span v-else-if="frame.state === 'current'" class="generation-frame-ring">
+                <Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="sm" />
+              </span>
+              <span v-else class="generation-frame-index">{{ frame.index + 1 }}</span>
+            </span>
           </div>
-          <div
-            class="progress-track"
-            :class="{ indeterminate: !generationHasExactProgress }"
-            role="progressbar"
-            :aria-valuenow="generationHasExactProgress ? generationPercent : undefined"
-            aria-valuemin="0"
-            aria-valuemax="100"
-          >
-            <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
+          <div class="generation-heading">
+            <h2>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
+            <p>{{ generationProgress }}</p>
+            <ul class="generation-tags">
+              <li>{{ modelLabel(selectedWork.model) }}</li>
+              <li>{{ selectedWork.aspectRatio || '自动' }}</li>
+              <li>{{ workResolutionLabel(selectedWork) }}</li>
+              <li v-if="generationMode === 'image'">{{ generationFrames.length }} 张</li>
+              <li v-else-if="(selectedWork.shotCount || 1) > 1">{{ selectedWork.shotCount }} 个镜头</li>
+            </ul>
+          </div>
+          <div class="generation-progress-card">
+            <div class="generation-metrics">
+              <span><Icon name="clock" size="xs" />已用时</span>
+              <strong>{{ generationElapsedLabel }}</strong>
+              <strong v-if="generationMode === 'video' && generationPhase === 'generating' && generationHasExactProgress" class="generation-percent">{{ generationPercent }}%</strong>
+              <em v-else-if="generationMode === 'image' && generationFrames.length > 1">已完成 {{ selectedWork.outputs.length }} / {{ generationFrames.length }}</em>
+            </div>
+            <div
+              class="progress-track"
+              :class="{ indeterminate: !generationHasExactProgress }"
+              role="progressbar"
+              :aria-valuenow="generationHasExactProgress ? generationPercent : undefined"
+              aria-valuemin="0"
+              aria-valuemax="100"
+            >
+              <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
+            </div>
+            <blockquote v-if="selectedWork.prompt" class="generation-prompt" :title="selectedWork.prompt">{{ selectedWork.prompt }}</blockquote>
           </div>
           <button type="button" class="new-creation-link generation-new-creation" @click="newCreation">
             <Icon name="plus" size="sm" />新建创作
           </button>
-          <small class="generation-note">
-            <span>生成期间请勿刷新或关闭页面</span>
-          </small>
         </div>
 
         <div v-else-if="selectedWork" class="result-workspace">
           <div class="result-heading result-heading-complete">
             <div>
-              <p class="eyebrow">{{ selectedWork.status === 'pending' ? '等待生成结果' : selectedWork.status === 'failed' ? '生成未完成' : '生成结果' }}</p>
-              <h2>{{ selectedWork.status === 'failed' ? '这次没有完成' : '本次创作' }}</h2>
+              <p class="eyebrow">{{ selectedWork.status === 'pending' && !hasResultImages(selectedWork) ? '等待生成结果' : selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '生成未完成' : '生成结果' }}</p>
+              <h2>{{ selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '这次没有完成' : '本次创作' }}</h2>
               <p>{{ resultMeta(selectedWork) }}</p>
             </div>
             <div class="result-heading-actions">
               <button type="button" class="icon-action danger" title="删除这条作品" aria-label="删除这条作品" @click="removeWork(selectedWork)">
                 <Icon name="trash" size="sm" />
               </button>
-              <span v-if="selectedWork.status === 'completed'" class="result-count-pill">
-                {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
+              <span v-if="hasResultActions(selectedWork)" class="result-count-pill">
+                {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : hasResultImages(selectedWork) && selectedWork.outputs.length < resultOutputCount(selectedWork) ? `${selectedWork.outputs.length} / ${resultOutputCount(selectedWork)} 张` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
               </span>
               <button
-                v-if="selectedWork.status === 'completed'"
+                v-if="hasResultActions(selectedWork) && selectedWork.outputs.length"
+                type="button"
+                class="secondary-command download-all-command"
+                :title="selectedWork.type === 'image' ? '下载本页全部图片' : '下载全部视频片段'"
+                :disabled="Boolean(downloadingOutputKey)"
+                @click="downloadAllOutputs(selectedWork)"
+              ><Icon name="download" size="sm" />{{ downloadingOutputKey === `${selectedWork.id}:all` ? '正在下载...' : '一键下载' }}</button>
+              <button
+                v-if="hasResultActions(selectedWork)"
                 type="button"
                 class="secondary-command"
                 :disabled="Boolean(regeneratingWorkId)"
                 @click="regenerateWork(selectedWork)"
               >{{ regeneratingWorkId === selectedWork.id ? '准备生成...' : '重新生成' }}</button>
-              <button v-if="selectedWork.status === 'completed'" type="button" class="secondary-command primary-soft" @click="continueCreating">新建创作</button>
+              <button v-if="hasResultActions(selectedWork)" type="button" class="secondary-command primary-soft" @click="continueCreating">新建创作</button>
             </div>
           </div>
 
-          <div v-if="selectedWork.status === 'failed'" class="result-error">
+          <div v-if="selectedWork.status === 'failed' && !hasPartialImages(selectedWork)" class="result-error">
             <Icon name="exclamationTriangle" size="lg" />
             <strong>生成失败</strong>
             <p>{{ selectedWork.error || '请检查模型与参数后重试。' }}</p>
+            <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
+          </div>
+
+          <div v-else-if="missingOutputCount(selectedWork)" class="partial-result-notice" role="status">
+            <Icon name="exclamationTriangle" size="sm" />
+            <div>
+              <strong v-if="selectedWork.type === 'image'">已生成 {{ selectedWork.outputs.length }} / {{ resultOutputCount(selectedWork) }} 张，{{ missingOutputCount(selectedWork) }} 张未生成</strong>
+              <strong v-else>已生成 {{ selectedWork.outputs.length }} / {{ resultOutputCount(selectedWork) }} 段，{{ failedShotLabel(selectedWork) }}未生成</strong>
+              <p>{{ selectedWork.type === 'image' ? '已生成的图片可以正常预览和下载。' : '已生成的镜头可以正常预览和下载，失败的镜头未计费。' }}{{ partialImageReason(selectedWork) }}</p>
+            </div>
             <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
           </div>
 
@@ -232,8 +351,8 @@
               <div class="result-actions video-loading-actions">
                 <div class="result-description">
                   <strong>{{ isMultiShotVideo(selectedWork) ? '完整成片' : '视频结果' }}</strong>
-                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
-                  <p>{{ resultDescription(selectedWork, 0) }}</p>
+                  <span class="result-model" :title="selectedWork.model">{{ modelLabel(selectedWork.model) }}</span>
+                  <span class="result-meta"><span v-for="(part, partIndex) in metaParts(workResolutionLabel(selectedWork))" :key="partIndex">{{ part }}</span></span>
                 </div>
               </div>
             </article>
@@ -257,14 +376,14 @@
             </button>
           </div>
 
-          <section v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="complete-video-card">
+          <section v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="complete-video-card">
             <header>
               <div>
                 <p class="eyebrow">完整成片</p>
                 <h3>{{ selectedWork.mergedOutput ? '所有镜头已按顺序合成' : '镜头素材已完成，等待合成完整视频' }}</h3>
                 <p>{{ completeVideoDescription(selectedWork) }}</p>
               </div>
-              <span>{{ selectedWork.outputs.length }} 个镜头 · {{ selectedWork.requestedDuration || 0 }} 秒</span>
+              <span>{{ selectedWork.outputs.length }} 个镜头 · {{ completedVideoDuration(selectedWork) }} 秒</span>
             </header>
             <template v-if="selectedWork.mergedOutput">
               <CreatorVideoPlayer
@@ -274,19 +393,13 @@
                 :src="selectedWork.mergedOutput"
                 @error="handleVideoPlaybackError(selectedWork)"
                 @loadedmetadata="handleVideoMetadata($event, selectedWork, 0, 'complete')"
-              >
-                <template #loading>
-                  <div class="video-loading-overlay" role="status" aria-live="polite">
-                    <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
-                    <strong>正在加载视频</strong>
-                    <p>正在准备完整成片，请稍候。</p>
-                  </div>
-                </template>
-              </CreatorVideoPlayer>
+              />
               <footer>
                 <div>
                   <strong>完整视频</strong>
-                  <span>{{ selectedWork.model }} · {{ selectedWork.aspectRatio || '自动画幅' }} · {{ workResolutionLabel(selectedWork) }}</span>
+                  <ul class="result-tags">
+                    <li v-for="(part, partIndex) in metaParts(selectedWork.model, selectedWork.aspectRatio || '自动画幅', workResolutionLabel(selectedWork))" :key="partIndex" :title="part">{{ part }}</li>
+                  </ul>
                 </div>
                 <a :href="selectedWork.mergedOutput" :download="mergedDownloadName(selectedWork)" class="secondary-command primary-soft" title="下载完整视频">
                   <Icon name="download" size="sm" /> 下载完整视频
@@ -303,12 +416,12 @@
             </div>
           </section>
 
-          <div v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="segment-heading">
+          <div v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="segment-heading">
             <div><p class="eyebrow">分段素材</p><h3>镜头素材</h3></div>
             <span>{{ selectedWork.outputs.length }} 段</span>
           </div>
 
-          <div v-else-if="selectedWork.status !== 'failed' && selectedWork.outputs.length" class="result-grid" :class="{ single: selectedWork.outputs.length === 1 }">
+          <div v-else-if="(selectedWork.status !== 'failed' || hasPartialImages(selectedWork)) && selectedWork.outputs.length" class="result-grid" :class="{ single: selectedWork.outputs.length === 1 }">
             <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-${index}`" class="result-card">
               <span v-if="selectedWork.outputs.length > 1" class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
               <CreatorImage
@@ -318,9 +431,10 @@
                 :style="resultMediaStyle(selectedWork)"
                 :src="output"
                 :cache-key="`${selectedWork.id}:${selectedWork.updatedAt}:${index}`"
+                downscale
                 :alt="`生成图片 ${index + 1}`"
                 title="查看大图"
-                @preview="previewUrl = output"
+                @preview="openPreview(output)"
               />
               <CreatorVideoPlayer
                 v-else
@@ -331,20 +445,11 @@
                 :src="output"
                 @error="handleVideoPlaybackError(selectedWork)"
                 @loadedmetadata="handleVideoMetadata($event, selectedWork, index)"
-              >
-                <template #loading>
-                  <div class="video-loading-overlay" role="status" aria-live="polite">
-                    <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
-                    <strong>正在加载视频</strong>
-                    <p>正在准备播放，请稍候。</p>
-                  </div>
-                </template>
-              </CreatorVideoPlayer>
+              />
               <div class="result-actions">
                 <div class="result-description">
-                  <strong>{{ selectedWork.type === 'video' ? `镜头 ${index + 1}` : selectedWork.provider }}</strong>
-                  <span>{{ selectedWork.model }} · {{ workAspectRatio(selectedWork, index) }} · {{ workResolutionLabel(selectedWork, index) }}</span>
-                  <p>{{ resultDescription(selectedWork, index) }}</p>
+                  <strong>{{ selectedWork.type === 'video' ? `镜头 ${shotIndexForOutput(selectedWork, index) + 1}` : selectedWork.provider }}</strong>
+                  <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
                   <button type="button" class="icon-action" :title="selectedWork.type === 'image' ? '预览作品' : '播放视频'" @click="previewResult(output, selectedWork.type, index)">
@@ -374,13 +479,16 @@
                     <Icon name="plus" size="sm" />
                   </button>
                 </div>
+                <ul class="result-tags">
+                  <li v-for="(part, partIndex) in metaParts(selectedWork.model, workAspectRatio(selectedWork), workResolutionLabel(selectedWork, index))" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
               </div>
             </article>
           </div>
 
-          <div v-if="selectedWork.status !== 'failed' && selectedWork.outputs.length && isMultiShotVideo(selectedWork)" class="result-grid result-segment-grid">
+          <div v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="result-grid result-segment-grid">
             <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-segment-${index}`" class="result-card">
-              <span v-if="selectedWork.outputs.length > 1" class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
+              <span v-if="selectedWork.outputs.length > 1" class="result-index">{{ String(shotIndexForOutput(selectedWork, index) + 1).padStart(2, '0') }}</span>
               <CreatorVideoPlayer
                 class="video-result-frame"
                 :style="resultMediaStyle(selectedWork, index)"
@@ -389,20 +497,11 @@
                 :src="output"
                 @error="handleVideoPlaybackError(selectedWork)"
                 @loadedmetadata="handleVideoMetadata($event, selectedWork, index)"
-              >
-                <template #loading>
-                  <div class="video-loading-overlay" role="status" aria-live="polite">
-                    <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
-                    <strong>正在加载视频</strong>
-                    <p>正在准备播放，请稍候。</p>
-                  </div>
-                </template>
-              </CreatorVideoPlayer>
+              />
               <div class="result-actions">
                 <div class="result-description">
-                  <strong>镜头 {{ index + 1 }}</strong>
-                  <span>{{ shotDurationLabel(selectedWork, index) }} · {{ workAspectRatio(selectedWork, index) }} · {{ workResolutionLabel(selectedWork, index) }} · {{ shotGenerationMeta(selectedWork, index) }}</span>
-                  <p>{{ resultDescription(selectedWork, index) }}</p>
+                  <strong>镜头 {{ shotIndexForOutput(selectedWork, index) + 1 }}</strong>
+                  <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
                   <button type="button" class="icon-action" title="播放镜头" @click="previewResult(output, selectedWork.type, index)"><Icon name="play" size="sm" /></button>
@@ -415,6 +514,9 @@
                   ><Icon name="download" size="sm" /></button>
                   <button type="button" class="icon-action" title="新建创作" @click="continueCreating"><Icon name="plus" size="sm" /></button>
                 </div>
+                <ul class="result-tags">
+                  <li v-for="(part, partIndex) in metaParts(shotDurationLabel(selectedWork, index), workAspectRatio(selectedWork, index), workResolutionLabel(selectedWork, index), shotGenerationMeta(selectedWork, index))" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
               </div>
             </article>
           </div>
@@ -449,29 +551,26 @@
             </div>
           </div>
 
-          <section v-if="shouldShowResultParameters(selectedWork)" class="result-parameters" aria-label="作品参数">
+          <section class="result-parameters" aria-label="作品参数">
             <div class="result-stat-grid">
-              <article><span>完成耗时</span><strong>{{ formatCompletionDuration(selectedWork) }}</strong></article>
-              <article><span>生成时间</span><strong>{{ formatResultTime(selectedWork.completedAt || selectedWork.updatedAt) }}</strong></article>
-              <article><span>参考图</span><strong>{{ selectedWork.referenceCount || 0 }} 张</strong></article>
-              <article><span>生成数量</span><strong>{{ resultOutputCount(selectedWork) }} {{ selectedWork.type === 'image' ? '张' : '段' }}</strong></article>
-              <article><span>版本</span><strong>{{ selectedWork.version || 'v1' }}</strong></article>
-              <article><span>来源</span><strong>{{ selectedWork.source || '初版作品' }}</strong></article>
-            </div>
-            <details class="result-parameter-details">
-              <summary>
-                <span>查看完整提示词与参数</span>
-                <Icon name="chevronDown" size="xs" />
-              </summary>
-              <div>
-                <span>模型与参数</span>
-                <p>{{ detailedResultMeta(selectedWork) }}</p>
-              </div>
-              <div>
+              <article v-for="field in resultParameterFields(selectedWork)" :key="field.label" :class="{ wide: field.wide }">
+                <span>{{ field.label }}</span><strong :title="field.value">{{ field.value }}</strong>
+              </article>
+              <article class="result-prompt-cell">
                 <span>完整提示词</span>
-                <p class="full-prompt">{{ fullPromptText(selectedWork) }}</p>
-              </div>
-            </details>
+                <p class="full-prompt" :class="{ clamped: isPromptLong(selectedWork) && !promptExpanded }">{{ fullPromptText(selectedWork) }}</p>
+                <button
+                  v-if="isPromptLong(selectedWork)"
+                  type="button"
+                  class="result-prompt-toggle"
+                  :aria-expanded="promptExpanded"
+                  @click="promptExpanded = !promptExpanded"
+                >
+                  {{ promptExpanded ? '收起' : '展开全部' }}
+                  <Icon name="chevronDown" size="xs" />
+                </button>
+              </article>
+            </div>
           </section>
         </div>
 
@@ -513,9 +612,9 @@
                   <strong>SHOT {{ String(index + 1).padStart(2, '0') }}</strong>
                   <span><i></i> 待生成</span>
                   <div>
-                    <button type="button" title="向上移动镜头" :disabled="index === 0" @click="moveShot(index, -1)"><Icon name="chevronUp" size="xs" /></button>
-                    <button type="button" title="向下移动镜头" :disabled="index === videoShots.length - 1" @click="moveShot(index, 1)"><Icon name="chevronDown" size="xs" /></button>
-                    <button type="button" title="删除镜头" :disabled="videoShots.length === 1 || processingReferenceImages" @click="removeShot(index)"><Icon name="x" size="xs" /></button>
+                    <button type="button" title="向上移动镜头" :disabled="index === 0" @click="moveShot(index, -1)"><Icon name="chevronUp" size="sm" /></button>
+                    <button type="button" title="向下移动镜头" :disabled="index === videoShots.length - 1" @click="moveShot(index, 1)"><Icon name="chevronDown" size="sm" /></button>
+                    <button type="button" title="删除镜头" :disabled="videoShots.length === 1 || processingReferenceImages" @click="removeShot(index)"><Icon name="x" size="sm" /></button>
                   </div>
                 </header>
                 <p class="sequence-shot-prompt" :class="{ empty: !shot.prompt }">{{ shot.prompt || '在右侧描述这个镜头的画面、动作与运镜' }}</p>
@@ -556,9 +655,9 @@
                 <button type="button" title="下一份企划" @click="nextTemplate"><Icon name="chevronRight" size="sm" /></button>
               </div>
             </div>
-            <div class="brief-stage">
+            <div class="brief-stage" :style="briefBodyHeight ? { '--brief-stage-height': `${briefBodyHeight}px` } : undefined">
               <Transition name="brief-slide" mode="out-in">
-                <div :key="`${studioMode}-${activeTemplateIndex}`" class="brief-body">
+                <div ref="briefBodyElement" :key="`${studioMode}-${activeTemplateIndex}`" class="brief-body">
                   <div class="brief-summary">
                     <span>{{ activeTemplate.tag }}</span>
                     <h3>{{ activeTemplate.title }}</h3>
@@ -567,7 +666,7 @@
                   </div>
                   <div class="brief-copy">
                     <small>CREATIVE BRIEF</small>
-                    <p>{{ activeTemplate.prompt }}</p>
+                    <p ref="briefPromptElement" :class="{ 'is-clipped': briefPromptClipped }" @scroll="updateBriefPromptClip">{{ activeTemplate.prompt }}</p>
                     <button type="button" @click="useTemplate(activeTemplate)">使用这份企划 <Icon name="arrowRight" size="sm" /></button>
                   </div>
                 </div>
@@ -592,18 +691,18 @@
           </article>
 
           <div class="quick-templates">
-            <span class="quick-templates-label">其他企划</span>
-            <button v-for="template in activeTemplates.slice(0, 10)" :key="template.title" type="button" :title="template.subtitle" @click="useTemplate(template)">
-              <span><strong>{{ template.title }}</strong><small>{{ template.tag }}</small></span>
-              <Icon name="arrowRight" size="xs" />
-            </button>
+            <span class="quick-templates-label">灵感分类 · 点击随机填入</span>
+            <div class="quick-templates-list">
+              <button v-for="category in activePromptCategories" :key="category.name" type="button" :title="`随机填入一条「${category.name}」提示词`" @click="useRandomCategoryPrompt(category)">
+                <span><strong>{{ category.name }}</strong><small>{{ category.hint }}</small></span>
+                <Icon name="refresh" size="xs" />
+              </button>
+            </div>
           </div>
         </div>
-
-        <div class="canvas-footnote"><Icon name="shield" size="xs" /> 当前请求使用你的 Sub2API Key</div>
       </main>
 
-      <aside class="settings-panel" aria-label="生成设置">
+      <aside ref="settingsPanelElement" class="settings-panel" aria-label="生成设置">
         <div ref="settingsScrollElement" class="settings-scroll">
           <div class="settings-heading">
             <div>
@@ -622,16 +721,21 @@
               @click="imageCapability = capability.id"
             >
               {{ capability.label }}
-              <span class="online-dot" aria-hidden="true"></span>
             </button>
           </div>
 
-          <div v-else class="video-capability-card" aria-label="当前视频生成能力">
-            <span class="video-capability-icon"><Icon name="playOutline" size="sm" :stroke-width="1.7" /></span>
-            <div>
-              <strong>Grok 生视频</strong>
-              <small>使用独立的视频分组和用户 Key</small>
-            </div>
+          <div v-else class="capability-switch video-capability-switch" role="tablist" aria-label="视频生成能力">
+            <button
+              v-for="capability in videoCapabilities"
+              :key="capability.id"
+              type="button"
+              :class="{ active: videoCapability === capability.id }"
+              :disabled="capability.disabled"
+              :title="capability.disabled ? '暂未开放' : undefined"
+              @click="videoCapability = capability.id"
+            >
+              {{ capability.label }}
+            </button>
           </div>
 
           <div class="field-block">
@@ -654,11 +758,12 @@
               :aria-busy="loadingModels"
             >
               <option v-if="loadingModels && !selectableModelOptions.length" value="">正在读取可用模型...</option>
-              <option v-else-if="referenceVideoModelUnavailable" value="">没有可用的 1.5 视频模型</option>
+              <option v-else-if="referenceVideoModelUnavailable" value="">没有支持参考图的视频模型</option>
               <option v-else-if="!selectableModelOptions.length" value="">请先创建 Key</option>
-              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ model }}</option>
+              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ modelLabel(model) }}</option>
             </select>
-            <small v-if="referenceVideoModelUnavailable" class="model-compatibility-error">当前分组没有 Grok Imagine Video 1.5，无法使用参考图生视频</small>
+            <small v-if="selectedSeedanceTier" data-testid="seedance-tier-hint">{{ seedanceTierHint(selectedSeedanceTier) }}</small>
+            <small v-if="referenceVideoModelUnavailable" class="model-compatibility-error">当前分组没有 Grok Imagine Video 1.5 或 MiniMax H3，无法使用参考图生视频</small>
           </div>
 
           <div v-if="selectedApiKey" class="key-ready">
@@ -725,7 +830,7 @@
               <label for="creator-prompt">{{ studioMode === 'image' ? '画面描述' : '视频描述' }}</label>
               <span><Icon name="sparkles" size="xs" /> {{ editorPrompt.length }}/{{ promptLimit }}</span>
             </div>
-            <small>{{ studioMode === 'image' ? '描述主体、场景、风格和光线' : professionalVideo ? `当前为专业工作区 · 镜头 ${selectedShotIndex + 1}` : '描述动作、镜头、节奏和环境' }}</small>
+            <small>{{ studioMode === 'image' ? '描述主体、场景、风格和光线' : professionalVideo ? `多镜头制作 · 正在编辑镜头 ${selectedShotIndex + 1}` : '描述动作、镜头、节奏和环境' }}</small>
             <textarea
               id="creator-prompt"
               v-model="editorPrompt"
@@ -739,9 +844,9 @@
             <div class="field-block">
               <label for="video-generation-method">生成方式</label>
               <select id="video-generation-method" v-model="activeVideoGenerationMethod" class="studio-input" :disabled="processingReferenceImages">
-                <option value="text">文生视频 · 只用提示词</option>
-                <option value="image">图生视频 · 1 张源图</option>
-                <option value="reference">参考图生视频 · 最多 7 张</option>
+                <option value="text" :disabled="relayTierRequiresReference">文生视频 · 只用提示词{{ relayTierRequiresReference ? '（该模型需要参考图）' : '' }}</option>
+                <option value="image" :disabled="selectedVideoRelayTier !== null">图生视频 · 1 张源图{{ selectedVideoRelayTier ? `（${videoProviderLabel(selectedModel)} 不支持）` : '' }}</option>
+                <option value="reference" :disabled="!relayTierAcceptsUploads">参考图生视频 · 最多 {{ referenceVideoImageLimit }} 张{{ relayTierAcceptsUploads ? '' : '（该模型不支持上传）' }}</option>
               </select>
             </div>
             <div class="field-block">
@@ -842,18 +947,21 @@
 
           <template v-else>
             <div class="field-block">
-              <label>{{ professionalVideo ? `镜头 ${selectedShotIndex + 1} 时长` : '视频时长' }}</label>
+              <label for="creator-video-duration">{{ professionalVideo ? `镜头 ${selectedShotIndex + 1} 时长` : '视频时长' }}</label>
               <div class="stepper video-control-row">
-                <button type="button" title="减少时长" :disabled="configuredVideoDuration <= 1" @click="adjustVideoDuration(-1)"><Icon name="minus" size="sm" /></button>
-                <strong>{{ configuredVideoDuration }} 秒</strong>
-                <button type="button" title="增加时长" :disabled="configuredVideoDuration >= 15" @click="adjustVideoDuration(1)"><Icon name="plus" size="sm" /></button>
+                <button type="button" title="减少时长" :disabled="configuredVideoDuration <= videoDurationRange.min" @click="adjustVideoDuration(-1)"><Icon name="minus" size="sm" /></button>
+                <label class="stepper-value">
+                  <input id="creator-video-duration" type="number" inputmode="numeric" :min="videoDurationRange.min" :max="videoDurationRange.max" step="1" :value="configuredVideoDuration" :style="{ width: `${String(configuredVideoDuration).length}ch` }" @input="fitVideoDurationInput" @change="commitVideoDurationInput" @keydown.enter.prevent="($event.target as HTMLInputElement).blur()" />
+                  <span>秒</span>
+                </label>
+                <button type="button" title="增加时长" :disabled="configuredVideoDuration >= videoDurationRange.max" @click="adjustVideoDuration(1)"><Icon name="plus" size="sm" /></button>
               </div>
             </div>
 
             <label class="toggle-row professional-toggle video-control-row">
               <span class="professional-toggle-icon"><Icon name="grid" size="sm" /></span>
-              <span class="professional-toggle-copy"><strong>{{ professionalVideo ? '收起专业工作区' : '展开专业工作区' }}</strong><small>主画布展示镜头序列，选中后在右侧编辑</small></span>
-              <span class="professional-toggle-hint" title="镜头、排序、逐镜头参考与重试">镜头、排序、逐镜头参考与重试</span>
+              <span class="professional-toggle-copy"><strong>{{ professionalVideo ? '收起多镜头制作' : '多镜头制作' }}</strong><small>把视频拆成几个镜头，选中后在右侧编辑</small></span>
+              <span class="professional-toggle-hint" title="把视频拆成几个镜头，每个镜头可单独描述、配图、调整顺序和重新生成">拆成几个镜头，分别描述和重做</span>
               <input v-model="professionalVideo" type="checkbox" />
               <span class="professional-toggle-chevron"><Icon name="chevronDown" size="sm" /></span>
             </label>
@@ -871,15 +979,21 @@
             </div>
           </div>
 
-          <div v-if="studioMode === 'video'" class="image-cost-preview video-cost-preview" aria-live="polite" aria-label="视频生成费用预估">
-            <div class="image-cost-copy">
-              <span class="image-cost-label">预计费用</span>
-              <p>{{ videoPricingNote }}</p>
-              <button v-if="videoPricingFailed" type="button" class="image-price-retry" @click="loadVideoPricing">重新加载</button>
+          <div v-if="studioMode === 'video'" class="video-summary">
+            <div class="video-duration-estimate video-control-row" aria-label="成片时长">
+              <span>成片时长 <strong class="video-duration-value">{{ estimatedVideoDuration }} 秒</strong></span>
+              <small>{{ estimatedVideoMode }}</small>
             </div>
-            <div class="image-cost-total" :class="{ 'is-status': videoPricingLoading || videoEstimatedAmount == null }" title="已计入当前适用倍率，最终以使用记录为准">
-              <strong>{{ videoEstimatedCost }}</strong>
-              <span v-if="!videoPricingLoading && videoEstimatedAmount != null">USD</span>
+            <div class="image-cost-preview video-cost-preview" aria-live="polite" aria-label="视频生成费用预估">
+              <div class="image-cost-copy">
+                <span class="image-cost-label">预计费用</span>
+                <p>{{ videoPricingNote }}</p>
+                <button v-if="videoPricingFailed" type="button" class="image-price-retry" @click="loadVideoPricing">重新加载</button>
+              </div>
+              <div class="image-cost-total" :class="{ 'is-status': videoPricingLoading || videoEstimatedAmount == null }" title="已计入当前适用倍率，最终以使用记录为准">
+                <strong>{{ videoEstimatedCost }}</strong>
+                <span v-if="!videoPricingLoading && videoEstimatedAmount != null">USD</span>
+              </div>
             </div>
           </div>
 
@@ -888,18 +1002,52 @@
             <span v-else class="button-spinner"></span>
             {{ selectedGeneration ? '正在生成...' : '开始生成' }}
           </button>
-          <div v-if="studioMode === 'video'" class="video-duration-estimate video-control-row" aria-label="成片时长">
-            <span>成片时长 <strong class="video-duration-value">{{ estimatedVideoDuration }} 秒</strong></span>
-            <small>{{ estimatedVideoMode }}</small>
-          </div>
           <p v-if="professionalVideoReferenceError" class="generation-requirement">{{ professionalVideoReferenceError }}</p>
         </div>
       </aside>
     </div>
 
-    <div v-if="previewUrl" class="modal-backdrop image-preview" role="presentation" @click="previewUrl = ''">
-      <button type="button" class="preview-close" title="关闭预览" @click="previewUrl = ''"><Icon name="x" size="sm" /></button>
+    <div
+      v-if="previewUrl"
+      class="modal-backdrop image-preview"
+      role="dialog"
+      aria-modal="true"
+      aria-label="生成图片预览"
+      @click="closePreview"
+    >
+      <button type="button" class="preview-close" title="关闭预览（Esc）" aria-label="关闭预览" @click="closePreview"><Icon name="x" size="sm" /></button>
+      <button
+        v-if="previewOutputs.length > 1"
+        type="button"
+        class="preview-nav is-prev"
+        title="上一张（←）"
+        aria-label="上一张"
+        @click.stop="stepPreview(-1)"
+      ><Icon name="chevronLeft" size="md" /></button>
       <CreatorImage class="image-preview-content" :src="previewUrl" :cache-key="previewImageCacheKey" alt="生成图片预览" preview />
+      <button
+        v-if="previewOutputs.length > 1"
+        type="button"
+        class="preview-nav is-next"
+        title="下一张（→）"
+        aria-label="下一张"
+        @click.stop="stepPreview(1)"
+      ><Icon name="chevronRight" size="md" /></button>
+      <!-- Small frames skip overlay buttons on phones, so the preview carries save and edit. -->
+      <div v-if="selectedWork?.type === 'image' && previewIndex >= 0" class="preview-actions" @click.stop>
+        <button
+          type="button"
+          class="preview-action"
+          :disabled="Boolean(downloadingOutputKey)"
+          @click="downloadOutput(previewUrl, selectedWork, previewIndex)"
+        ><Icon name="download" size="sm" />{{ downloadingOutputKey === `${selectedWork.id}:${previewIndex}` ? '正在下载' : '下载' }}</button>
+        <button
+          type="button"
+          class="preview-action"
+          :disabled="Boolean(referencingOutputKey)"
+          @click="editPreviewOutput"
+        ><Icon name="edit" size="sm" />{{ referencingOutputKey === `${selectedWork.id}:${previewIndex}` ? '正在准备' : '编辑' }}</button>
+      </div>
     </div>
 
     <BaseDialog
@@ -1038,19 +1186,20 @@
           </p>
           <div class="image-ratio-grid video-ratio-grid">
             <button
-              v-for="option in videoAspectOptions"
+              v-for="option in videoAspectChoices"
               :key="option.value"
               type="button"
               :data-ratio="option.value"
               :class="{ active: !videoAspectDraftFollowsSource && videoAspectDraft === option.value }"
-              :disabled="videoAspectDraftFollowsSource"
-              :title="videoAspectDraftFollowsSource ? '跟随原图' : undefined"
+              :disabled="videoAspectDraftFollowsSource || !videoAspectRatios.includes(option.value)"
+              :title="videoAspectDraftFollowsSource ? '跟随原图' : videoAspectRatios.includes(option.value) ? undefined : '官方 Grok 不支持此比例'"
               @click="videoAspectDraft = option.value"
             >
               <i :style="ratioShapeStyle(option.value)"></i>
               <span>{{ option.value }}</span>
             </button>
           </div>
+          <p v-if="!selectedVideoRelayTier" class="image-size-tier-hint">官方 Grok 不支持 21:9 参数。</p>
         </section>
         <div class="image-size-result video-params-result">
           <div>
@@ -1076,6 +1225,7 @@
 <script setup lang="ts">
 import { computed, reactive, nextTick, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { observeElementRect, useVirtualizer } from '@tanstack/vue-virtual'
+import { useMediaQuery, useResizeObserver, useScrollLock } from '@vueuse/core'
 import CreatorImage from '@/components/common/CreatorImage.vue'
 import CreatorVideoPlayer from '@/components/common/CreatorVideoPlayer.vue'
 import CreatorThumbnail from '@/components/common/CreatorThumbnail.vue'
@@ -1099,6 +1249,15 @@ import {
   listCreatorModels,
 } from '@/api/creator'
 import {
+  isMiniMaxH3Model,
+  isMiniMaxH3StudioModel,
+  MINIMAX_H3_ASPECT_RATIOS,
+  MINIMAX_H3_MAX_REFERENCE_IMAGES,
+  MINIMAX_H3_STUDIO_MODELS,
+  miniMaxH3Tier,
+} from '@/utils/miniMaxH3'
+import { isSeedanceVideoModel, SEEDANCE_FALLBACK_MODELS, SEEDANCE_VIDEO_PRICE_FAMILY, SEEDANCE_VIDEO_TIERS, seedanceTierHint, seedanceVideoTier, snapSeedanceSeconds } from '@/utils/seedanceVideo'
+import {
   creatorHistory,
   type CreatorHistoryItem,
   type CreatorHistoryChange,
@@ -1110,12 +1269,14 @@ import {
   MAX_VIDEO_REFERENCE_TOTAL_MB,
   optimizeVideoReferenceImage,
 } from '@/services/videoReferenceImage'
+import { imagePromptCategories, videoPromptCategories, type PromptCategory } from './creatorPromptCategories'
 import { useAppStore } from '@/stores/app'
 import type { ApiKey, Group } from '@/types'
 import { formatScaled } from '@/utils/pricing'
 
 type StudioMode = 'image' | 'video'
 type ImageCapability = 'grok' | 'image2' | 'banner'
+type VideoCapability = 'grok' | 'minimax' | 'seedance'
 type GenerationPhase = 'submitting' | 'generating'
 type ImageSizeMode = 'auto' | 'ratio' | 'custom'
 type VideoGenerationMethod = 'text' | 'image' | 'reference'
@@ -1123,6 +1284,9 @@ type VideoGenerationMethod = 'text' | 'image' | 'reference'
 const MAX_REFERENCE_IMAGE_SIZE_MB = 10
 const MAX_REFERENCE_IMAGE_SIZE_BYTES = MAX_REFERENCE_IMAGE_SIZE_MB * 1024 * 1024
 const VIDEO_SUBMISSION_RETRY_DELAYS_MS = [2000, 5000] as const
+// A submitted task keeps rendering upstream, so a few failed status checks
+// must not discard it (H3 renders for minutes and one 502 is common).
+const VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES = 5
 
 interface PromptTemplate {
   title: string
@@ -1180,113 +1344,219 @@ interface VideoGenerationSnapshot {
 }
 
 const imageTemplates: PromptTemplate[] = [
-  { title: '雾港早餐', tag: '生活摄影', subtitle: '海风吹进清晨的餐桌', prompt: '清晨海港旁的小餐馆，一张旧木桌上摆着热咖啡、黄油吐司和半颗水煮蛋，窗外渔船隐在薄雾中，窗边侧光照亮陶杯边缘与轻柔蒸汽。平视近景，灰蓝与奶油白色调，真实食物纹理，安静自然的胶片摄影。' },
-  { title: '竹影茶席', tag: '东方美学', subtitle: '一盏清茶与流动的竹影', prompt: '竹林旁的现代茶室，浅色石台上摆一只青瓷茶盏与细长竹匙，清茶透出淡金色，竹叶影子落在米白墙面。一位穿亚麻衣服的茶人只露出斟茶的手，斜侧构图，大面积留白，柔和午后光，克制精致的东方生活摄影。' },
-  { title: '云端车站', tag: '奇幻建筑', subtitle: '在云海之上等一班列车', prompt: '一座悬在云海上方的山间铁路车站，拱形木梁与磨砂玻璃顶棚围出宽阔站台，一列墨绿色列车停靠在边缘，两位旅人提着行李等待。晨光穿过薄云，远山若隐若现，广角透视，以人物体现尺度，写实建筑概念图。' },
-  { title: '青柠气泡', tag: '饮品广告', subtitle: '冷凝水珠里的夏日清爽', prompt: '一杯透明青柠气泡水放在浅绿色亚克力台上，杯中有薄切青柠与棱角分明的冰块，细小气泡沿杯壁上升，旁边放两片薄荷叶。右侧逆光穿过液体形成清亮折射，低机位产品特写，背景干净，左上留白，商业饮品摄影。' },
-  { title: '风衣来信', tag: '时尚人像', subtitle: '海边长廊上的一阵风', prompt: '一位成年女性穿深蓝长风衣站在海边白色长廊，手握一封米白信件，海风轻轻掀起衣摆，侧脸望向画面外。重复的拱门形成纵深，阴天散射光，自然皮肤纹理，人物偏右，低饱和蓝白配色，时尚杂志编辑摄影。' },
-  { title: '纸上花园', tag: '纸艺插画', subtitle: '层叠纸片构成一座春天', prompt: '用彩色纸张搭建一座微缩花园，珊瑚粉花朵、鼠尾草绿叶片与奶油白台阶层层交叠，一只小纸鸟停在枝头。斜俯视构图，真实裁切边缘与纸张纤维，柔光制造细腻层次阴影，手工纸雕插画，无文字，背景简洁。' },
-  { title: '沙漠旅店', tag: '空间设计', subtitle: '弧形土墙中的清凉庭院', prompt: '沙漠中的精品旅店庭院，夯土弧墙围着一池浅水，细长棕榈树投下清晰阴影，石凳上放一条白色织物，远处沙丘从圆形门洞中显露。正面轴线构图，午后硬光，赭石与淡蓝配色，强调粗糙土墙和水面质感，建筑摄影。' },
-  { title: '莓果蛋糕', tag: '美食静物', subtitle: '奶油与鲜果的细腻层次', prompt: '一块切开的莓果奶油蛋糕置于哑光白瓷盘，蛋糕断面层次清晰，顶端点缀覆盆子和一片薄荷叶，桌面散落少量糖粉。淡粉背景，窗边柔和侧光，近距离三分之二视角，真实湿润果肉与轻盈奶油纹理，高端甜点摄影。' },
-  { title: '星尘香水', tag: '产品广告', subtitle: '深色玻璃里的微光', prompt: '一只烟灰色方形香水瓶立在深色石台上，瓶盖为拉丝银色金属，背后悬着一层细薄半透明织物，点状光源在玻璃中形成星尘般折射。中央构图，暗背景与精准轮廓光，瓶身不含标签，奢华但克制的产品摄影。' },
-  { title: '雪夜邮亭', tag: '电影场景', subtitle: '风雪之中的一盏橙灯', prompt: '雪夜山路旁的一间小邮亭，木窗透出温暖橙光，门前停着一辆覆雪自行车，邮差背着帆布包刚走到台阶前。远处松林融入深蓝夜色，斜向飘雪被门灯照亮，中远景构图，写实电影美术，冷暖对比，故事感含蓄。' },
-  { title: '雨城电车', tag: '城市摄影', subtitle: '湿润街道上的复古绿意', prompt: '雨后的老城街道，一辆墨绿色复古电车穿过石铺路面，咖啡馆窗灯在积水里形成金色倒影，前景一把透明雨伞轻微虚化。街道斜向延伸，蓝调时刻，真实潮湿材质，轻微胶片颗粒，纪实街头摄影。' },
-  { title: '潮汐书房', tag: '室内设计', subtitle: '让海的节奏进入阅读空间', prompt: '面向海湾的现代书房，低矮橡木书架沿弧形墙面延伸，中央一张亚麻阅读椅和落地灯，大窗外海浪拍打礁石。清晨柔光均匀铺进室内，平视广角，原木与浅灰色调，真实织物和木纹，宁静的室内建筑摄影。' },
-  { title: '橘猫值班', tag: '动物肖像', subtitle: '书店柜台的小小店长', prompt: '一只胖橘猫趴在独立书店的收银台上，前爪搭着一本翻开的书，身后是排列整齐的旧书和小台灯，旁边摆一杯未喝完的茶。低机位近景，猫眼与胡须清晰，背景柔和虚化，温暖自然光，幽默而真实的宠物摄影。' },
-  { title: '山野露营', tag: '户外旅行', subtitle: '草甸、晨雾与刚沸腾的水', prompt: '高山草甸上的小型露营地，一顶米黄色帐篷面向层叠山谷，前景折叠桌上放着冒热气的金属水壶和两只杯子，一位旅人背对镜头看日出。晨雾在山间流动，广角构图，真实户外装备，清新自然的旅行摄影。' },
-  { title: '荷塘夏梦', tag: '国风插画', subtitle: '一叶小舟穿过青绿荷影', prompt: '一幅青绿工笔与现代插画结合的荷塘画面，淡粉荷花从大叶片间探出，一叶小舟泊在画面下方，舟上放着竹篮与白色纱帽。俯视构图，细腻叶脉与宣纸肌理，青绿、浅粉、米白配色，留白形成水面，无题字。' },
-  { title: '玻璃果园', tag: '超现实静物', subtitle: '透明果实与真实枝叶', prompt: '一枝带绿叶的柑橘枝条悬在淡蓝背景前，枝上的果实由透明玻璃构成，内部封存金色果肉与气泡，真实绿叶与玻璃形成材质反差。侧逆光，微距特写，折射精确自然，构图轻盈，超现实商业摄影。' },
-  { title: '金属蝴蝶', tag: '珠宝设计', subtitle: '轻盈翅翼与精密银丝', prompt: '一枚蝴蝶形银质胸针置于深灰丝绒上，翅翼由细密金属丝与浅蓝半透明珐琅组成，关节和扣针结构精致真实。斜侧微距，窄条柔光勾勒金属边缘，背景暗而干净，冷银与蓝色配色，珠宝广告摄影。' },
-  { title: '旧城花铺', tag: '人文纪实', subtitle: '清晨开门时的第一束花', prompt: '清晨旧城的一间花铺，一位成年店主蹲在门边整理陶桶里的鲜花，卷帘门刚升起，地上有湿润水迹和修剪下的枝叶。自然平视构图，柔和天光，真实衣料与花瓣细节，淡绿与暖砖色，安静有温度的纪实摄影。' },
-  { title: '熔岩实验', tag: '抽象艺术', subtitle: '炽热曲线与冷静的留白', prompt: '一张抽象艺术画面，炽橙色半透明流体在黑色玄武岩纹理上形成弯曲河道，局部混入金属银色细线，周围保留大片炭灰空间。俯视构图，真实流体边缘与岩石孔洞，强烈冷暖对比，现代艺术印刷质感，无文字。' },
-  { title: '岛屿灯塔', tag: '自然风光', subtitle: '风暴之后的第一道晴光', prompt: '一座白色灯塔立在孤岛玄武岩悬崖上，风暴刚结束，乌云裂开一道光照亮灯塔和海面，浪花在礁石边形成白色纹理。远景长焦构图，灯塔位于右侧三分线，灰蓝海水与金色天光，真实壮阔的风光摄影。' },
-  { title: '木星菜园', tag: '科幻日常', subtitle: '异星基地里的一片绿色', prompt: '木星卫星基地的密闭菜园，成排绿叶蔬菜生长在白色栽培架上，一位植物学家检查叶片，舷窗外巨大的木星与冰原清晰可见。广角室内构图，真实航天结构，柔和栽培灯与冷色窗光，硬科幻电影场景。' },
-  { title: '珊瑚剧院', tag: '幻想空间', subtitle: '在海底听一场无声演出', prompt: '浅海中的圆形剧院，珊瑚形立柱支撑透明穹顶，珍珠色座椅环绕中央舞台，舞台上只有一架白色钢琴，鱼群游过穹顶外。俯斜广角，海面光束形成水纹，浅蓝与柔粉色调，精致写实的幻想建筑设计。' },
-  { title: '丝绸山峦', tag: '材质艺术', subtitle: '织物褶皱里的辽阔地形', prompt: '一大片青灰色丝绸被塑造成起伏山峦，金色细线沿褶皱延伸如山间小径，画面中央放一个极小的白色旅人模型体现尺度。低机位微距，柔和侧光凸显织物光泽，抽象地景与真实材质结合，简洁高级的艺术静物。' },
-  { title: '蓝调爵士', tag: '舞台摄影', subtitle: '烟蓝背景中的黄铜光泽', prompt: '小型爵士俱乐部里，一位成年萨克斯演奏者站在舞台边，深色衬衫与黄铜乐器形成对比，后方鼓组只露出轮廓。侧面中近景，蓝色环境光与暖色聚光交叠，真实皮肤与金属细节，细腻胶片颗粒，现场音乐摄影。' },
-  { title: '蘑菇旅馆', tag: '微缩童话', subtitle: '雨后的林间小小旅途', prompt: '苔藓森林中的微缩蘑菇旅馆，浅棕菌盖覆盖木质阳台，门口一只背小包的刺猬正抖落雨水，窗内透出暖光，石阶旁长着小蕨叶。低机位微距，露珠清晰，毛毡角色与木质模型，手工定格动画质感。' },
-  { title: '未来单车', tag: '工业设计', subtitle: '轻量结构与城市通勤美学', prompt: '一辆未来城市通勤自行车放在浅灰摄影棚中，哑光钛金属车架、隐藏走线、窄轮胎和一体化车灯，结构合理可制造。完整侧面视图，柔和棚拍光，地面有轻微阴影，精确材质细节，简洁工业产品设计效果图。' },
-  { title: '陶器家族', tag: '器物静物', subtitle: '手工釉色里的温柔差异', prompt: '五件大小不同的手工陶器排列在浅色石桌上，包括细口瓶、矮罐与茶碗，釉色从奶油白过渡到鼠尾草绿，表面保留细小颗粒与自然流釉。正面构图，柔和窗光，背景纯净，器物之间留有呼吸感，生活品牌摄影。' },
-  { title: '春日骑楼', tag: '建筑摄影', subtitle: '旧街立面与盛开的三角梅', prompt: '南方老街的骑楼立面，奶黄色墙面、墨绿木窗与半圆拱廊，一株盛开的紫红三角梅从阳台垂落，楼下一位居民骑车经过。正面略仰视，清晨光线，真实旧墙痕迹，色彩明快而不过饱和，城市建筑摄影。' },
-  { title: '远山咖啡', tag: '品牌场景', subtitle: '把山林装进一杯咖啡', prompt: '一袋无文字的米白咖啡包装与陶杯摆在深色木桌上，包装有简洁山峦压纹，背景透过落地窗看到晨雾中的松林。产品位于左侧，右侧留出干净背景，暖色侧光，真实纸张与咖啡油脂质感，精品咖啡品牌摄影。' },
-  { title: '风筝海岸', tag: '旅行插画', subtitle: '海风牵起一片明亮颜色', prompt: '海边草坡上，一位穿黄色外套的旅人放飞红色风筝，弯曲风筝线引向浅蓝天空，远处白色浪花与小帆船点缀海面。大块平涂色彩结合细腻版画肌理，人物小而环境辽阔，清爽旅行杂志插画，无文字。' },
-  { title: '月光琴房', tag: '情绪空间', subtitle: '静止琴键上的冷暖交汇', prompt: '夜晚的旧宅琴房，黑色钢琴旁只有一盏小台灯，月光从高窗照在琴键和地板上，琴凳上搭着一件浅色针织外套。斜侧中景，深蓝与琥珀暖光，真实木地板和漆面反射，安静含蓄的电影场景。' },
-  { title: '冰川来客', tag: '动物风光', subtitle: '蓝色冰壁旁的白色身影', prompt: '一只北极狐站在蓝色冰川前的雪地上，厚实白毛被微风吹起，回头望向镜头，脚下留有一串浅浅足印。低机位中景，阴天柔光，冰层纹理清晰，白与冰蓝色调，真实野生动物摄影，不拟人化。' },
-  { title: '拼贴都市', tag: '平面设计', subtitle: '纸张碎片重新组成街道', prompt: '用旧报纸、彩色纸与黑白建筑照片拼贴一座现代城市，红色圆形太阳位于上方，阶梯、窗格和街道构成有节奏的几何层次。米白纸背景，手工撕边与印刷网点清晰，现代编辑插画，避免可读文字。' },
-  { title: '手作皮包', tag: '工艺广告', subtitle: '针脚与皮革的真实触感', prompt: '一只深棕植鞣皮手提包放在工作台上，旁边有缝针、蜡线与裁切后的皮革边料，包面自然纹路和手工针脚清晰。三分之二侧面构图，暖色窗光，背景工具适度虚化，无品牌标志，精致工艺产品摄影。' },
-  { title: '稻田晚风', tag: '乡野生活', subtitle: '收获季里金色的归途', prompt: '秋日傍晚的稻田，一条窄田埂通向远处白墙村落，一位农人背着竹筐缓缓归家，金黄稻穗随风弯曲。平视广角，低落日逆光，天空淡粉，人物位于画面下方，自然真实的乡野纪实摄影。' },
-  { title: '水晶棋局', tag: '创意静物', subtitle: '透明与磨砂之间的博弈', prompt: '透明玻璃与磨砂水晶棋子摆在深蓝棋盘上，棋盘由交错玻璃片组成，一枚棋子靠近前景，后方棋列逐渐虚化。低机位近景，窄条侧逆光，精确反射折射，银蓝配色，克制的高端静物摄影。' },
-  { title: '浮岛农场', tag: '奇幻世界', subtitle: '天空中的麦田与小屋', prompt: '一座漂浮在天空的岛屿，岛上金色麦田环绕石头小屋，风车立在边缘，根系和瀑布从岛底垂向云层，一只小飞艇靠近码头。远景斜俯视，明亮午后光，完整岛屿轮廓，细致幻想概念设计。' },
-  { title: '花瓣浴室', tag: '室内美学', subtitle: '粉色石材与自然的晨光', prompt: '一间现代浴室，淡粉色水磨石墙面与椭圆白色浴缸，窄窗外竹叶投下柔和影子，浴缸边放一只玻璃瓶与折叠亚麻毛巾，水面漂几片白色花瓣。广角平视，清晨柔光，材质真实，简洁舒适的室内摄影。' },
-  { title: '夜航渔船', tag: '海上纪实', subtitle: '微暗海面上的工作灯', prompt: '蓝调时刻的近海，一艘小型渔船停在微起伏海面，船上工作灯照亮渔网和两位忙碌渔民，远处岸线只有零星灯火。岸边长焦视角，深蓝与暖黄配色，真实水面倒影与人物动作，克制的人文摄影。' },
-  { title: '折纸飞鸟', tag: '艺术装置', subtitle: '有序排列中的一次出走', prompt: '一组白色折纸鸟悬在奶油色展厅中，大多数整齐排列，一只朱红色纸鸟偏离队列飞向右上方，细线几乎不可见。仰视广角，柔和顶光，纸张折痕与轻微阴影清晰，极简当代艺术装置，无文字。' },
-  { title: '银杏长椅', tag: '季节摄影', subtitle: '金黄叶片中的短暂停留', prompt: '城市公园的一条木质长椅被金黄银杏叶环绕，长椅上放着一条深绿围巾与合上的书，背景银杏树形成层叠纵深。阴天柔光，平视中景，真实落叶纹理，金黄与墨绿配色，温暖安静的秋日摄影。' },
-  { title: '香料地图', tag: '食材摄影', subtitle: '色彩与颗粒组成的风味地形', prompt: '俯拍一张摆满香料的深色木桌，红辣椒粉、姜黄、孜然与八角分别置于大小不同的陶碟，肉桂与月桂叶在碟间串联，布局像抽象地图。侧光强调颗粒与纹理，暖色丰富但有秩序，真实食材商业摄影。' },
-  { title: '复古跑车', tag: '汽车摄影', subtitle: '旷野公路上的奶油白轮廓', prompt: '一辆无品牌标志的奶油白复古跑车停在旷野公路旁，圆形车灯与银色保险杠保留经典比例，背景是低矮山丘和淡蓝天空。车身三分之二前侧视角，傍晚柔光，真实漆面反射与橡胶纹理，汽车杂志摄影。' },
-  { title: '昆虫旅舍', tag: '微观自然', subtitle: '枯木缝隙里的生命细节', prompt: '雨后的枯木缝隙中，一只瓢虫停在苔藓上，小蘑菇从木纹间长出，蛛网上挂着透明露珠。自然微距视角，主体与露珠清晰，背景浅景深，柔和森林天光，强调真实生物尺度和木质纹理，生态摄影。' },
-  { title: '星图寝室', tag: '儿童空间', subtitle: '把探索宇宙的梦留在床边', prompt: '一间温暖的儿童卧室，浅木床架与深蓝床品，墙上是没有文字的简洁星图装饰，球形床头灯发出暖光，地毯上摆几块木质积木。平视广角，蓝白与原木色调，家具结构真实，柔和居住空间摄影。' },
-  { title: '墨色群山', tag: '水墨实验', subtitle: '山的轮廓与现代色块相遇', prompt: '一幅现代水墨山景，浓淡墨色构成层叠山峰，细小松树点缀山脊，一块平涂朱红圆形日轮悬在留白天空中。横向构图，宣纸纤维与墨迹晕染清晰，传统笔触结合现代几何，无文字与印章。' },
-  { title: '甜橙包装', tag: '包装设计', subtitle: '明快色块里的鲜果气息', prompt: '三只甜橙果汁包装纸盒摆在浅橙摄影棚中，盒面使用橙子切片图形、奶油白留白和深绿小色块，侧边折线与纸张结构真实，旁边放半颗鲜橙。三分之二视角，明亮柔光，无可读文字，清爽品牌包装展示。' },
-  { title: '雨后天台', tag: '城市生活', subtitle: '积水映出一小片晴空', prompt: '雨后的住宅天台，几盆绿植排列在矮墙边，晾衣绳上挂着浅色床单，地面积水映出刚放晴的天空，一只黑白猫坐在旧木凳上。平视宽幅，柔和傍晚光，真实水痕与布料，带有生活温度的胶片摄影。' },
-  { title: '时间标本', tag: '超现实艺术', subtitle: '把不同季节封存在玻璃中', prompt: '四只透明玻璃罩排列在浅灰石台上，分别封存微缩春花、夏日绿树、秋叶与雪中枯枝，植物比例一致，罩底铺细沙。正面构图，柔和侧逆光，精确玻璃反射，季节色彩由左向右变化，超现实艺术静物摄影。' },
-  { title: '黎明信号', tag: '未来景观', subtitle: '荒原之上回应天空的光', prompt: '黎明时分的红色岩石荒原，一座细长银色信号塔立在地平线上，塔顶淡蓝光环亮起，一位穿白色探索服的旅人站在前景望向它。低机位广角，晨光照亮岩石纹理，宏大环境与小人物形成对比，写实科幻电影概念图。' },
+  { title: '白底主图', tag: '电商主图', subtitle: '白底棚拍 · 可直接抠图', prompt: '一双白色网面运动鞋放在纯白无缝背景中央，鞋头朝左前方约 30 度，略高于鞋面的平视机位，50mm 镜头无畸变。顶部大柔光箱加两侧补光，亮度均匀无脏影，鞋底保留一层自然接触阴影。主体约占画面七成，边缘清晰，网面与缝线细节锐利，无品牌标志，1:1 电商主图。' },
+  { title: '日照金山', tag: '风光摄影', subtitle: '长焦压缩 · 日出峰顶', prompt: '日出时分，一座雪山峰顶被第一缕阳光染成金色，山腰以下仍处在冷蓝色阴影中，山前有一层薄薄云带。200mm 长焦压缩远近距离，峰顶位于画面上三分线，冷暖对比强烈，雪面纹理清晰，真实的高原风光摄影。' },
+  { title: '场景主图', tag: '电商主图', subtitle: '生活场景 · 45° 俯角', prompt: '一只奶白色陶瓷香薰蜡烛放在卧室床头柜上，烛火刚点燃，旁边放一本合上的书和一小枝干花。45 度俯角中近景，85mm 镜头浅景深，背景床品柔和虚化，暖色台灯为主光，窗外冷光做轮廓。产品居中偏下，标签面朝镜头但不含可读文字，温暖可信的家居电商场景主图。' },
+  { title: '草原野花', tag: '风光摄影', subtitle: '广角前景 · 引导纵深', prompt: '夏季高山草原，前景是一片近距离的黄色和紫色野花，草地向远处缓坡延伸到连绵雪山，天空有几朵积云。16mm 广角低机位，前景花朵清晰，全景深，上午侧光，色彩清新自然，适合文旅宣传和桌面壁纸。' },
+  { title: '多色 SKU', tag: '电商主图', subtitle: '并排陈列 · 色卡展示', prompt: '五只同款不锈钢保温杯并排站立，颜色依次为奶白、雾蓝、鼠尾草绿、燕麦色和炭黑，杯身高度和朝向完全一致。正面平视，长焦镜头压缩透视避免变形，浅灰渐变背景，柔光均匀，每只杯子下方有一致的柔和倒影。构图左右对称，颜色还原准确，适合电商多规格选择图。' },
+  { title: '雾化海岸', tag: '风光摄影', subtitle: '慢门 · 海水雾化', prompt: '黄昏的黑色礁石海岸，海浪在礁石间往复流动，经长时间曝光形成柔和雾状水面，远处海平线上残留一抹橙粉色晚霞。低机位广角，前景礁石锐利，画面安静极简，真实的慢门海景摄影。' },
+  { title: '套装组合', tag: '电商主图', subtitle: '阶梯陈列 · 主次分明', prompt: '一套护肤品组合摆在浅米色阶梯式亚克力台上：中间最高处是精华瓶，两侧较低位置放面霜罐和洁面乳，前景散落几片绿叶。正面略俯视，主品最大最清晰，副品依次退后，顶光加侧面柔光，玻璃和磨砂瓶身质感真实，无可读文字，干净的礼盒套装主图。' },
+  { title: '银河地景', tag: '星空摄影', subtitle: '星空长曝光 · 地景剪影', prompt: '无光害的高原夜空，银河拱桥从地平线一侧升起横跨画面，下方是一座孤立山峰和一顶亮着暖灯的小帐篷。14mm 超广角，星点锐利不拖线，地景保留细节，深蓝夜空与暖色帐篷形成对比，星空风光摄影。' },
+  { title: '防水卖点', tag: '详情页', subtitle: '微距特写 · 卖点放大', prompt: '一只深灰色双肩包的面料局部，水珠在防水涂层表面滚成圆珠不渗透，旁边一段拉链带有防水压胶条。100mm 微距，斜侧光掠过面料突出织纹，背景暗灰虚化，画面右侧留出三分之一空白用于放置卖点文案，详情页功能卖点特写。' },
+  { title: '云海日出', tag: '风光摄影', subtitle: '高处俯瞰 · 层次分明', prompt: '站在山顶俯瞰翻涌的云海，几座山峰像岛屿一样露出云面，太阳刚从远处云层边缘升起，光线把云面染成金粉色。中长焦构图，山峰层层退后形成空气透视，画面上方留出天空，适合 PPT 背景和文旅海报。' },
+  { title: '效果对比', tag: '详情页', subtitle: '左右分屏 · 对比构图', prompt: '左右分屏对比图：左侧普通毛巾放在水渍上，水仍残留在台面；右侧加厚棉毛巾吸走水渍，台面干燥。两侧机位、光线、台面和构图完全一致，正面俯拍，浅色大理石台面，中间一条细白分隔线，真实棉纤维纹理，详情页对比说明图，无文字。' },
+  { title: '秋林顶视', tag: '航拍风光', subtitle: '无人机正顶视 · 色块构图', prompt: '无人机正顶视俯拍秋季森林，红、橙、黄、绿四种颜色的树冠交错成自然色块，一条白色小路弯曲穿过林间，路上一辆红色小车。阴天柔光让色彩饱和均匀，构图像抽象画，适合航拍风光和壁纸。' },
+  { title: '结构拆解', tag: '详情页', subtitle: '爆炸视图 · 部件悬浮', prompt: '一副白色无线耳机的爆炸结构图，耳机外壳、电池、主板、喇叭单元和硅胶耳塞沿同一条斜轴依次分离悬浮，部件间距均匀，结构合理。深灰渐变背景，冷白轮廓光勾勒每个部件边缘，三分之二侧视角，精密工业渲染风格，适合详情页技术卖点展示。' },
+  { title: '梯田水光', tag: '风光摄影', subtitle: '晨光反射 · 曲线层次', prompt: '春季灌水后的山区梯田，层层弯曲的田埂在水面上勾出曲线，清晨天空的粉蓝色倒映在水中，远山被薄雾半遮。中长焦斜俯视，曲线层次从前景延伸到远处，色调柔和，真实的田园风光摄影。' },
+  { title: '尺寸参照', tag: '详情页', subtitle: '手持参照 · 真实比例', prompt: '一只成年人的手握住一块浅灰色迷你充电宝，充电宝厚度和手掌宽度比例真实，旁边桌面上放一张银行卡大小的白色卡片作为尺寸参照。平视近景，50mm 镜头，柔和窗光，背景干净，产品边角和接口细节清晰，用于详情页尺寸说明。' },
+  { title: '沙丘线条', tag: '风光摄影', subtitle: '侧光 · 沙纹线条', prompt: '日落前的沙漠，起伏的沙丘被低角度侧光照亮，一半是金色受光面，一半是深色阴影，沙脊形成锐利的 S 形曲线，沙面布满细密风纹。长焦压缩，画面中没有人物，极简构图，适合壁纸和品牌背景。' },
+  { title: '使用步骤', tag: '详情页', subtitle: '三格分镜 · 统一机位', prompt: '横向三格分镜图，展示片状面膜的使用步骤：第一格撕开包装，第二格展开面膜，第三格贴合在成年女性面部。三格使用同一机位、同一浅色背景和同一柔光，人物和产品保持一致，近景构图，格间用细白边分隔，无文字，详情页步骤图。' },
+  { title: '湖面镜像', tag: '风光摄影', subtitle: '镜面倒影 · 上下对称', prompt: '无风清晨的高山冰川湖，湖面平静如镜，完整倒映出对岸雪山和云层，湖边有几块灰白岩石。水平线位于画面正中，上下对称构图，广角平视，蓝绿湖水通透，冷静清澈的风光摄影。' },
+  { title: '服装平铺', tag: '服装电商', subtitle: '90° 顶视 · 平铺搭配', prompt: '一套通勤穿搭平铺在浅米色亚麻布上：白色衬衫、直筒牛仔裤、棕色皮带、乐福鞋和一只手表，衣物自然整理出轮廓，保留少量褶皱显得真实。90 度正顶视，均匀柔光无明显阴影，物品之间间距一致，四周留白，适合服装电商搭配图。' },
+  { title: '极光雪原', tag: '星空摄影', subtitle: '超广角 · 夜空主体', prompt: '北极圈雪原的夜晚，绿色和淡紫色极光在天空中形成弯曲光带，倒映在结冰湖面上，湖边一间亮灯木屋。14mm 超广角，天空占画面三分之二，雪地保留细节，星点清晰，真实极光风光摄影。' },
+  { title: '模特全身', tag: '服装电商', subtitle: '全身平视 · 50mm', prompt: '一位成年女模特穿燕麦色针织连衣裙站在浅灰无缝背景前，单手自然插兜，重心落在一条腿上。全身构图，机位在腰部高度平视，50mm 镜头保证身材比例不变形，头顶和脚下各留少量空间，大柔光箱主光加轮廓光，面料纹理清晰，服装电商模特图。' },
+  { title: '丝绢瀑布', tag: '风光摄影', subtitle: '慢门 · 丝绢水流', prompt: '雨林中的多级瀑布，水流沿长满苔藓的岩石层层落下，在慢速快门下呈丝绢状，前景溪石上有绿色苔藓和蕨类。中景竖构图，阴天柔光没有高光溢出，绿色饱和，湿润真实的瀑布风光摄影。' },
+  { title: '街拍穿搭', tag: '服装电商', subtitle: '长焦虚化 · 抓拍感', prompt: '城市街道上，一位成年男模特穿深蓝工装夹克和卡其裤向镜头方向自然行走，单手拿着咖啡。135mm 长焦，背景街景和行人被压缩并大幅虚化，人物从头到膝的中景，阴天柔光，色调干净，像真实抓拍的街拍穿搭图。' },
+  { title: '竹林小径', tag: '风光摄影', subtitle: '引导线 · 纵深构图', prompt: '一条石板小径笔直穿过高大竹林，两侧竹子向上收拢形成拱形通道，阳光从竹叶缝隙洒下斑驳光点。平视中焦，小径作为引导线指向画面中心深处，绿色层次丰富，清幽宁静的东方风光摄影。' },
+  { title: '鞋履低角', tag: '鞋类广告', subtitle: '贴地低机位 · 动态瞬间', prompt: '一只穿着跑鞋的脚踏入城市路面的浅水洼，水花向两侧溅起并被定格。镜头贴地低机位，24mm 广角近距离拍摄，鞋子是前景主体，背景街道和晨光虚化，侧逆光照亮水花轮廓，高速快门质感，运动鞋广告画面。' },
+  { title: '樱花框景', tag: '季节风光', subtitle: '框景构图 · 前景虚化', prompt: '春季古寺庭院，前景一枝盛开的粉白樱花从画面上方垂下并轻微虚化，透过花枝看到远处木构寺庙和石灯笼。85mm 镜头浅景深，花枝形成自然框景，柔和阴天光，粉白与木色配色，季节风光摄影。' },
+  { title: '腕表佩戴', tag: '配饰电商', subtitle: '手部特写 · 85mm', prompt: '一位成年男性手腕佩戴银色钢带腕表，手搭在深色木桌边缘，袖口露出浅蓝衬衫。85mm 近景特写，焦点落在表盘，背景笔记本和咖啡杯虚化，侧窗光在表镜上形成一道干净高光，表盘无品牌文字，配饰电商佩戴展示图。' },
+  { title: '薰衣草田', tag: '季节风光', subtitle: '长焦压缩 · 行列节奏', prompt: '夏季薰衣草田，一行行紫色花垄笔直延伸到远处，尽头有一座石头农舍和一棵孤树，傍晚暖光斜照。长焦压缩让花垄排列更紧密，形成强烈节奏感，紫色与金色配色，适合文旅海报和壁纸。' },
+  { title: '口红试色', tag: '美妆电商', subtitle: '45° 微距 · 色号展示', prompt: '四支旋出的口红斜放在浅粉色磨砂台面上，色号从豆沙、珊瑚、正红到深莓色，每支口红下方有一道同色试色涂抹痕迹。45 度俯视微距，柔光均匀，膏体光泽和细腻质地清晰，管身无文字，美妆电商色号展示图。' },
+  { title: '山水晨雾', tag: '风光摄影', subtitle: '剪影层次 · 空气透视', prompt: '喀斯特山水清晨，一座座圆锥形山峰沿江层层排列，晨雾在山间流动，近处一位渔夫撑竹筏划过平静江面。长焦压缩，山峰从深到浅形成剪影层次，淡蓝灰色调，留白充足，真实的东方山水风光摄影。' },
+  { title: '精华滴落', tag: '美妆广告', subtitle: '高速瞬间 · 液滴悬停', prompt: '一支玻璃滴管精华瓶悬在画面上方，一滴透明金色精华正从滴管尖端落下，下方水面泛起细小涟漪。纯净浅蓝背景，侧逆光让液滴通透发亮，微距中近景，产品位于左侧，右侧留出文案空间，高端护肤广告。' },
+  { title: '城市蓝调', tag: '城市风光', subtitle: '蓝调时刻 · 天际线', prompt: '日落后的蓝调时刻，城市天际线沿江展开，摩天楼群刚刚亮起暖白灯光，江面倒映建筑灯光，天空是均匀的深蓝色。高处平视全景，水平线放平，建筑竖线不倾斜，冷暖平衡，城市宣传和官网 Banner 用图。' },
+  { title: '膏体质地', tag: '美妆详情', subtitle: '俯视微距 · 抹开纹理', prompt: '一团白色乳霜被抹开在浅粉色亚克力板上，形成一道顺滑弧形涂抹痕，边缘有细腻的拉丝纹理，旁边放着开盖的面霜罐。俯视微距，柔和侧光突出膏体光泽与厚度，背景干净，真实材质，美妆详情页质地展示图。' },
+  { title: '车流光轨', tag: '夜景摄影', subtitle: '长曝光 · 光轨引导', prompt: '城市夜晚的高架立交桥，车辆经过长时间曝光形成红白两色光轨，沿弯曲匝道流向远处高楼。高处俯视角度，光轨作为引导线形成动感曲线，建筑灯光清晰，画面干净无噪点，城市夜景摄影。' },
+  { title: '果汁水花', tag: '饮品广告', subtitle: '高速快门 · 水花飞溅', prompt: '一瓶无标签的橙汁玻璃瓶立在画面中央，橙子切片从上方落入，瓶身周围溅起橙色果汁水花并被定格，冰块和水珠悬浮。浅橙色渐变背景，强逆光让液体通透，正面平视，主体清晰锐利，有冲击力的饮品广告主视觉。' },
+  { title: '雨后倒影', tag: '城市风光', subtitle: '低机位 · 积水倒影', prompt: '雨后夜晚的老城街道，地面积水倒映出霓虹招牌和路灯暖光，一位撑伞行人走在街道远处。镜头贴近水面低机位，倒影占据画面下半部分，招牌没有可读文字，湿润质感真实，电影感城市夜景。' },
+  { title: '冷萃逆光', tag: '饮品广告', subtitle: '逆光 · 冷凝水珠', prompt: '一杯冰冷萃咖啡放在木质吧台上，杯壁布满冷凝水珠，冰块层次清晰，咖啡液呈琥珀色。逆光从杯后打入让液体透亮，前方白色反光板补亮杯身，低机位平视，背景咖啡馆暖色虚化光斑，左侧留出文案区，门店饮品海报。' },
+  { title: '海岛浅滩', tag: '航拍风光', subtitle: '正顶视 · 色彩渐变', prompt: '无人机正顶视俯拍热带海岛，白色沙滩弯成弧线，海水从浅滩的透明青绿渐变到深海的宝石蓝，一艘白色小船停在浅水区投下清晰影子。正午顶光，色彩通透，构图简洁，适合旅游宣传和壁纸。' },
+  { title: '零食悬浮', tag: '食品广告', subtitle: '悬浮飞散 · 动感构图', prompt: '一袋无文字的薯片包装斜向立在画面中央，金黄薯片、海盐颗粒和迷迭香叶从包装周围向外飞散悬浮。鲜黄色纯色背景，硬光制造清晰投影，正面平视，构图有向外扩散的动感，薯片纹理和油光真实，零食电商主图。' },
+  { title: '高山湖泊', tag: '风光摄影', subtitle: '广角前景石 · 全景深', prompt: '高山湖泊边，前景是几块被湖水打湿的圆润石头，湖水清澈见底，远处是锯齿状雪山和针叶林。16mm 广角低机位，前景石头到远山全部清晰，上午柔和侧光，蓝绿色调清透，户外品牌和文旅宣传图。' },
+  { title: '菜单俯拍', tag: '餐饮菜单', subtitle: '90° 顶视 · 统一布光', prompt: '一碗红烧牛肉面放在深色木桌上，大块牛肉、青菜和葱花摆放整齐，汤面有油花，旁边放一双筷子和一小碟辣椒。90 度正顶视，碗位于画面中央，柔和顶光加一侧反光，色彩饱满但真实，适合统一风格的餐饮菜单图。' },
+  { title: '胡杨逆光', tag: '季节风光', subtitle: '逆光 · 金色轮廓', prompt: '深秋戈壁中的胡杨林，金黄树冠被傍晚逆光照亮，树叶边缘呈现透亮光晕，粗糙树干形成深色剪影，地面有长长的树影。中焦平视，太阳藏在树枝后形成星芒，暖金色调，真实的秋季风光摄影。' },
+  { title: '外卖封面', tag: '外卖平台', subtitle: '45° 俯角 · 饱满构图', prompt: '一份汉堡套餐摆在牛皮纸托盘上：双层牛肉汉堡、薯条和一杯冰可乐，汉堡切开露出芝士与生菜层次。45 度俯角近景，主体占满画面约八成，暖色柔光，食物有油亮光泽和热气，背景简洁，适合外卖平台店铺封面。' },
+  { title: '彩色丘陵', tag: '航拍风光', subtitle: '航拍斜俯 · 色带纹理', prompt: '无人机斜俯视拍摄丹霞地貌，红、橙、黄、白色岩层在连绵丘陵上形成平行条纹，一条小路沿山脊延伸。傍晚低角度光线强调起伏和纹理，色彩饱满但真实，画面富有图形感，地理风光摄影。' },
+  { title: '烘焙橱窗', tag: '餐饮门店', subtitle: '浅景深 · 前景对焦', prompt: '面包店玻璃橱窗内整齐摆放可颂、欧包和水果挞，前景一枚可颂清晰对焦，后方商品逐渐虚化。平视近景，85mm 镜头 f/1.8，暖黄店内灯光，酥皮层次和糖霜颗粒清晰，适合门店宣传和社媒图片。' },
+  { title: '雾凇冬日', tag: '季节风光', subtitle: '高调 · 冷色留白', prompt: '冬日清晨的江边，岸边柳树枝条挂满洁白雾凇，江面冒出缕缕水汽，远处一座小桥若隐若现。高调曝光，大面积白色与淡蓝留白，中焦平视，冰晶细节清晰，安静纯净的冬季风光摄影，适合壁纸。' },
+  { title: '促销横幅', tag: '电商 Banner', subtitle: '右侧主体 · 左侧留白', prompt: '超宽横幅构图，一台白色立式空气净化器放在画面右侧三分之一处，旁边一盆绿植，背景是明亮的浅蓝色客厅。画面左侧约一半为干净的浅色渐变空白，用于放置促销标题和按钮。平视机位，柔和自然光，产品无标志，电商首页 Banner。' },
+  { title: '稻田几何', tag: '航拍风光', subtitle: '正顶视 · 几何图形', prompt: '无人机正顶视俯拍金黄稻田，田块被笔直的田埂和水渠分割成规则几何形，部分田块已收割呈浅褐色，一台收割机正在作业。侧光让稻穗纹理清晰，构图像抽象几何画，农业和乡村振兴宣传用图。' },
+  { title: '新品海报', tag: '广告海报', subtitle: '中心构图 · 轮廓光', prompt: '一部无标志的深色智能手机悬浮在画面中央，机身微微倾斜，背面摄像模组朝向镜头，下方有一圈淡蓝光晕。纯黑背景，两侧窄条轮廓光勾出金属边框，顶部留出标题空间，竖版构图，科技感新品发布海报。' },
+  { title: '灯塔海角', tag: '风光摄影', subtitle: '远景 · 三分构图', prompt: '海角悬崖上的一座白色灯塔，下方海浪拍打礁石溅起白色浪花，天空是风暴后裂开的云层，一道阳光照在灯塔上。中长焦远景，灯塔位于右侧三分线，灰蓝海水与金色光线，壮阔真实的海岸风光。' },
+  { title: '节日礼盒', tag: '节日营销', subtitle: '礼盒堆叠 · 红金配色', prompt: '三只大小不同的红色礼盒错落堆叠在深红色背景前，烫金纹样、丝带和蝴蝶结细节清晰，周围点缀金色彩带和少量灯串光斑。正面平视，主光从左上方打下，画面上方留出标题空间，喜庆但不杂乱，节日大促主视觉。' },
+  { title: '峡谷河湾', tag: '风光摄影', subtitle: '高位俯视 · 弧形河湾', prompt: '从悬崖边缘俯视一处马蹄形河湾，碧绿河水绕过红色砂岩形成完整弧线，崖壁层理清晰，河面上有一只小皮划艇。超广角高位俯视，日出侧光，河湾完整位于画面中央，地理杂志风光摄影。' },
+  { title: '标题海报', tag: '广告海报', subtitle: '竖版排版 · 中文标题', prompt: '竖版夏季上新海报，画面上方居中写着中文大标题“夏日上新”，字体粗黑清晰。中部是一件浅蓝色亚麻衬衫挂在木衣架上，背景为明亮的海边日光和白墙阴影，下方保留空白区域放置价格信息。整体清爽，排版留白充足。' },
+  { title: '水乡灯影', tag: '文旅宣传', subtitle: '蓝调 · 灯笼倒影', prompt: '江南古镇的蓝调时刻，白墙黑瓦沿河排列，屋檐下挂着一串串红灯笼，灯光倒映在平静河面上，一艘乌篷船从石桥下穿过。平视中景，石桥形成框景，深蓝天空与暖红灯光对比，古镇文旅宣传图。' },
+  { title: '小红书封面', tag: '社媒种草', subtitle: '3:4 竖版 · 生活氛围', prompt: '3:4 竖版构图，一张整洁的居家书桌：笔记本电脑、拿铁、香薰和一盆小绿植，窗外是清晨柔光。45 度俯角，暖白色调，画面上方三分之一保持干净的浅色墙面用于放大标题，真实生活感，适合小红书种草封面。' },
+  { title: '红墙落雪', tag: '文旅宣传', subtitle: '长焦 · 红白对比', prompt: '大雪中的古建筑宫墙，朱红墙面和金黄琉璃瓦顶覆着一层白雪，雪花仍在飘落，一位撑红伞的行人沿墙根走过。长焦压缩，红墙占据画面主体，人物小而清晰，红白金配色鲜明，冬季文旅宣传图。' },
+  { title: '公众号头图', tag: '新媒体配图', subtitle: '2.35:1 宽幅 · 留标题区', prompt: '2.35:1 宽幅画面，会议桌上摊开的笔记本、钢笔和平板电脑，平板上显示简洁柱状图，没有可读文字。镜头从桌面低角度平视，左侧物品清晰，右侧大面积柔和虚化留作标题区，蓝灰商务色调，公众号文章头图。' },
+  { title: '天空之镜', tag: '风光摄影', subtitle: '低机位 · 人物点景', prompt: '盐湖浅水面倒映出完整的天空和云朵，一位穿红色长裙的成年人站在湖中央，倒影清晰对称，地平线几乎消失。低机位广角，人物很小位于画面中心，天空蓝白通透，旅行宣传和社媒爆款风光图。' },
+  { title: '开箱种草', tag: '社媒种草', subtitle: '第一视角 · 手部入镜', prompt: '第一人称视角，一双手正在打开一只白色快递纸盒，盒内露出包裹在纸屑中的浅绿色无线音箱。俯视角度，手部动作自然，窗边柔光，桌面有剪刀和撕开的胶带，真实分享感，适合社媒开箱种草配图。' },
+  { title: '熔岩夜色', tag: '风光摄影', subtitle: '远景定点 · 冷暖对比', prompt: '夜晚的活火山远景，火山口喷出橙红色熔岩，熔岩沿山坡流下形成发光的河道，上方烟柱被映成暖红色，天空中星点可见。长焦远景，安全距离拍摄，深蓝夜空与炽热熔岩形成强烈冷暖对比，自然纪实摄影。' },
+  { title: '探店打卡', tag: '社媒种草', subtitle: '广角 · 人物点景', prompt: '一家原木风咖啡馆的室内全景，大落地窗、长条木桌和吊灯，一位成年女性坐在窗边看向窗外作为点景人物。24mm 广角平视，竖线保持垂直，自然窗光明亮通透，人物占画面较小，展现空间氛围，适合探店打卡图。' },
+  { title: '荷塘晨雾', tag: '季节风光', subtitle: '长焦 · 浅景深', prompt: '夏日清晨荷塘，一朵粉色荷花挺出荷叶之上，叶片上滚着露珠，背景荷叶和晨雾被柔和虚化，远处一座小亭子若隐若现。200mm 长焦浅景深，侧逆光照亮花瓣边缘，粉绿配色清新，东方季节风光摄影。' },
+  { title: '职业头像', tag: '商务人像', subtitle: '胸像 · 伦勃朗光', prompt: '一位成年职业人士穿深灰西装和白衬衫，面向镜头微笑，肩膀略微侧转。胸像构图，85mm 镜头平视，伦勃朗光在暗侧脸颊形成三角光，浅灰纯色背景，自然皮肤纹理不过度磨皮，眼神清晰，适合简历和企业官网的职业形象照。' },
+  { title: '枫叶山谷', tag: '季节风光', subtitle: '侧光 · 层林尽染', prompt: '深秋山谷，两侧山坡上红枫和金色银杏交错覆盖，一条溪流从谷底穿过，溪边有一座小木桥。中焦斜俯视，上午侧光让树冠立体分明，红黄绿层次丰富，适合秋季旅游宣传海报。' },
+  { title: '团队合影', tag: '企业形象', subtitle: '平视中景 · 自然互动', prompt: '五位着装商务休闲的成年同事站在明亮的开放式办公室中，围着白板自然交谈，其中两人看向镜头微笑。平视中景，35mm 镜头，背景办公区轻度虚化，窗光均匀，人物表情自然不摆拍，适合企业官网和招聘页面。' },
+  { title: '卷浪瞬间', tag: '风光摄影', subtitle: '高速快门 · 浪管定格', prompt: '一道蓝绿色海浪高高卷起形成浪管，阳光从浪的背后穿透，浪壁呈现通透的翡翠色，浪尖水花被高速快门定格。贴近海面的低机位，长焦压缩，细节锐利，适合运动品牌、壁纸和海洋主题背景。' },
+  { title: '工厂产线', tag: '企业宣传', subtitle: '纵深构图 · 工业质感', prompt: '整洁的现代化工厂车间，一条自动化装配线向远处延伸，机械臂正在组装金属部件，两位穿工装的技术人员在旁检查。一点透视纵深构图，广角平视，顶部冷白工业灯照明，金属与地面反光真实，适合企业宣传册与官网。' },
+  { title: '雨林溪流', tag: '风光摄影', subtitle: '低机位 · 苔藓前景', prompt: '热带雨林中一条清澈溪流穿过长满苔藓的巨石，两侧是茂密的蕨类和藤蔓，一束阳光透过树冠照在水面上。低机位贴近溪石，前景苔藓清晰，绿色层次丰富，湿润空气中有淡淡光束，自然纪录风光。' },
+  { title: '样板间', tag: '房产家居', subtitle: '一点透视 · 广角平视', prompt: '现代简约风格的客厅样板间，浅灰布艺沙发、胡桃木茶几，大幅落地窗外是城市天际线。一点透视构图，16mm 广角在 1.2 米高度平视，所有竖线保持垂直，室内灯与窗外日光平衡曝光，空间宽敞通透，房产宣传图。' },
+  { title: '星轨古树', tag: '星空摄影', subtitle: '长时间曝光 · 同心星轨', prompt: '旷野中一棵孤立的古树剪影，背后夜空中星星围绕北极星形成一圈圈同心星轨，地平线上有一点暖色微光。广角固定机位长时间曝光，古树位于画面下方中央，深蓝夜空干净，星空风光摄影。' },
+  { title: '民宿客房', tag: '酒店民宿', subtitle: '框景构图 · 自然光', prompt: '一间海景民宿客房，白色床品整齐，床尾放一条亚麻毯，落地窗外是蓝色海面和远处海岛。镜头从门口方向拍摄，用窗框形成框景，平视广角，上午自然光明亮柔和，室内外曝光均衡，适合民宿平台房源首图。' },
+  { title: '晚霞剪影', tag: '风光摄影', subtitle: '逆光剪影 · 低水平线', prompt: '草原上的晚霞，天空从橙红渐变到紫蓝，一排稀疏的树木和一位牵马的人形成黑色剪影，地平线压在画面下五分之一。逆光平视，剪影轮廓干净，天空占据大部分画面，适合品牌背景和 PPT 封面。' },
+  { title: '家具场景', tag: '家居电商', subtitle: '45° 侧角 · 场景搭配', prompt: '一张奶油色弧形布艺沙发放在浅木地板客厅中，搭配圆形边几、落地灯和一块浅色地毯。机位位于沙发前方 45 度侧角，中景完整展示沙发轮廓，柔和侧窗光，面料纹理清晰，配色温和统一，家居电商场景图。' },
+  { title: '雪山公路', tag: '航拍风光', subtitle: '航拍 · S 形引导线', prompt: '无人机斜俯视拍摄一条盘山公路，黑色路面在雪山间形成连续的 S 形弯道，一辆红色越野车行驶在路上，路边是白雪和裸露岩石。晴天侧光，公路作为引导线贯穿画面，适合汽车广告和自驾游宣传。' },
+  { title: '汽车外观', tag: '汽车广告', subtitle: '低角度 · 前三分之二视角', prompt: '一辆无品牌标志的银灰色 SUV 停在山间公路弯道旁，车头朝向画面左前方。低角度前三分之二视角，35mm 镜头，黄金时刻侧逆光沿车身线条形成高光，背景层叠山峦虚化，车漆反射真实，汽车广告主视觉。' },
+  { title: '松林光束', tag: '风光摄影', subtitle: '丁达尔光 · 逆光', prompt: '清晨薄雾中的松林，阳光从树干之间斜射进来，形成一道道清晰的丁达尔光束，地面铺满松针和低矮蕨类。中焦平视，逆光让光束和雾气层次分明，深绿与暖金色调，宁静神圣的森林风光摄影。' },
+  { title: '文旅航拍', tag: '文旅宣传', subtitle: '无人机俯瞰 · 大场景', prompt: '无人机高空俯瞰一座江南古镇，白墙黑瓦沿河道排列，几座石桥横跨水面，乌篷船在河中留下水纹。45 度斜俯视航拍，清晨薄雾与侧光勾出屋顶层次，画面上方留出天空用于标题，适合城市文旅宣传海报。' },
+  { title: '草原毡房', tag: '文旅宣传', subtitle: '广角远景 · 人文点景', prompt: '夏季辽阔草原上，几座白色毡房散布在缓坡上，远处一群马在吃草，天空是大片积云和蓝天。广角远景，毡房位于下三分线，大面积天空和草地形成开阔感，色彩明快真实，草原文旅宣传图。' },
+  { title: '数码悬浮', tag: '数码产品', subtitle: '悬浮 · 轮廓光', prompt: '一把无标志的 75 配列机械键盘悬浮在深灰背景前，略微倾斜展示键帽侧面，几颗键帽向上分离悬浮露出轴体。三分之二俯视角，冷白轮廓光勾出键盘边缘，底部有柔和蓝紫灯光，材质细节清晰，数码电商主图。' },
+  { title: '悬崖海湾', tag: '风光摄影', subtitle: '高位广角 · 海岸曲线', prompt: '从海岸悬崖顶部俯瞰一片新月形海湾，碧蓝海水拍打金色沙滩，崖壁上长着低矮绿植，一条步道沿悬崖边缘延伸。广角高位俯视，海岸线形成弧形引导线，晴朗午后光，适合海滨旅游宣传。' },
+  { title: '家电场景', tag: '家电电商', subtitle: '厨房实景 · 侧窗光', prompt: '一台白色空气炸锅放在浅色石英石厨房台面上，炸篮拉出，里面是金黄酥脆的鸡翅，旁边有一盘切好的柠檬和蘸酱。45 度侧角中近景，侧窗自然光，厨房背景柔和虚化，食物和产品都清晰，家电电商使用场景图。' },
+  { title: '湖畔木屋', tag: '风光摄影', subtitle: '晨雾 · 暖窗光', prompt: '清晨的森林湖畔，一座红色小木屋立在水边，窗户透出暖黄灯光，湖面飘着薄雾，木栈道伸入水中。平视中景，木屋位于右侧三分线，倒影清晰，冷蓝晨色与暖窗光对比，适合民宿宣传和壁纸。' },
+  { title: '母婴用品', tag: '母婴电商', subtitle: '高调柔光 · 温和色调', prompt: '一只浅粉色婴儿奶瓶和一只柔软的米色安抚玩偶放在白色婴儿床边的木质托盘上，背景是浅色纱帘。高调柔光，整体明亮无硬阴影，平视近景，色调温和干净，安全可信的母婴电商图片。' },
+  { title: '茶园曲线', tag: '航拍风光', subtitle: '航拍 · 茶垄曲线', prompt: '无人机斜俯视拍摄春季山地茶园，一行行茶树沿山坡等高线排列成柔和的弧线，几位采茶人戴着斗笠散布其间，山顶有薄雾。上午柔光，嫩绿色调统一，曲线节奏感强，适合茶叶品牌和乡村文旅宣传。' },
+  { title: '宠物用品', tag: '宠物电商', subtitle: '低机位 · 宠物视角', prompt: '一只金毛犬趴在浅木地板上，低头从一只陶瓷宠物食盆中吃粮，食盆放在防滑木架上。镜头贴近地面与狗眼同高，50mm 镜头，自然窗光，毛发细节真实，背景客厅柔和虚化，宠物用品电商场景图。' },
+  { title: '极简雪原', tag: '桌面壁纸', subtitle: '大面积留白 · 极简', prompt: '一望无际的白色雪原，画面中只有一棵细小的孤树和一串通向它的脚印，天空是均匀的浅灰白色，与雪地几乎融为一体。中焦平视，孤树位于右下三分点，大面积留白，极简干净，适合桌面壁纸和文字排版背景。' },
+  { title: '运动健身', tag: '运动广告', subtitle: '低角度仰拍 · 硬光', prompt: '一位成年健身者在深色健身房中单手提起壶铃，手臂和背部线条清晰，汗水在皮肤上反光。低角度仰拍，单侧硬光加冷色轮廓光，背景暗且简洁，画面高对比，适合运动品牌和健身房宣传海报。' },
+  { title: '城市仰拍', tag: '城市风光', subtitle: '超广角仰拍 · 线条汇聚', prompt: '站在高楼群中央向上仰拍，四周玻璃幕墙摩天楼的线条向画面中心汇聚，中间露出一小片蓝天，玻璃反射出相邻建筑和云朵。14mm 超广角，强烈透视，冷蓝银色调，几何感强，适合科技和金融主题背景。' },
+  { title: '户外装备', tag: '户外广告', subtitle: '广角 · 环境叙事', prompt: '一位穿橙色冲锋衣的徒步者站在高山垭口，背着登山包望向远处雪山，风吹动外套边缘。24mm 广角，人物位于画面左下三分线，大面积山景交代环境，晴天侧光，装备细节清晰，户外品牌广告图。' },
+  { title: '长城晨雾', tag: '文旅宣传', subtitle: '长焦 · 山脊蜿蜒', prompt: '清晨的古长城沿山脊蜿蜒起伏，城墙和烽火台在晨雾中若隐若现，远处层层山峦退入雾气，太阳在云层后透出暖光。长焦压缩，城墙作为引导线延伸到远方，冷暖色调柔和，壮阔的文旅宣传图。' },
+  { title: '钻戒火彩', tag: '珠宝广告', subtitle: '微距 · 点光火彩', prompt: '一枚铂金钻戒立在黑色亮面亚克力上，钻石在点光源下折射出彩色火彩，下方有清晰倒影。100mm 微距，焦点精确落在钻石台面，背景纯黑，两侧窄条柔光勾勒戒圈轮廓，奢华克制的珠宝广告。' },
+  { title: '辫状河流', tag: '航拍风光', subtitle: '高空俯拍 · 自然纹理', prompt: '高空航拍冰川融水形成的辫状河流，无数条细小水道在灰色砾石河床上交织分叉，水色从乳白蓝到青绿变化。正顶视构图，自然纹理像抽象画，柔和阴天光，适合抽象背景、壁纸和地理主题配图。' },
+  { title: '茶叶礼盒', tag: '礼品电商', subtitle: '东方陈设 · 侧光', prompt: '一只墨绿色茶叶礼盒打开放在深色木茶台上，盒内两罐茶叶，旁边是一只盛着清茶的白瓷盖碗和几片干茶叶。斜侧 45 度中近景，柔和侧光营造层次，背景素净，东方雅致但不过度装饰，礼品电商主图。' },
+  { title: '滩涂水纹', tag: '航拍风光', subtitle: '高空俯拍 · 潮沟纹理', prompt: '退潮后的海边滩涂，无人机高空正顶视俯拍，潮水退去留下的潮沟像树枝一样分叉蔓延，沟中残水倒映出日出时的金粉色天空，滩面呈深灰褐色。侧光强调潮沟起伏，构图像抽象画，适合壁纸、抽象背景和地理主题配图。' },
+  { title: '课程配图', tag: '教育培训', subtitle: '扁平插画 · 左侧留白', prompt: '扁平矢量风格插画，一位年轻人坐在书桌前用笔记本电脑上网课，屏幕上是简洁图表图标，周围漂浮书本、灯泡和对勾图标。蓝色与暖黄配色，线条干净，人物位于右侧，左侧留出标题空间，适合在线课程封面和 PPT 配图，无文字。' },
+  { title: '海上日落', tag: '风光摄影', subtitle: '三分构图 · 暖色天空', prompt: '平静海面上的日落，太阳刚接近海平线，在水面上拉出一条金色光带，天空有几缕被染成橙粉色的薄云，远处一艘帆船剪影。水平线位于下三分线，长焦压缩让太阳更大，暖色调浓郁，适合品牌背景和壁纸。' },
+  { title: 'App 首屏', tag: '互联网营销', subtitle: '3D 插画 · 渐变背景', prompt: '3D 卡通风格插画，一部手机悬浮在画面中央，屏幕弹出钱包、礼券和金币图标，周围漂浮圆润的几何体。蓝紫到粉色的柔和渐变背景，光滑塑料材质和柔和阴影，构图简洁，适合 App 首屏、活动页和推广 Banner，无文字。' },
+  { title: '高原牧场', tag: '风光摄影', subtitle: '中长焦 · 人文风光', prompt: '高原湖泊边的牧场，一群牦牛在湖岸草甸上吃草，湖水深蓝，对岸是白雪覆顶的山脉，天空中云影投在山坡上。中长焦平视，牦牛群位于前景下方，层次分明，色彩纯净，高原文旅宣传图。' },
+  { title: '品牌主视觉', tag: '品牌 KV', subtitle: '中心对称 · 硬光切割', prompt: '一只无标志的哑光黑色香氛瓶立在浅灰色圆柱展台中央，背后是一道弧形石墙，一束硬光从右上方斜射下来，形成清晰的光影切割。中心对称构图，平视中景，上下留出排版空间，高级灰色调，适合品牌主视觉 KV 和官网首屏。' },
+  { title: '远山层叠', tag: '桌面壁纸', subtitle: '长焦剪影 · 蓝色渐层', prompt: '傍晚的连绵远山，一层层山脊剪影从近到远由深蓝渐变为浅蓝灰，山谷间填满薄雾，天空是柔和的淡橙色。长焦压缩，横向宽幅构图，画面上方留出大片干净天空，极简宁静，适合桌面壁纸、PPT 和品牌背景。' },
 ]
 
 const videoTemplates: PromptTemplate[] = [
-  { title: '晨光开窗', tag: '生活短片', subtitle: '侧面定机 · 晨光渐入', prompt: '清晨的浅色卧室，一位穿亚麻衬衫的成年人缓缓拉开窗帘，阳光从窄缝扩展到地板和床面。镜头在房间侧面固定，窗帘随微风轻摆，细微浮尘可见，人物动作自然连贯，奶油白与暖金色，写实生活短片，一镜到底。' },
-  { title: '雨巷花车', tag: '城市故事', subtitle: '低位跟拍 · 雨水倒影', prompt: '雨后的石板小巷，一位店员推着载满鲜花的手推车缓缓前行，车轮经过浅水洼荡起涟漪。镜头从侧后方低位平稳跟拍，拱门和暖色店灯依次经过背景，花瓣轻晃，蓝灰街道与柔粉鲜花形成对比，真实电影质感。' },
-  { title: '青柠入杯', tag: '饮品广告', subtitle: '微距定机 · 清透慢动作', prompt: '浅绿背景前的一杯透明气泡水，一片青柠落入水中带起小幅水花，随后缓缓下沉，气泡附着果皮并向上升起。微距固定镜头，侧逆光照亮冰块与水珠，杯形保持稳定，液体运动自然，高速慢动作质感，清爽商业广告。' },
-  { title: '海崖归途', tag: '户外旅行', subtitle: '侧向跟随 · 日落远景', prompt: '日落时分的海边悬崖步道，一位背小背包的旅人缓缓前行，风吹动外套和草叶。镜头从侧面平稳跟随，末尾轻轻拉远露出海岸线，夕阳为人物勾出暖色轮廓，海浪运动自然，辽阔宁静的旅行电影画面。' },
-  { title: '松鼠餐车', tag: '定格动画', subtitle: '桌面横移 · 手工材质', prompt: '森林中的微缩早餐餐车，一只毛毡松鼠将小饼干放到木柜台上，再举起小杯子递向窗外。镜头沿柜台缓慢横移，蒸汽从小茶壶升起，树叶轻晃，毛毡纤维与木纹清晰，动作简单有序，温暖手工定格动画风格。' },
-  { title: '香氛流影', tag: '产品广告', subtitle: '小幅环绕 · 玻璃折射', prompt: '深灰石台上一只无标签的烟色香水瓶保持静止，镜头围绕瓶身缓慢移动小半圈，一道窄条柔光沿玻璃棱边滑过，背景薄纱轻轻起伏。精准玻璃折射与金属瓶盖纹理，暗背景，克制银灰色调，精致产品广告，一镜到底。' },
-  { title: '稻浪之间', tag: '乡野纪录', subtitle: '低位推进 · 风过稻穗', prompt: '金色稻田中的窄田埂，镜头贴近稻穗缓慢向前推进，一阵风从远处掠来，稻穗依次弯曲，田埂尽头的农人提起竹筐走向村落。傍晚暖光，稻叶与谷粒细节真实，人物保持较小比例，安静自然的乡野纪录片画面。' },
-  { title: '纸鸟起飞', tag: '纸艺动画', subtitle: '俯拍定机 · 折纸展开', prompt: '奶油色桌面上一只红色折纸鸟，翅膀缓缓展开，轻轻扇动后离开桌面，向画面右上方飞去，阴影随动作移动。俯拍固定镜头，保持折痕和鸟的形状一致，真实纸张纤维，柔和棚拍光，简洁手工纸艺动画，一镜到底。' },
-  { title: '雪林暖屋', tag: '冬日风景', subtitle: '缓慢前推 · 冷暖对照', prompt: '傍晚雪林中一间木屋亮着暖黄窗灯，烟囱升起轻烟，门边一位居民扫去台阶积雪。镜头沿雪中小路缓慢推进，前景松枝轻晃，细雪自然飘落，蓝灰雪景与橙黄窗光交织，真实温暖的冬日电影场景。' },
-  { title: '水面来信', tag: '诗意静物', subtitle: '贴水定机 · 涟漪展开', prompt: '安静池塘里一只小纸船缓缓漂过，船中放着折好的米白信件，一滴水从叶尖落下，在纸船旁荡开圆形涟漪。镜头贴近水面固定，纸船随波轻晃，倒映的树影细碎变化，清晨柔光，含蓄真实的诗意短片。' },
-  { title: '陶杯上釉', tag: '手作工艺', subtitle: '手部近景 · 连贯操作', prompt: '陶艺工作台上，匠人稳稳托住一只素烧陶杯，用软刷沿杯壁涂上一道鼠尾草绿釉料，再轻轻转动杯身完成另一侧。近景固定镜头，手部动作连贯，刷痕和陶土颗粒清晰，窗边柔光，背景虚化，真实工艺纪录片风格。' },
-  { title: '夜市出锅', tag: '美食纪录', subtitle: '侧面特写 · 热气升腾', prompt: '夜市小摊上，一位厨师用锅铲翻动铁锅中的蔬菜，随后将一勺热菜盛入白瓷盘，热气在暖灯下升起。侧面近景，镜头小幅向盘子推进，食材色泽与油光真实，背景灯火柔和虚化，动作清楚自然，充满烟火气的纪录画面。' },
-  { title: '云桥列车', tag: '幻想旅途', subtitle: '平行跟拍 · 云海穿行', prompt: '一列深绿色列车沿云海上方的高架桥缓缓行驶，车窗透出暖光，薄云从桥柱间穿过。镜头与列车平行稳定移动，末尾稍稍升高展现弧形桥线和远山，车厢连接与轨道结构保持一致，柔和晨光，写实奇幻电影风格。' },
-  { title: '风衣转身', tag: '时尚广告', subtitle: '侧面环绕 · 自然衣摆', prompt: '浅灰摄影棚中，一位成年模特穿深绿风衣站在石台旁，缓缓转身半圈，手指轻扶衣领后自然放下。镜头从正侧面小幅环绕，柔风吹动衣摆，保持面部和服装结构一致，自然皮肤纹理，精准柔光，克制的时尚广告。' },
-  { title: '萤光玻璃瓶', tag: '微缩幻想', subtitle: '特写前推 · 轻微闪烁', prompt: '旧木桌上一只玻璃瓶内生长着微缩森林，几只小萤火虫缓缓飞行，光点柔和明灭，苔藓边缘挂着露珠。镜头缓慢前推，瓶子始终静止，窗外夜色映在玻璃上，温暖微光与深蓝背景，真实材质的童话短片。' },
-  { title: '潮汐岩岸', tag: '自然风光', subtitle: '低位定机 · 海浪往复', prompt: '清晨黑色岩岸，一道海浪缓缓涌入狭长岩缝，白色泡沫围绕前景礁石展开，再退去露出湿润石面。低机位固定镜头，远处淡粉天空与海面相连，水流物理自然，岩石纹理清晰，安静通透的海岸纪录片画面。' },
-  { title: '咖啡拉花', tag: '饮食广告', subtitle: '斜俯拍 · 奶泡成形', prompt: '咖啡师一手托住陶杯，一手缓缓倒入牛奶，白色奶泡在深棕咖啡表面形成简洁叶片图案，最后抬起奶缸收尾。斜俯拍近景固定镜头，杯形和手部保持一致，奶流连续自然，暖色窗光，真实液体与陶瓷纹理，精品咖啡广告。' },
-  { title: '星港泊船', tag: '硬核科幻', subtitle: '侧面定机 · 缓慢停靠', prompt: '轨道空间港外，一艘小型货运飞船缓缓靠近停泊架，姿态调整喷口短暂亮起，船体对准接口后平稳停下。侧面固定远景，背景行星缓慢转动，飞船结构稳定，真实金属材料与工作灯，精密克制的硬科幻电影场景。' },
-  { title: '花店收工', tag: '人物故事', subtitle: '门外定机 · 温暖窗光', prompt: '傍晚街角花店，一位成年店主把最后一桶花移进门内，擦擦手，随后翻转门口小木牌。镜头从街对面固定观察，窗内暖灯照亮花瓣，门外树影轻晃，木牌没有可读文字，动作松弛连贯，温暖真实的城市生活短片。' },
-  { title: '镜中芭蕾', tag: '舞蹈片段', subtitle: '侧向横移 · 简单伸展', prompt: '清晨舞蹈教室里，一位成年舞者扶着把杆缓缓伸展手臂，再踮起脚尖停稳，镜中同步映出动作。镜头沿把杆平稳横移，保持身体比例与倒影一致，窗光照亮木地板，浅色练功服，优雅真实的舞蹈短片。' },
-  { title: '竹林听雨', tag: '东方意境', subtitle: '近景定机 · 雨滴滑落', prompt: '细雨中的竹林，前景一片竹叶承接雨珠，水滴逐渐汇聚后从叶尖滑落，竹枝轻轻弯动，背景细雨持续落下。近景固定镜头，浅景深，青绿与雾灰色调，水滴和叶脉细节真实，宁静的自然短片，无人物。' },
-  { title: '皮革缝线', tag: '精细工艺', subtitle: '微距定机 · 单针收紧', prompt: '手工皮具工作台上，匠人的双手将针穿过深棕皮革边缘的预留孔，再平稳拉紧蜡线完成一针。微距固定镜头，针线连接合理，皮革纹路和手部细节真实，柔和侧光，背景工具虚化，专注克制的工艺纪录画面。' },
-  { title: '海边晾晒', tag: '日常诗意', subtitle: '长焦定机 · 织物起伏', prompt: '海边小屋外，一排白色床单随风缓缓起伏，缝隙间露出蓝色海面，一位居民从画面边缘走入，夹好最后一只木夹。固定长焦镜头，动作自然，阳光穿透布料，柔和胶片色彩，安静的夏日生活画面。' },
-  { title: '山路单车', tag: '运动旅行', subtitle: '侧后跟拍 · 平缓过弯', prompt: '晨光中的山间公路，一位骑行者沿平缓弯道稳定骑行，镜头从侧后方跟随，车轮转动与踩踏同步，路旁松树依次经过。始终保持同一骑行方向，末尾稍稍拉远显露山谷，装备和车架结构真实，清新户外广告质感。' },
-  { title: '书页与猫', tag: '宠物生活', subtitle: '桌面定机 · 轻触书页', prompt: '窗边书桌上一本书摊开，一只黑白猫伸出前爪轻触翘起的书页，纸页慢慢翻落，猫转头看向窗外。桌面高度固定镜头，真实猫的动作与毛发，窗帘轻晃，书页不显示可读文字，柔和午后光，温暖轻松的宠物短片。' },
-  { title: '果酱涂抹', tag: '早餐广告', subtitle: '微距近景 · 质感展示', prompt: '木板上一片金黄吐司，一把圆头餐刀将红色莓果酱缓缓抹开，果酱中细小果粒清晰，刀尖最后轻轻抬起。微距侧面固定镜头，真实涂抹力度与吐司孔洞，窗边柔光，浅色背景，食物新鲜自然，清爽早餐商业广告。' },
-  { title: '沙丘脚印', tag: '旅行风光', subtitle: '低位跟随 · 风沙掠过', prompt: '日出时的沙丘，一位旅人的双脚沿沙脊缓缓行走，每一步压出清晰脚印，细沙从坡面轻轻滑落。镜头从侧后方低位平稳跟随，金色斜光勾出沙纹，风轻吹裤脚，保持步态自然，辽阔真实的旅行电影质感。' },
-  { title: '银饰流光', tag: '珠宝广告', subtitle: '微距横移 · 金属轮廓', prompt: '深蓝丝绒上一对银色耳饰保持静止，镜头沿耳饰边缘缓慢横移，一道柔和条形光掠过弧面，浅蓝宝石出现细腻光泽。微距浅景深，真实金属与宝石反射，造型全程一致，背景干净，精致克制的珠宝商业广告。' },
-  { title: '纸城日出', tag: '创意动画', subtitle: '缓慢推进 · 光影变化', prompt: '桌面上的米白纸模型城市，镜头沿中央街道缓慢推进，一轮橙色纸太阳从楼群后方缓缓升起，光线随之照亮纸屋立面。建筑保持静止且结构一致，纸张纤维和折痕清晰，阴影变化自然，极简手工纸艺动画，无文字。' },
-  { title: '鹿过晨雾', tag: '野生动物', subtitle: '长焦定机 · 林间穿行', prompt: '清晨薄雾中的森林边缘，一只鹿从树干后缓缓走出，停下抬头观察，再向草地迈出一步。固定长焦镜头，鹿的步态和身体比例自然，晨光穿过树叶，雾气轻轻流动，真实野生动物纪录片风格，不拟人化。' },
-  { title: '厨房揉面', tag: '家庭生活', subtitle: '手部近景 · 连续按压', prompt: '浅色厨房的木质案板上，一双手轻轻折叠面团，再向前按压揉开，少量面粉落在桌面，旁边静置一只陶碗。近景固定镜头，面团随力度自然变形，手部动作简单连贯，清晨柔光，真实食物与木纹，温暖生活纪录风格。' },
-  { title: '瀑布虹光', tag: '自然奇观', subtitle: '横向慢移 · 水雾闪光', prompt: '阳光照亮森林瀑布，水流沿岩壁连续落入深潭，近处水雾中出现淡淡彩虹。镜头在岸边缓慢横移，前景蕨叶逐渐划过边缘，水流速度和方向自然，石壁与植被细节清晰，清爽真实的风光纪录片。' },
-  { title: '温室洒水', tag: '园艺生活', subtitle: '侧面跟随 · 水珠落叶', prompt: '玻璃温室里，一位园艺师提着小水壶缓缓浇灌绿植，水流落在叶片和土面，叶片因水珠轻微颤动。镜头从侧面跟随一小段距离，人物和水壶保持一致，顶部天光柔和，真实水流和植物纹理，安静清新的生活短片。' },
-  { title: '灯塔启明', tag: '海岸电影', subtitle: '远景定机 · 灯束旋转', prompt: '蓝调时刻的岩石海岸，一座白色灯塔的灯光缓缓扫过海面，浪花持续拍打前景礁石，塔下小屋亮着暖灯。远景固定镜头，灯束旋转匀速自然，天空由浅紫过渡到深蓝，真实海水和石壁，宁静有故事感的电影场景。' },
-  { title: '旧车启程', tag: '公路短片', subtitle: '侧面定机 · 平稳驶离', prompt: '傍晚旷野公路旁，一辆奶油白复古小车由静止缓缓起步，沿道路驶向远处，轮胎卷起少量细尘。镜头在路边固定，车身和轮轴结构保持一致，夕阳在漆面形成暖色反光，远山安静，真实克制的公路电影片段。' },
-  { title: '雪狐回望', tag: '极地自然', subtitle: '低位定机 · 转头停留', prompt: '蓝色冰壁旁的雪地，一只北极狐向前迈出两步，停下缓缓回头看向镜头，尾巴自然下垂，风轻吹蓬松毛发。低机位固定中景，保持四肢比例和步态真实，阴天柔光，冰层细节清晰，安静的野生动物纪录片画面。' },
-  { title: '玻璃雨滴', tag: '抽象光影', subtitle: '微距定机 · 焦点过渡', prompt: '一面布满雨滴的玻璃窗，一颗较大的水滴沿窗面缓缓滑下，连接沿途小水珠，窗外红蓝灯光化成柔和光斑。微距固定镜头，焦点从静止水珠轻轻移向滑落水滴，水流真实，夜色低饱和，抽象宁静的光影短片。' },
-  { title: '帐篷醒来', tag: '户外生活', subtitle: '帐内定机 · 门帘开启', prompt: '清晨帐篷内，镜头固定朝向门口，一双手缓缓拉开门帘，露出晨雾中的山谷和被日光照亮的草甸。门帘展开后轻轻晃动，前景睡袋与金属杯静止，真实织物与自然光，温暖清新的露营旅行片段，一镜到底。' },
-  { title: '画笔落色', tag: '艺术纪录', subtitle: '纸面特写 · 颜料晕开', prompt: '米白水彩纸上，一支画笔缓缓画出一片青绿色叶子，颜料在湿润纸面自然晕开，笔尖抬起后留下一道细细叶脉。斜俯拍特写固定镜头，真实笔触与纸张颗粒，窗边柔光，背景干净，专注宁静的绘画过程短片。' },
-  { title: '蒸汽面馆', tag: '城市烟火', subtitle: '窗口推进 · 上菜动作', prompt: '清晨小面馆的出餐窗口，一位店员将一碗热面轻轻放到台面，撒上少量葱花，碗口蒸汽在暖灯下升起。镜头从窗口外缓慢靠近，手部和碗形一致，真实面条与汤面质感，背景忙碌但柔和虚化，温暖纪实电影风格。' },
-  { title: '风过风铃', tag: '东方生活', subtitle: '近景定机 · 轻摆旋转', prompt: '木质屋檐下一只透明玻璃风铃随微风轻轻摆动，细长纸条缓慢旋转，背景是柔焦的夏日绿树。近景固定镜头，玻璃和细绳结构一致，阳光穿过风铃形成小光斑，纸条无可读文字，清新安静的生活短片。' },
-  { title: '机械花开', tag: '工业幻想', subtitle: '中央定机 · 有序展开', prompt: '深灰台面上一朵由银色薄金属片组成的机械花，花瓣沿铰链依次向外展开，露出中央柔和蓝色光源，最后稳定停住。中央近景固定镜头，机械连接清楚合理，金属表面反射真实，背景简洁，精密克制的工业幻想广告。' },
-  { title: '港口晨班', tag: '劳动纪录', subtitle: '侧向横移 · 整理绳索', prompt: '清晨港口的木质码头，一位渔民将系船绳整理成圈，抬起绳圈挂到木桩上，身后小渔船随水面轻轻起伏。镜头沿码头平稳横移，手部动作与绳索连接真实，雾中日光柔和，蓝灰与原木色，尊重人物的纪实短片。' },
-  { title: '月面漫步', tag: '航天科幻', subtitle: '侧后跟拍 · 低重力步态', prompt: '月球基地外，一位穿白色宇航服的探索者沿灰白地表缓缓前行，低重力步伐带起少量细尘，远处基地舱体静止。镜头从侧后方平稳跟拍，宇航服和背包结构一致，黑色天空中悬着地球，真实航天材料与强烈日光，硬科幻电影画面。' },
-  { title: '落叶长椅', tag: '季节片段', subtitle: '低位定机 · 落叶停稳', prompt: '秋日公园的木长椅旁，一片金黄色银杏叶从上方缓缓飘落，在椅面转动半圈后停住，背景树枝随风轻摆。低位固定近景，叶片运动自然，真实木纹与叶脉，柔和午后光，细腻胶片色彩，安静的季节短片。' },
-  { title: '冰上热茶', tag: '旅行静物', subtitle: '杯口特写 · 缓慢后拉', prompt: '雪地木桌上一只保温杯被倒入热茶，蒸汽缓缓升起，戴手套的手收起水壶。镜头从杯口特写轻轻后拉，露出背景湖畔帐篷和远处雪山，倒茶动作与液体真实，清冷环境配温暖茶色，精致户外生活广告。' },
-  { title: '折扇轻启', tag: '传统工艺', subtitle: '手部特写 · 扇面展开', prompt: '深色木桌前，一双手握住竹骨折扇，缓缓将扇面展开至半圆，再稳稳停下，扇面是一幅无题字的淡墨山景。手部特写固定镜头，竹骨数量和连接一致，纸纹真实，柔和侧光，克制优雅的东方工艺短片。' },
-  { title: '花瓣旋舞', tag: '创意广告', subtitle: '俯拍定机 · 水流环绕', prompt: '浅色圆形水盘中央放着一只无标志白色护肤罐，外围水面上的几片淡粉花瓣沿轻缓水流旋转，细小涟漪掠过罐底。俯拍固定镜头，产品保持静止，水流和花瓣运动自然，明亮柔光，简洁清透的护肤商业广告。' },
-  { title: '巷口修车', tag: '手艺人物', subtitle: '近景定机 · 检查车轮', prompt: '老巷修车铺前，一位师傅扶住自行车后轮，轻轻转动车轮检查轮圈，再用工具微调一处零件。近景固定镜头，轮辐和手部动作真实，阳光照亮金属边缘，背景旧墙柔和虚化，生活气息自然，尊重手艺人的纪实画面。' },
-  { title: '群星露台', tag: '夜色幻想', subtitle: '缓慢后拉 · 光点升起', prompt: '夜晚山间小屋的露台上，一位披着浅色毯子的成年人坐在木椅中望向天空，几只萤火虫从草丛中缓缓升起，星空保持稳定。镜头从肩后轻轻拉远，毯子随风微动，小桌灯发出暖光，真实环境与梦幻微光结合，宁静的一镜到底。' },
+  { title: '360° 展示', tag: '电商主图视频', subtitle: '固定机位 · 转台旋转', prompt: '纯白无缝背景中央，一双白色运动鞋放在缓慢匀速旋转的白色转台上，完整转一圈展示鞋头、侧面和鞋跟。固定机位平视中景，顶部柔光箱均匀照明，鞋子结构和颜色全程一致，无品牌标志，干净的电商主图视频，一镜到底。' },
+  { title: '金山延时', tag: '风光延时', subtitle: '固定延时 · 日出变色', prompt: '固定机位延时摄影，黎明前的雪山峰顶从冷蓝色逐渐被阳光染成金红色，光线自上而下沿山体移动，山腰云带缓慢流动。长焦远景，机位完全稳定，曝光平滑过渡，色彩真实，高原风光宣传片镜头。' },
+  { title: '慢推特写', tag: '产品广告', subtitle: '缓慢推进 · 由中景到特写', prompt: '深灰石台上立着一只机械腕表，镜头从中景缓慢向前推进，最终停在表盘特写，秒针平稳走动。一道窄条柔光随推进从表壳边缘滑过，背景暗而干净，表盘无品牌文字，金属质感真实，精致的产品广告镜头。' },
+  { title: '云海翻涌', tag: '风光延时', subtitle: '延时 · 云海流动', prompt: '山顶俯瞰云海的延时镜头，白色云海像潮水一样在山峰间翻涌流动，几座山峰露出云面，太阳从远处升起照亮云层。固定机位，云的运动连续自然，山体结构稳定，壮阔的风光片开场镜头。' },
+  { title: '倒入饮品', tag: '饮品广告', subtitle: '微距 · 高速慢动作', prompt: '一只装满冰块的透明玻璃杯，冷萃咖啡从画面上方倒入，液体冲击冰块并缓慢上升，杯壁凝出水珠。侧面微距固定镜头，逆光让咖啡呈琥珀色，高速摄影慢动作，液体流动真实，深色背景，咖啡饮品广告。' },
+  { title: '草原前飞', tag: '航拍风光', subtitle: '无人机低空前飞', prompt: '无人机贴着夏季草原低空向前平稳飞行，草叶和野花从画面下方快速掠过，远处缓坡和雪山逐渐靠近，天空积云投下移动的影子。运动匀速流畅，地形结构一致，色彩清新，草原文旅宣传镜头。' },
+  { title: '水花入镜', tag: '饮品广告', subtitle: '升格慢动作 · 定机', prompt: '一颗草莓从画面顶部落入装满气泡水的玻璃杯，激起晶莹水花和大量细小气泡，随后草莓缓慢下沉。正面固定镜头，升格慢动作，浅粉色背景，强逆光让水花通透，杯子位置稳定，清爽的饮品广告。' },
+  { title: '海浪顶视', tag: '航拍风光', subtitle: '正顶视 · 浪花往复', prompt: '无人机正顶视悬停在海岸上方，蓝绿色海浪一层层涌上金色沙滩，白色浪花展开后退去，在沙滩上留下湿润痕迹。镜头保持静止，浪花运动自然，色彩通透，适合海滨旅游宣传和视频背景。' },
+  { title: '精华滴落', tag: '美妆广告', subtitle: '微距 · 焦点转移', prompt: '一支玻璃滴管悬在精华瓶上方，一滴透明精华缓缓聚集后滴落回瓶中。微距镜头，焦点从滴管尖端平稳转移到瓶身，浅蓝背景，侧逆光让液滴通透发亮，瓶身无可读文字，高端护肤品广告镜头。' },
+  { title: '瀑布横移', tag: '风光空镜', subtitle: '缓慢横移 · 前景掠过', prompt: '森林中的高大瀑布，水流从岩壁上连续落入深潭，水雾在阳光下泛起淡淡彩虹。镜头在潭边缓慢横移，前景蕨叶从画面边缘划过，产生视差层次，水流方向和速度自然，清爽的风光纪录片镜头。' },
+  { title: '质地抹开', tag: '美妆详情', subtitle: '俯拍定机 · 质地展示', prompt: '浅粉色亚克力板上一团白色乳霜，一根手指将乳霜缓缓抹开，形成顺滑的弧形痕迹和细腻拉丝。俯拍固定镜头，柔和侧光突出膏体光泽，手部动作连贯，背景干净，美妆电商详情页质地展示视频。' },
+  { title: '林间光束', tag: '风光空镜', subtitle: '缓推 · 丁达尔光', prompt: '清晨薄雾中的松林，阳光从树干之间斜射形成一道道光束，镜头沿林间小路缓慢向前推进，光束在雾气中缓缓变化，地面松针和蕨类逐渐靠近。运动平稳，树木结构一致，宁静的森林风光镜头。' },
+  { title: '口红旋出', tag: '美妆广告', subtitle: '特写 · 缓慢横移', prompt: '一支金属外壳口红立在浅色大理石上，膏体缓慢旋出，镜头同时从左向右平稳横移，一道柔光掠过膏体表面。特写浅景深，正红色膏体质地细腻，管身无文字，画面简洁，美妆广告产品镜头。' },
+  { title: '浪花慢放', tag: '风光空镜', subtitle: '低机位 · 升格慢动作', prompt: '黄昏的礁石海岸，一道海浪撞上前景礁石，白色浪花高高溅起后缓慢落下。镜头贴近礁石低机位固定，升格慢动作，逆光让水花晶莹透亮，远处晚霞橙粉色，富有冲击力的海岸空镜。' },
+  { title: '开箱展示', tag: '社媒种草', subtitle: '第一视角 · 手部操作', prompt: '第一人称俯视视角，一双手打开白色快递纸盒，拨开纸屑，取出一台浅绿色无线音箱举到镜头前转动展示。手部动作自然连贯，窗边柔光，桌面整洁，产品结构全程一致，真实的社媒开箱种草视频。' },
+  { title: '银河延时', tag: '星空延时', subtitle: '固定延时 · 银河转动', prompt: '固定机位星空延时，银河从山峰后方缓慢升起并划过夜空，星点随地球自转平稳移动，地平线上偶有车灯划过。超广角构图，地景稳定清晰，星点不闪烁，深蓝夜空干净，星空风光片镜头。' },
+  { title: '使用演示', tag: '产品演示', subtitle: '过肩镜头 · 真实操作', prompt: '一位成年人站在衣架前，手持白色挂烫机熨烫一件浅蓝衬衫，蒸汽喷出后褶皱逐渐被抚平。过肩镜头中近景，焦点在挂烫机喷头和衣料上，室内自然光，动作缓慢清楚，真实的产品使用演示视频。' },
+  { title: '极光舞动', tag: '星空风光', subtitle: '超广角定机 · 光带流动', prompt: '北极圈雪原的夜空中，绿色和淡紫色极光带缓缓舞动，像帘幕一样起伏变化，倒映在结冰湖面上，湖边小木屋亮着暖灯。超广角固定镜头，极光运动自然柔和，雪地和星空清晰，真实极光风光镜头。' },
+  { title: '前后对比', tag: '效果演示', subtitle: '固定机位 · 擦拭对比', prompt: '一块带油污的白色厨房灶台，一只手拿着喷过清洁剂的抹布从左向右擦过一次，擦过的区域变得干净发亮，与未擦区域形成清晰对比。俯拍固定镜头，光线一致，动作匀速，清洁用品效果演示视频。' },
+  { title: '沙丘拉升', tag: '航拍风光', subtitle: '后退拉升 · 揭示全景', prompt: '无人机从沙丘脊线的近处开始，向后退并缓慢拉升，逐渐揭示连绵起伏的金色沙海和一支在沙脊上行走的驼队。傍晚侧光强调沙纹和阴影，运动平稳连续，壮阔的沙漠风光宣传镜头。' },
+  { title: '爆炸拆解', tag: '数码广告', subtitle: '中心定机 · 部件分离', prompt: '深灰背景中央一只白色无线耳机，外壳、电池、主板和喇叭单元沿同一轴线缓慢分离悬浮，停顿后再依次合拢复原。固定中景，冷白轮廓光勾出每个部件，结构合理一致，精密的数码产品技术卖点动画。' },
+  { title: '稻浪起伏', tag: '航拍风光', subtitle: '无人机横移 · 风吹稻浪', prompt: '无人机在金黄稻田上方缓慢横向飞行，风吹过稻田形成一道道起伏的稻浪，田埂上一位农人推着自行车走过。斜俯视角度，阳光暖金，稻穗运动自然，乡村振兴和农业宣传片镜头。' },
+  { title: '悬浮旋转', tag: '数码广告', subtitle: '环绕 · 轮廓光扫过', prompt: '一部无标志的深色智能手机悬浮在纯黑背景中，缓慢旋转半圈从正面转到背面，一道冷白轮廓光沿金属边框扫过。镜头同时小幅环绕，机身结构和摄像模组保持一致，科技感新品发布宣传镜头。' },
+  { title: '雪山环绕', tag: '航拍风光', subtitle: '无人机环绕 · 主峰居中', prompt: '无人机围绕一座雪山主峰缓慢环绕，峰顶始终位于画面中央，周围冰川和山脊随环绕依次展开，峰顶飘着细细的旗云。晴朗上午侧光，雪面质感真实，运动平稳，高原风光宣传片镜头。' },
+  { title: '模特走秀', tag: '服装电商', subtitle: '正面后退跟拍 · 全身', prompt: '浅灰摄影棚中，一位成年女模特穿燕麦色长风衣朝镜头走来，衣摆随步伐自然摆动。镜头在正前方匀速后退跟拍，保持全身构图，50mm 视角，柔光均匀，面部和服装细节全程一致，服装电商展示视频。' },
+  { title: '倒影上摇', tag: '风光空镜', subtitle: '上摇 · 倒影到实景', prompt: '镜头从平静湖面上雪山的倒影开始，缓慢向上摇起，越过水平线后停在真实的雪山和天空上。无风湖面倒影清晰，摇镜匀速平稳，蓝绿湖水和白色雪峰对称呼应，清透的风光空镜。' },
+  { title: '面料飘动', tag: '服装广告', subtitle: '升格慢动作 · 风吹', prompt: '一位成年模特穿浅色真丝长裙站在白色背景前，风机吹起裙摆和袖口，面料在空中缓慢飘动并呈现柔和光泽。中景固定镜头，升格慢动作，侧逆光让面料半透发亮，人物保持静止，突出面料垂感的服装广告。' },
+  { title: '城市车流', tag: '城市延时', subtitle: '固定延时 · 夜景光轨', prompt: '城市夜晚的高架立交桥固定延时，车流形成红白两色连续光轨沿匝道流动，周围高楼灯光闪烁，天空云层缓慢移动。高处俯视机位，建筑完全稳定，光轨流畅，城市宣传片转场镜头。' },
+  { title: '转身展示', tag: '服装电商', subtitle: '定机全身 · 原地转身', prompt: '一位成年男模特穿深蓝工装夹克和卡其裤站在浅灰背景前，缓缓原地转身一圈，展示正面、侧面和背面版型，最后回到正面停住。固定全身机位，柔光均匀，服装结构和人物全程一致，电商服装展示视频。' },
+  { title: '水乡行船', tag: '文旅宣传', subtitle: '平行跟拍 · 古镇河道', prompt: '江南古镇的清晨，一艘乌篷船沿河道缓缓前行，船夫轻摇木橹，镜头在河岸边与船平行跟拍，白墙黑瓦和石桥依次从背景经过。薄雾柔光，水面涟漪自然，古镇文旅宣传镜头。' },
+  { title: '鞋履落地', tag: '鞋类广告', subtitle: '贴地低机位 · 慢动作', prompt: '一只穿着跑鞋的脚从画面上方踩入城市路面的浅水洼，水花向四周溅起。镜头贴地低机位固定，升格慢动作，鞋子是前景主体，背景街道晨光虚化，侧逆光照亮水花，动感运动鞋广告镜头。' },
+  { title: '樱花飘落', tag: '季节风光', subtitle: '升格慢动作 · 浅景深', prompt: '春日樱花树下，粉白花瓣随微风缓缓飘落，前景几片花瓣从镜头前划过并虚化，背景古寺屋檐柔和。中焦固定镜头，升格慢动作，花瓣运动轻盈自然，柔和阴天光，春季风光空镜。' },
+  { title: '跑步跟拍', tag: '运动广告', subtitle: '侧向平行跟拍 · 速度感', prompt: '清晨江边步道，一位成年跑者匀速向前奔跑，镜头在侧面与跑者平行稳定跟拍，前景栏杆依次快速掠过，增强速度感。中景构图，晨光勾出人物轮廓，步态和服装全程一致，运动品牌广告镜头。' },
+  { title: '雨打荷叶', tag: '季节风光', subtitle: '微距定机 · 水珠滚落', prompt: '夏日雨中，雨滴落在一片宽大的荷叶上，水珠在叶面汇聚滚动，最后从叶边滑落，旁边一朵粉色荷花轻轻摇动。微距固定镜头，浅景深，青绿色调，雨滴和叶脉细节真实，东方意境风光空镜。' },
+  { title: '健身发力', tag: '健身宣传', subtitle: '低角度仰拍 · 硬光', prompt: '深色健身房中，一位成年健身者双手握住壶铃，从低处平稳提起至胸前并停住，肌肉线条清晰。低角度仰拍中景固定镜头，单侧硬光加冷色轮廓光，背景简洁，动作发力真实，健身房宣传视频。' },
+  { title: '秋路车窗', tag: '风光空镜', subtitle: '车载视角 · 前进推进', prompt: '车载前视视角，镜头沿一条两侧种满金黄银杏的乡间公路平稳前进，落叶在路面翻飞，树冠在头顶形成金色隧道。运动匀速流畅，阳光透过树叶闪烁，秋季旅行和自驾游宣传镜头。' },
+  { title: '出锅上菜', tag: '餐饮广告', subtitle: '侧面特写 · 热气升腾', prompt: '餐厅后厨，一位厨师颠动铁锅中的辣子鸡丁，随后将菜倒入白瓷盘，热气在暖光下升起。侧面近景，镜头小幅推进到盘中特写，食材色泽和油光真实，背景虚化，动作连贯，餐饮门店宣传视频。' },
+  { title: '雪林穿梭', tag: '航拍风光', subtitle: 'FPV 穿梭 · 雪林', prompt: 'FPV 穿越机视角，镜头在覆雪的松林间低空快速穿梭，绕过树干后从林间空地升起，露出远处雪山和蓝天。运动流畅有速度感，树木结构稳定不扭曲，雪粒在阳光下闪烁，冬季旅游宣传镜头。' },
+  { title: '芝士拉丝', tag: '美食广告', subtitle: '微距 · 缓慢上提', prompt: '一只手从刚出炉的披萨上缓缓提起一块三角饼，芝士被拉出长长的丝并逐渐断开，表面冒出热气。侧面微距近景固定镜头，暖色侧光突出芝士光泽，背景暗色虚化，美食外卖平台广告镜头。' },
+  { title: '海岛揭示', tag: '航拍风光', subtitle: '拉高揭示 · 海岛全貌', prompt: '无人机从浅滩上一艘白色小船的正上方开始，缓慢向上拉高，逐渐揭示整座热带海岛、弧形白色沙滩和由浅到深渐变的海水。正午光线通透，运动平稳，海岛旅游宣传片开场镜头。' },
+  { title: '食材叠落', tag: '食品广告', subtitle: '定机 · 依次落下', prompt: '白色背景前，汉堡的面包底、牛肉饼、芝士片、生菜、番茄和面包顶依次从上方落下，精准叠成一个完整汉堡，最后轻轻弹动。正面固定镜头，节奏明快，柔光均匀，食材质感真实，快餐广告镜头。' },
+  { title: '峡谷穿越', tag: '航拍风光', subtitle: '低空前飞 · 河谷穿越', prompt: '无人机沿峡谷中的碧绿河流低空向前飞行，两侧红色砂岩崖壁高耸，镜头随河道弯曲平稳转向，水面倒映崖壁。清晨侧光照亮岩层纹理，运动流畅，地理纪录片和户外品牌镜头。' },
+  { title: '咖啡拉花', tag: '门店宣传', subtitle: '斜俯拍 · 奶泡成形', prompt: '咖啡师一手托住白色陶杯，一手缓慢倒入牛奶，奶泡在咖啡表面形成心形图案，最后抬起奶缸收尾。斜俯拍近景固定镜头，杯形和手部全程一致，奶流连续，暖色窗光，咖啡门店宣传视频。' },
+  { title: '花田横移', tag: '季节风光', subtitle: '低位横移 · 花垄节奏', prompt: '夏季薰衣草田，镜头贴近花穗高度缓慢横移，前景紫色花穗依次掠过，蜜蜂在花间飞舞，背景石头农舍和夕阳柔和虚化。运动平稳，花穗随风轻摇，紫金配色，适合文旅和香氛品牌宣传。' },
+  { title: '探店一镜', tag: '探店视频', subtitle: '稳定器前推 · 穿门入店', prompt: '镜头从街边平稳向前推进，穿过一家原木风咖啡馆的玻璃门进入店内，沿吧台继续前移，最后停在窗边座位。稳定器一镜到底，运动匀速不晃动，店内暖光与窗外日光平衡，空间结构一致，探店视频开场镜头。' },
+  { title: '雾凇摇镜', tag: '季节风光', subtitle: '水平摇镜 · 冬日江岸', prompt: '冬日清晨江边，镜头从左向右缓慢水平摇动，挂满白色雾凇的柳树依次进入画面，江面冒出缕缕水汽，远处小桥若隐若现。高调明亮，摇镜匀速，冰晶细节清晰，宁静的冬季风光空镜。' },
+  { title: '样板间漫游', tag: '房产广告', subtitle: '稳定器缓推 · 空间连贯', prompt: '现代简约风格样板间，镜头从玄关缓慢向前推进，经过客厅沙发区，最后停在落地窗前展示城市景观。广角平视，竖线保持垂直，运动平稳，家具和空间结构全程一致，室内外曝光平衡，房产宣传视频。' },
+  { title: '冰川平移', tag: '航拍风光', subtitle: '航拍平移 · 冰川纹理', prompt: '无人机沿巨大冰川侧面平行飞行，蓝白色冰川表面布满裂隙和纹理，冰川末端融水汇入灰绿色湖泊，几块浮冰缓慢漂动。阴天柔光让冰的蓝色更通透，运动平稳，极地自然纪录片镜头。' },
+  { title: '开窗见景', tag: '酒店民宿', subtitle: '缓推 · 窗帘展开', prompt: '海景民宿客房内，白色窗帘缓缓向两侧拉开，阳光照进房间，露出窗外蓝色海面。镜头同时从床尾向窗口缓慢推进，床品和家具保持一致，室内外曝光平衡，清新明亮的民宿宣传视频。' },
+  { title: '火山远景', tag: '风光纪实', subtitle: '远景定机 · 熔岩流动', prompt: '夜晚的活火山远景，火山口持续喷出橙红色熔岩，熔岩沿山坡缓慢流下，上方烟柱被映成暖红色并缓缓升腾。长焦固定镜头，安全距离拍摄，深蓝夜空中星点可见，真实自然纪录片镜头。' },
+  { title: '城市航拍', tag: '文旅宣传', subtitle: '无人机前飞 · 缓慢抬升', prompt: '傍晚蓝调时刻，无人机从江面低空向前飞行，随后缓慢抬升，逐渐展现江岸亮灯的城市天际线和跨江大桥。航拍运动平稳连续，建筑结构稳定，灯光与天色自然，城市文旅宣传片开场镜头。' },
+  { title: '胡杨横移', tag: '季节风光', subtitle: '逆光横移 · 金色树林', prompt: '深秋傍晚的胡杨林，镜头缓慢横移，金黄树冠在逆光中透亮发光，粗壮树干依次形成剪影掠过，太阳在枝叶间闪现星芒。运动平稳，树叶随风微动，暖金色调，秋季文旅宣传镜头。' },
+  { title: '航拍环绕', tag: '文旅宣传', subtitle: '无人机环绕 · 主体居中', prompt: '黄金时刻，无人机围绕山顶一座古塔缓慢环绕约四分之一圈，古塔始终位于画面中央，背景层叠山峦和云海随环绕缓慢变化。航拍运动平稳，建筑结构一致，暖色侧光，景区宣传视频。' },
+  { title: '长城跟随', tag: '文旅宣传', subtitle: '航拍跟随 · 沿城墙飞行', prompt: '清晨薄雾中，无人机沿着山脊上蜿蜒的古长城向前飞行，城墙和烽火台依次从画面下方经过，远处层层山峦退入雾气。航拍运动平稳，城墙结构一致，暖色晨光，壮阔的文旅宣传镜头。' },
+  { title: '跟车行驶', tag: '汽车广告', subtitle: '低位平行跟车 · 过弯', prompt: '一辆无品牌标志的银灰色 SUV 沿海岸公路平稳过弯，镜头在车身侧面低位平行跟拍，车轮转动与车速匹配，路边护栏和海面依次掠过。傍晚侧逆光勾出车身线条，车型全程一致，汽车广告镜头。' },
+  { title: '梯田云雾', tag: '风光延时', subtitle: '固定延时 · 云雾流动', prompt: '山区梯田的固定延时，清晨云雾在层层梯田间缓慢流动、聚拢又散开，水面倒映的天色由粉蓝变为明亮的白天。中长焦斜俯视，梯田曲线稳定，云雾运动自然，田园风光片镜头。' },
+  { title: '车灯扫光', tag: '汽车广告', subtitle: '微距横移 · 光线扫过', prompt: '暗色摄影棚中，一辆深色汽车的前大灯局部特写，镜头缓慢向右横移，一道窄条柔光沿车灯和车身曲面从左向右扫过，车灯随后点亮。微距浅景深，漆面和灯组细节真实，无品牌标志，高级汽车广告镜头。' },
+  { title: '天空之镜', tag: '航拍风光', subtitle: '航拍环绕 · 人物点景', prompt: '盐湖浅水面完整倒映天空和云朵，一位穿红色长裙的成年人站在湖中央，无人机围绕人物缓慢环绕半圈，人物和倒影始终居中。人物很小，天空蓝白通透，运动平稳，旅行宣传和社媒爆款镜头。' },
+  { title: '珠宝转台', tag: '珠宝广告', subtitle: '微距 · 转台火彩', prompt: '黑色亮面台面上，一枚铂金钻戒在小转台上缓慢旋转，点光源下钻石折射出闪烁的彩色火彩，下方倒影随之移动。微距固定镜头，焦点锁定钻石，戒托结构全程一致，奢华克制的珠宝广告。' },
+  { title: '灯塔浪涌', tag: '风光空镜', subtitle: '远景定机 · 灯束扫过', prompt: '蓝调时刻的海角悬崖，白色灯塔的灯束缓缓旋转扫过海面，下方海浪持续拍打礁石溅起浪花。中长焦固定远景，灯束旋转匀速，天空由浅紫过渡到深蓝，宁静有故事感的海岸空镜。' },
+  { title: '香氛环绕', tag: '产品广告', subtitle: '小幅环绕 · 玻璃折射', prompt: '深灰石台上一只无标签的烟灰色香水瓶保持静止，镜头围绕瓶身缓慢移动小半圈，一道窄条柔光沿玻璃棱边滑过，背景薄纱轻轻起伏。玻璃折射精准，暗背景，银灰色调，精致的香氛产品广告。' },
+  { title: '雨夜街道', tag: '城市风光', subtitle: '低机位推进 · 积水倒影', prompt: '雨后夜晚的老城街道，镜头贴近积水低机位缓慢向前推进，水面倒映霓虹和路灯暖光，雨滴落下荡开涟漪，远处一位撑伞行人走过。招牌无可读文字，运动平稳，电影感城市夜景空镜。' },
+  { title: '礼盒开盖', tag: '节日营销', subtitle: '俯拍定机 · 开盒展示', prompt: '深红色背景前，一双手缓缓掀开一只烫金红色礼盒的盒盖，露出整齐排列的月饼和金色内衬，几粒金色光点轻轻飘落。俯拍固定镜头，手部动作连贯，礼盒结构一致，喜庆的节日礼盒电商视频。' },
+  { title: '竹林仰望', tag: '风光空镜', subtitle: '仰拍 · 缓慢旋转', prompt: '站在竹林中央向上仰拍，高大竹竿向天空汇聚，竹叶在风中轻轻摇动，阳光从叶隙间闪烁。镜头缓慢旋转约四分之一圈，透视稳定，绿色层次丰富，清幽的东方风光空镜，适合转场和片头。' },
+  { title: '功能演示', tag: '家电电商', subtitle: '侧面定机 · 功能展示', prompt: '厨房台面上一台白色空气炸锅，一只手将炸篮缓缓拉出，露出金黄酥脆的薯条，热气轻轻升起，随后用夹子夹起几根展示。45 度侧面中近景固定镜头，自然窗光，产品和食物清晰，家电电商功能演示视频。' },
+  { title: '雪原独行', tag: '风光空镜', subtitle: '远景定机 · 人物穿越', prompt: '一望无际的白色雪原，一位穿深色外套的成年人从画面左侧缓缓走入，沿直线走向右侧，身后留下一串脚印，细雪随风轻扬。远景固定镜头，人物很小，大面积留白，极简冷静的风光空镜。' },
+  { title: '扫地跟随', tag: '家电电商', subtitle: '贴地低机位 · 跟随', prompt: '明亮的浅木地板客厅，一台白色扫地机器人沿沙发边缘平稳前进，边刷将地面碎屑扫入机身。镜头贴地在侧后方缓慢跟随，机身结构保持一致，行进路线自然，室内光线明亮，家电电商演示视频。' },
+  { title: '奔马跟摇', tag: '风光纪实', subtitle: '长焦跟摇 · 草原奔马', prompt: '夏季草原上，一群马沿河岸奔跑，马蹄溅起水花，鬃毛随风飘动。长焦镜头水平跟摇，马群保持在画面中央，背景草原和远山被压缩虚化，动作自然有力，草原文旅宣传镜头。' },
+  { title: '逗猫互动', tag: '宠物用品', subtitle: '贴地机位 · 自然反应', prompt: '浅色客厅地板上，一只橘猫盯着晃动的羽毛逗猫棒，伏低身体后跳起扑抓。镜头贴地与猫眼同高固定拍摄，猫的动作和毛发真实自然，窗边柔光，背景虚化，宠物用品种草视频。' },
+  { title: '鸟群掠湖', tag: '风光纪实', subtitle: '长焦定机 · 鸟群飞过', prompt: '清晨平静的湖面，一群白色水鸟从画面右侧贴着水面飞过，翅膀拍起细小水花，倒影随之移动，远处芦苇和薄雾柔和。长焦固定镜头，鸟群飞行轨迹自然，冷蓝晨色，宁静的湿地风光镜头。' },
+  { title: '母婴温馨', tag: '母婴品牌', subtitle: '高调柔光 · 近景定机', prompt: '白色婴儿床边，一位成年母亲把一只米色安抚玩偶轻轻放到婴儿手边，婴儿小手握住玩偶。近景固定镜头，高调柔光，画面明亮无硬阴影，动作缓慢温柔，人物不正对镜头，温馨的母婴品牌宣传视频。' },
+  { title: '溪流苔藓', tag: '风光空镜', subtitle: '微距横移 · 溪水流动', prompt: '雨林中清澈溪流流过长满苔藓的石头，镜头贴近水面缓慢横移，前景苔藓和水珠清晰，水流在石间形成细小漩涡，一束阳光照在水面闪烁。浅景深，绿色饱和，湿润真实的自然空镜。' },
+  { title: '口播背景', tag: '知识口播', subtitle: '中景定机 · 浅景深', prompt: '一位穿浅蓝衬衫的成年讲解者坐在书房中，面向镜头自然讲话并配合简单手势。胸部以上中景固定镜头，85mm 浅景深，背景书架和暖色台灯柔和虚化，主光柔和均匀，适合知识口播和带货讲解视频。' },
+  { title: '海面日落', tag: '风光延时', subtitle: '固定延时 · 太阳落海', prompt: '平静海面上的日落延时，太阳缓慢沉入海平线，水面金色光带逐渐变短，天空从金橙渐变到粉紫，远处一艘帆船剪影静止。长焦固定机位，水平线放平，色彩过渡平滑，品牌片尾和视频背景镜头。' },
+  { title: '访谈机位', tag: '企业宣传', subtitle: '侧面中景 · 访谈布光', prompt: '一位穿深色西装的成年企业负责人坐在会议室中，看向画面外的提问者自然讲述。侧面三分之二角度中景固定镜头，主光从人物面向一侧打入，背景暗部有轻微轮廓光，视线方向正确，企业宣传片访谈镜头。' },
+  { title: '雷暴远景', tag: '风光延时', subtitle: '远景延时 · 闪电云团', prompt: '傍晚的平原上空，巨大的积雨云团缓慢翻滚堆积，云中不时闪现闪电照亮云层，地面上一座孤立农舍和一条公路。固定远景延时，云层运动壮观自然，地景稳定，适合气象和自然纪录片镜头。' },
+  { title: '办公空镜', tag: '企业宣传', subtitle: '横移空镜 · 氛围铺垫', prompt: '明亮的开放式办公室，镜头沿工位缓慢横移，几位成年员工在电脑前工作，两人在白板前讨论。人物不看镜头，背景景深自然，窗光均匀，运动平稳，用于企业宣传片和招聘视频的氛围空镜。' },
+  { title: '山脊流云', tag: '风光延时', subtitle: '固定延时 · 云影流动', prompt: '晴朗午后的连绵山脊，固定延时拍摄，大块白云在蓝天中快速流过，云影在山坡草甸上移动，光影明暗交替。广角平视，山体完全稳定，色彩明快，适合户外品牌、文旅宣传和视频转场。' },
+  { title: '产线推轨', tag: '工业宣传', subtitle: '推轨横移 · 工业质感', prompt: '现代化工厂车间，镜头沿自动化装配线平稳横移，机械臂依次抓取并组装金属部件，远处技术人员检查设备。中景构图，顶部冷白工业灯照明，机械动作精准有序，工业企业宣传片镜头。' },
+  { title: '公路航拍', tag: '航拍风光', subtitle: '航拍跟随 · S 形山路', prompt: '无人机在后上方跟随一辆红色越野车，车辆沿雪山间的 S 形盘山公路平稳行驶，镜头随弯道缓慢转向，逐渐展现雪山和山谷全景。晴天侧光，车辆结构一致，运动流畅，自驾游和汽车广告镜头。' },
+  { title: '手作特写', tag: '品牌故事', subtitle: '手部特写 · 连贯操作', prompt: '手工皮具工作台上，匠人的双手将针穿过深棕皮革边缘的预留孔，再平稳拉紧蜡线完成一针。微距固定镜头，针线走向合理，皮革纹路和手部细节真实，柔和侧光，背景工具虚化，手工品牌故事视频。' },
+  { title: '雨巷檐滴', tag: '东方意境', subtitle: '近景定机 · 檐下雨帘', prompt: '江南雨巷，黑瓦屋檐下雨水连成细细的雨帘落下，在青石板上溅起细小水花，背景一位撑油纸伞的行人缓缓走过并虚化。近景固定镜头，浅景深，青灰色调，雨水运动真实，东方意境空镜。' },
+  { title: '茶艺冲泡', tag: '茶饮品牌', subtitle: '侧面特写 · 注水出汤', prompt: '深色木茶台上，一只手提起公道杯将清亮茶汤缓缓注入白瓷品茗杯，茶汤呈淡金色，表面轻微冒出热气。侧面特写固定镜头，柔和侧光，背景素净虚化，水流连续自然，东方茶饮品牌视频。' },
+  { title: '枫叶落水', tag: '季节风光', subtitle: '微距定机 · 涟漪展开', prompt: '深秋溪边，一片红枫叶缓缓飘落到平静水面，荡开一圈圈涟漪，水面倒映着金黄树冠。微距固定镜头，浅景深，叶片运动轻盈自然，涟漪清晰，暖红与金黄配色，秋季风光空镜。' },
+  { title: '滑动变焦', tag: '镜头语言', subtitle: '希区柯克变焦 · 空间压迫', prompt: '一位成年人站在长走廊中央看向镜头，人物大小保持不变，背景走廊在画面中逐渐拉长后退，形成空间压迫感。正面平视中景，运动平稳，人物和走廊结构一致，冷色调光线，适合悬疑剧情或广告转折点的镜头练习。' },
+  { title: '湖畔晨雾', tag: '风光空镜', subtitle: '缓推 · 木屋暖窗', prompt: '清晨森林湖畔，镜头沿木栈道缓慢向前推进，湖面薄雾缓缓流动，前方红色小木屋窗户透出暖光，倒影在水中轻轻晃动。运动平稳，冷蓝晨色与暖窗光对比，民宿宣传和视频开场镜头。' },
+  { title: '甩镜转场', tag: '镜头语言', subtitle: '快速横甩 · 动态模糊', prompt: '咖啡馆内，镜头先拍一位成年顾客拿起咖啡杯，随后快速向右横甩，画面产生强烈横向动态模糊，停稳后落在吧台上的甜点展示柜。节奏利落，前后场景光线一致，适合短视频转场剪辑的甩镜素材。' },
+  { title: '城市俯降', tag: '航拍风光', subtitle: '正顶视下降 · 旋转', prompt: '无人机正顶视从高空缓慢下降，同时顺时针轻轻旋转，城市十字路口的车流、斑马线和行人逐渐变大，周围楼顶花园和道路形成几何图形。运动平稳，建筑结构稳定，城市宣传片转场镜头。' },
+  { title: '前后景转焦', tag: '镜头语言', subtitle: '焦点转移 · 引导视线', prompt: '窗边桌面上，前景是一只白色护手霜，后景一位成年人正在看书。镜头固定，焦点先落在前景产品上，随后平稳转移到后景人物，产品逐渐虚化，人物变清晰。柔和窗光，适合产品与使用者关联的广告镜头。' },
+  { title: '珊瑚跟游', tag: '海洋风光', subtitle: '水下跟游 · 珊瑚礁', prompt: '清澈热带浅海水下，镜头跟随一只海龟缓慢游过五彩珊瑚礁，小鱼群在周围散开又聚拢，阳光从水面投下摇曳光纹。水下稳定跟拍，海龟动作自然，蓝绿水色通透，海洋旅游和环保宣传镜头。' },
+  { title: '升降揭示', tag: '镜头语言', subtitle: '摇臂上升 · 揭示全景', prompt: '镜头从花摊前一桶鲜花的低位特写开始，平稳向上升起，越过花束后逐渐揭示整条热闹的周末市集街道和人群。摇臂升降运动连贯，运动结束时保持全景，上午自然光，适合城市活动和品牌活动开场镜头。' },
+  { title: '驼队剪影', tag: '风光纪实', subtitle: '长焦定机 · 沙脊剪影', prompt: '日落时分的沙漠，一支驼队沿沙脊缓慢行走，在金红色天空前形成清晰的剪影，沙粒被风轻轻吹起。长焦固定镜头，驼队从画面左侧走向右侧，步态自然，暖色调浓郁，壮阔的沙漠风光镜头。' },
+  { title: '穿梭镜头', tag: '镜头语言', subtitle: 'FPV 穿越 · 速度感', prompt: 'FPV 穿越机视角，镜头从商场中庭上方俯冲而下，贴近扶梯快速向前穿过，越过两侧店铺后从中庭开口抬升。运动快速流畅，建筑结构稳定不扭曲，室内光线明亮，适合商场、展会和城市宣传的速度感镜头。' },
+  { title: '茶园航拍', tag: '航拍风光', subtitle: '航拍前飞 · 茶垄曲线', prompt: '春季清晨，无人机沿山地茶园缓慢向前飞行并略微抬升，一行行弧形茶垄从画面下方经过，几位戴斗笠的采茶人在其间劳作，山顶薄雾流动。嫩绿色调统一，运动平稳，茶叶品牌和乡村文旅镜头。' },
+  { title: '环绕人物', tag: '镜头语言', subtitle: '180° 环绕 · 主体定格', prompt: '城市天台上，一位穿黑色西装的成年人静止站立看向远方，镜头围绕人物平稳环绕半圈，背景城市天际线随之转动。人物始终位于画面中央，逆光勾出人物轮廓，面部和服装一致，品牌人物宣传片镜头。' },
+  { title: '湖上划艇', tag: '航拍风光', subtitle: '航拍跟随 · 顶视划行', prompt: '无人机正顶视跟随一只黄色皮划艇划过碧绿冰川湖，桨叶划开水面留下V形水纹，湖底石头隐约可见。镜头匀速跟随，皮划艇始终位于画面中央，色彩通透，户外运动和旅游宣传镜头。' },
+  { title: '日转夜延时', tag: '镜头语言', subtitle: '固定延时 · 时间流逝', prompt: '固定机位延时摄影，城市十字路口从傍晚到夜晚，天色由暖橙渐变为深蓝，街灯和楼宇灯光依次亮起，车流形成光轨。建筑和机位完全稳定，曝光平滑过渡，适合城市宣传片和时间转场镜头。' },
+  { title: '夜城环绕', tag: '城市风光', subtitle: '航拍环绕 · 地标高楼', prompt: '夜晚的城市中心，无人机围绕一座亮灯的地标高楼缓慢环绕，周围楼群灯光和街道车流随环绕依次展开，江面倒映城市光影。运动平稳，建筑结构一致不扭曲，城市夜景宣传片镜头。' },
+  { title: '片尾落版', tag: '品牌收尾', subtitle: '定机后拉 · 留标版区', prompt: '浅灰色圆柱展台中央立着一只无标志的哑光黑色香氛瓶，镜头从瓶身特写缓慢向后拉开，露出完整展台和干净背景，画面上方逐渐留出大面积空白用于放置品牌标志。柔和硬光切割背景，结尾停稳，广告片尾落版镜头。' },
+  { title: '远山后拉', tag: '风光空镜', subtitle: '缓慢后拉 · 片尾留白', prompt: '傍晚连绵远山的层层剪影由深蓝渐变到浅蓝灰，山谷间薄雾缓缓流动，镜头缓慢向后拉开并略微上升，画面上方逐渐留出大片淡橙色天空。运动平稳，结尾停稳，适合片尾落版和视频背景。' },
+]
+
+const videoCapabilities: Array<{ id: VideoCapability; label: string; disabled?: boolean }> = [
+  { id: 'seedance', label: 'Seedance 视频' },
+  { id: 'grok', label: 'Grok 视频' },
+  { id: 'minimax', label: 'MiniMax H3 视频' },
 ]
 
 const imageCapabilities: Array<{ id: ImageCapability; label: string }> = [
-  { id: 'image2', label: 'Image2 生图' },
+  { id: 'image2', label: 'Image 生图' },
   { id: 'grok', label: 'Grok 生图' },
   { id: 'banner', label: 'Banner 生图' },
 ]
@@ -1308,8 +1578,8 @@ const videoAspectOptions = [
   { value: '3:2', label: '3:2 横向' },
   { value: '2:3', label: '2:3 竖向' },
   { value: '21:9', label: '21:9 超宽' },
-  { value: '5:2', label: '5:2 超宽' },
 ]
+const GROK_VIDEO_ASPECT_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3']
 
 const image2RatioOptions = [
   { value: '1:1', label: '1:1 方形' },
@@ -1362,7 +1632,17 @@ const appStore = useAppStore()
 const studioMode = ref<StudioMode>('image')
 const historyFilter = ref<StudioMode>('image')
 const imageCapability = ref<ImageCapability>('image2')
+const videoCapability = ref<VideoCapability>('seedance')
 const historyCollapsed = ref(false)
+// Below 1120px the history column is hidden; the panel opens as a drawer instead.
+const compactHistory = useMediaQuery('(max-width: 1120px)')
+const phoneHistory = useMediaQuery('(max-width: 800px)')
+const historyDrawerOpen = ref(false)
+const historyDragOffset = ref(0)
+const historyToggleElement = ref<HTMLElement | null>(null)
+const historyCloseElement = ref<HTMLElement | null>(null)
+const historyListHidden = computed(() => historyCollapsed.value && !compactHistory.value)
+const bodyScrollLocked = useScrollLock(typeof document === 'undefined' ? null : document.body)
 const groups = ref<Group[]>([])
 const apiKeys = ref<ApiKey[]>([])
 const selectedGroupId = ref(0)
@@ -1406,6 +1686,8 @@ const videoShots = ref<VideoShot[]>([{
 const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
+const promptExpanded = ref(false)
+watch(() => selectedWork.value?.id, () => { promptExpanded.value = false })
 const localSaveWarning = ref('')
 const imageDownloads = new Map<string, Promise<Blob>>()
 const historicalImageSaves = new Map<string, Promise<void>>()
@@ -1413,6 +1695,10 @@ let historicalImageRecoveryRunning = false
 const referencingOutputKey = ref('')
 const downloadingOutputKey = ref('')
 const activeTemplateIndex = ref(0)
+const briefPromptElement = ref<HTMLElement | null>(null)
+const briefPromptClipped = ref(false)
+const briefBodyElement = ref<HTMLElement | null>(null)
+const briefBodyHeight = ref(0)
 const bootstrapping = ref(false)
 const loadingModels = ref(false)
 const creatingKey = ref(false)
@@ -1427,11 +1713,18 @@ interface GenerationTask {
   percent: number
   progress: string
   startedAt: number
+  /** Images of this task that failed; their frames are marked instead of queued. */
+  failedCount?: number
 }
 // Each request owns its state and immutable inputs. Browsing or starting another
 // creation only changes the selection, never the request that is already running.
 const activeGenerations = reactive(new Map<string, GenerationTask>())
 const selectedGeneration = computed(() => selectedWork.value ? activeGenerations.get(selectedWork.value.id) : undefined)
+const activeGenerationCounts = computed(() => {
+  const counts: Record<StudioMode, number> = { image: 0, video: 0 }
+  for (const task of activeGenerations.values()) counts[task.mode]++
+  return counts
+})
 const generationMode = computed(() => selectedGeneration.value?.mode)
 const generationPhase = computed(() => selectedGeneration.value?.phase)
 const generationProgress = computed(() => selectedGeneration.value?.progress)
@@ -1445,11 +1738,52 @@ const videoHistoryFeedback = ref<{ workId: string; tone: 'pending' | 'error'; me
 const loadingVideoWorkId = ref('')
 const composingWorkId = ref('')
 const previewUrl = ref('')
+const previewOutputs = computed(() => selectedWork.value?.outputs ?? [])
+const previewIndex = computed(() => previewOutputs.value.indexOf(previewUrl.value))
 const previewImageCacheKey = computed(() => {
   const work = selectedWork.value
-  const index = work?.outputs.indexOf(previewUrl.value) ?? -1
+  const index = previewIndex.value
   return work && index >= 0 ? `${work.id}:${work.updatedAt}:${index}` : undefined
 })
+
+function openPreview(output: string) {
+  previewUrl.value = output
+}
+
+function closePreview() {
+  previewUrl.value = ''
+}
+
+async function editPreviewOutput() {
+  const work = selectedWork.value
+  const index = previewIndex.value
+  if (!work || index < 0) return
+  const output = previewUrl.value
+  closePreview()
+  await useOutputAsReference(output, work, index)
+}
+
+function stepPreview(direction: 1 | -1) {
+  const outputs = previewOutputs.value
+  if (outputs.length < 2) return
+  const current = previewIndex.value
+  const start = current >= 0 ? current : direction > 0 ? -1 : 0
+  previewUrl.value = outputs[(start + direction + outputs.length) % outputs.length]
+}
+
+function handlePreviewKeydown(event: KeyboardEvent) {
+  if (!previewUrl.value || event.isComposing || event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.key === 'Escape') {
+    event.preventDefault()
+    closePreview()
+    return
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    if (previewOutputs.value.length < 2) return
+    event.preventDefault()
+    stepPreview(event.key === 'ArrowRight' ? 1 : -1)
+  }
+}
 const promptToolExpanded = ref(false)
 const promptTemplatePage = ref(0)
 const fileInput = ref<HTMLInputElement | null>(null)
@@ -1461,16 +1795,35 @@ let unsubscribeHistory: (() => void) | undefined
 let unsubscribeExternalHistory: (() => void) | undefined
 let externalHistoryQueue: Promise<void> = Promise.resolve()
 const studioElement = ref<HTMLElement | null>(null)
+const toolbarElement = ref<HTMLElement | null>(null)
+// The toolbar is sticky on mobile; square its corners once it pins below the site header.
+const toolbarStuck = ref(false)
+let toolbarStuckFrame = 0
+function updateToolbarStuck() {
+  toolbarStuckFrame = 0
+  const studio = studioElement.value
+  const toolbar = toolbarElement.value
+  if (!studio || !toolbar) return
+  // At rest the toolbar sits just inside the card's top border; any further offset means sticky pinned it.
+  toolbarStuck.value = toolbar.getBoundingClientRect().top - studio.getBoundingClientRect().top - studio.clientTop > 0.5
+}
+function scheduleToolbarStuck() {
+  if (!toolbarStuckFrame) toolbarStuckFrame = requestAnimationFrame(updateToolbarStuck)
+}
+const canvasPanelElement = ref<HTMLElement | null>(null)
 const settingsScrollElement = ref<HTMLElement | null>(null)
+const settingsPanelElement = ref<HTMLElement | null>(null)
 let studioActive = true
 let generationTimer: number | undefined
 let templateAutoplayTimer: number | undefined
 let restoreSettingsSequence = 0
 const restoringWorkSettings = ref(false)
 const transientObjectUrls = new Set<string>()
+const blobObjectUrls = new WeakMap<Blob, string>()
 
 const activeTemplates = computed(() => studioMode.value === 'image' ? imageTemplates : videoTemplates)
 const activeTemplate = computed(() => activeTemplates.value[activeTemplateIndex.value] || activeTemplates.value[0])
+const activePromptCategories = computed(() => studioMode.value === 'image' ? imagePromptCategories : videoPromptCategories)
 const selectedVideoHistoryFeedback = computed(() => (
   videoHistoryFeedback.value?.workId === selectedWork.value?.id ? videoHistoryFeedback.value : null
 ))
@@ -1480,7 +1833,10 @@ const visiblePromptTemplates = computed(() => {
   const start = promptTemplatePage.value * promptTemplatePageSize
   return activeTemplates.value.slice(start, start + promptTemplatePageSize)
 })
-const promptLimit = computed(() => imageCapability.value === 'image2' && studioMode.value === 'image' ? 32000 : 8000)
+const promptLimit = computed(() => {
+  if (imageCapability.value === 'image2' && studioMode.value === 'image') return 32000
+  return studioMode.value === 'video' && isMiniMaxH3Model(selectedModel.value) ? 7000 : 8000
+})
 const promptPlaceholder = computed(() => studioMode.value === 'image'
   ? '例如：一间被午后阳光照亮的日式书房，木质书桌，窗边绿植，安静、真实、电影感'
   : '例如：镜头从海面低机位缓慢向前推进，晨光穿过薄雾，浪花在前景闪烁')
@@ -1492,7 +1848,32 @@ const imageResolutionOptions = computed(() => {
   return ['1K', '2K']
 })
 const videoSupports1080p = computed(() => /grok-imagine-video-1\.5(?:$|-)/i.test(selectedModel.value))
-const videoResolutionOptions = computed(() => (videoSupports1080p.value ? ['480p', '720p', '1080p'] : ['480p', '720p']))
+// Relay model IDs (MiniMax H3, Seedance) fix the resolution and the
+// allowed duration range, and share the same aspect ratios and image limit.
+const selectedVideoRelayTier = computed(() => studioMode.value === 'video'
+  ? miniMaxH3Tier(selectedModel.value) || seedanceVideoTier(selectedModel.value)
+  : null)
+const videoResolutionOptions = computed(() => {
+  if (selectedVideoRelayTier.value) return [selectedVideoRelayTier.value.resolution]
+  return videoSupports1080p.value ? ['480p', '720p', '1080p'] : ['480p', '720p']
+})
+const videoDurationRange = computed(() => selectedVideoRelayTier.value
+  ? { min: selectedVideoRelayTier.value.minSeconds, max: selectedVideoRelayTier.value.maxSeconds }
+  : { min: 1, max: 15 })
+const selectedSeedanceTier = computed(() => studioMode.value === 'video' ? seedanceVideoTier(selectedModel.value) : null)
+const videoAspectRatios = computed(() => selectedVideoRelayTier.value
+  ? selectedVideoRelayTier.value.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
+  : GROK_VIDEO_ASPECT_RATIOS)
+// Grok lists its unsupported ratios (21:9) disabled; relay tiers list only their own.
+const videoAspectChoices = computed(() => selectedVideoRelayTier.value
+  ? videoAspectOptions.filter(option => videoAspectRatios.value.includes(option.value))
+  : videoAspectOptions)
+const referenceVideoImageLimit = computed(() => selectedVideoRelayTier.value
+  ? selectedSeedanceTier.value?.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES
+  : 7)
+// Text-only Seedance lines refuse reference images.
+const relayTierAcceptsUploads = computed(() => selectedSeedanceTier.value?.supportsUploadedReferences ?? true)
+const relayTierRequiresReference = computed(() => Boolean(studioMode.value === 'video' && miniMaxH3Tier(selectedModel.value)?.requiresReference))
 const aspectOptions = computed(() => {
   if (studioMode.value === 'image') {
     return image2SizeOptions[imageResolution.value] || image2SizeOptions['1K']
@@ -1571,7 +1952,7 @@ const activeReferenceImages = computed<ReferenceImage[]>({
 const maxReferenceImages = computed(() => {
   if (studioMode.value === 'video') {
     if (activeVideoGenerationMethod.value === 'text') return 0
-    return activeVideoGenerationMethod.value === 'image' ? 1 : 7
+    return activeVideoGenerationMethod.value === 'image' ? 1 : referenceVideoImageLimit.value
   }
   if (imageCapability.value === 'image2') return 16
   return 3
@@ -1581,7 +1962,7 @@ const referenceFieldVisible = computed(() => studioMode.value === 'image' || act
 const referenceFieldLabel = computed(() => studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image' ? '源图' : '参考图')
 const referenceHint = computed(() => {
   if (studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image') return '必选，仅 1 张，作为当前镜头首帧'
-  if (studioMode.value === 'video') return '必选，最多 7 张，仅支持 Grok Imagine Video 1.5'
+  if (studioMode.value === 'video') return `必选，最多 ${referenceVideoImageLimit.value} 张，仅支持 Grok Imagine Video 1.5 / MiniMax H3`
   return `可选，最多 ${maxReferenceImages.value} 张`
 })
 const referenceUploadDescription = computed(() => {
@@ -1660,7 +2041,7 @@ const visibleHistory = computed(() => historyItems.value.filter(item => item.typ
 const historyListElement = ref<HTMLElement | null>(null)
 const virtualizeHistory = computed(() => visibleHistory.value.length > 20)
 const historyVirtualizer = useVirtualizer<HTMLElement, HTMLElement>(computed(() => ({
-  enabled: virtualizeHistory.value && !historyCollapsed.value,
+  enabled: virtualizeHistory.value && !historyListHidden.value,
   count: virtualizeHistory.value ? visibleHistory.value.length : 0,
   getScrollElement: () => historyListElement.value,
   getItemKey: (index: number) => visibleHistory.value[index].id,
@@ -1700,7 +2081,7 @@ const configuredVideoDuration = computed({
     ? Number(selectedShot.value?.duration || 0)
     : videoDuration.value,
   set: (value: number) => {
-    const next = Math.max(1, Math.min(15, value))
+    const next = Math.max(videoDurationRange.value.min, Math.min(videoDurationRange.value.max, value))
     if (professionalVideo.value && selectedShot.value) {
       selectedShot.value.duration = next
       return
@@ -1796,7 +2177,7 @@ const effectivePrompt = computed(() => {
   }
   return prompt.value.trim()
 })
-const referenceVideoModelOptions = computed(() => modelOptions.value.filter(isGrokVideo15Model))
+const referenceVideoModelOptions = computed(() => modelOptions.value.filter(supportsReferenceVideo))
 const requiresReferenceVideo15 = computed(() => (
   studioMode.value === 'video'
   && (professionalVideo.value
@@ -1815,13 +2196,13 @@ const referenceVideoModelUnavailable = computed(() => (
 ))
 const canGenerate = computed(() => {
   if (selectedGeneration.value || loadingModels.value || restoringWorkSettings.value || processingReferenceImages.value || !selectedApiKey.value || !selectedModel.value || !effectivePrompt.value || effectivePrompt.value.length > promptLimit.value) return false
-  if (requiresReferenceVideo15.value && !isGrokVideo15Model(selectedModel.value)) return false
+  if (requiresReferenceVideo15.value && !supportsReferenceVideo(selectedModel.value)) return false
   if (studioMode.value === 'video' && professionalVideo.value) {
     return totalShotDuration.value <= 60
       && videoShots.value.length > 0
       && videoShots.value.every(shot => (
         shot.prompt.trim()
-        && shot.prompt.length <= 8000
+        && shot.prompt.length <= promptLimit.value
         && (shot.generationMethod === 'text' || shot.referenceImages.length > 0)
       ))
   }
@@ -1836,6 +2217,39 @@ const professionalVideoReferenceError = computed(() => {
     ? `镜头 ${index + 1} 的图生视频需要 1 张源图`
     : `镜头 ${index + 1} 的参考图生视频至少需要 1 张参考图`
 })
+// One placeholder per requested image, shaped like the requested ratio, so
+// finished images appear in place while the next one is still drawing.
+const generationFrames = computed(() => {
+  const work = selectedWork.value
+  if (!work || !selectedGeneration.value) return []
+  const count = work.type === 'image' ? Math.max(1, work.outputCount || 1) : 1
+  const failedFrom = count - (selectedGeneration.value.failedCount || 0)
+  return Array.from({ length: count }, (_, index) => {
+    const output = work.type === 'image' ? work.outputs[index] : undefined
+    const state = output ? 'done'
+      : index >= failedFrom ? 'failed'
+        : index === work.outputs.length || work.type === 'video' ? 'current' : 'queued'
+    return { index, output, state }
+  })
+})
+const generationFrameStyle = computed(() => {
+  const [ratioWidth, ratioHeight] = (selectedWork.value?.aspectRatio || '').split(':').map(Number)
+  const width = ratioWidth > 0 ? ratioWidth : 1
+  const height = ratioHeight > 0 ? ratioHeight : 1
+  const count = generationFrames.value.length || 1
+  const ratio = Math.round((width / height) * 10000) / 10000
+  // Row width and frame height come from CSS so the frames scale with the canvas;
+  // a single frame keeps ~86% of the row, multiple frames share it with 12px gaps.
+  const share = count === 1
+    ? 'var(--generation-row-width) * 0.86'
+    : `(var(--generation-row-width) - ${12 * (count - 1)}px) / ${count}`
+  return {
+    '--generation-frame-width': `min(calc(${share}), calc(var(--generation-frame-height) * ${ratio}))`,
+    aspectRatio: `${width} / ${height}`,
+    // Mobile frames stretch to the gutter; cap each at 480px tall so portrait ratios stay on screen.
+    '--generation-frame-mobile-max': `${Math.round((width / height) * 480)}px`,
+  }
+})
 const generationElapsedLabel = computed(() => {
   const elapsedSeconds = generationStartedAt.value
     ? Math.max(0, Math.floor((generationClock.value - generationStartedAt.value) / 1000))
@@ -1848,7 +2262,17 @@ const generationElapsedLabel = computed(() => {
 function groupMatchesCurrentCapability(group: Group) {
   if (group.status !== 'active') return false
   const haystack = `${group.name} ${group.description || ''}`.toLowerCase()
-  if (studioMode.value === 'video') return group.platform === 'grok' || /grok|xai/.test(haystack)
+  if (studioMode.value === 'video') {
+    // Relay groups only create video once their family price is set:
+    // H3 on MiniMax groups, Seedance on DeepSeek groups.
+    if (videoCapability.value === 'minimax') {
+      return group.platform === 'minimax' && Object.keys(group.video_model_prices?.['minimax-h3'] || {}).length > 0
+    }
+    if (videoCapability.value === 'seedance') {
+      return group.platform === 'deepseek' && Object.keys(group.video_model_prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || {}).length > 0
+    }
+    return group.platform === 'grok' || (group.platform !== 'minimax' && group.platform !== 'deepseek' && /grok|xai/.test(haystack))
+  }
   if (imageCapability.value === 'grok') {
     return (group.allow_image_generation && group.platform === 'grok') || /grok.*(图|image)|xai/.test(haystack)
   }
@@ -1859,7 +2283,11 @@ function groupMatchesCurrentCapability(group: Group) {
 }
 
 function fallbackModels() {
-  if (studioMode.value === 'video') return ['grok-imagine-video', 'grok-imagine-video-1.5']
+  if (studioMode.value === 'video') {
+    if (videoCapability.value === 'minimax') return [...MINIMAX_H3_STUDIO_MODELS]
+    if (videoCapability.value === 'seedance') return [...SEEDANCE_FALLBACK_MODELS]
+    return ['grok-imagine-video', 'grok-imagine-video-1.5']
+  }
   if (imageCapability.value === 'grok') return ['grok-imagine-image', 'grok-imagine-image-quality']
   if (imageCapability.value === 'image2') return ['gpt-image-2']
   return ['gemini-3-pro-image-preview', 'gemini-2.5-flash-image']
@@ -1867,6 +2295,20 @@ function fallbackModels() {
 
 function isGrokVideo15Model(model: string) {
   return /^grok-imagine-video-1\.5(?:$|-)/i.test(model.trim().replace(/^models\//i, ''))
+}
+
+function supportsReferenceVideo(model: string) {
+  return isGrokVideo15Model(model) || isMiniMaxH3Model(model) || Boolean(seedanceVideoTier(model)?.supportsUploadedReferences)
+}
+
+// Friendly names for relay IDs; other models show their ID.
+function modelLabel(model: string) {
+  return miniMaxH3Tier(model)?.label || seedanceVideoTier(model)?.name || model
+}
+
+function videoProviderLabel(model: string) {
+  if (isMiniMaxH3Model(model)) return 'MiniMax H3'
+  return isSeedanceVideoModel(model) ? 'Seedance' : 'Grok'
 }
 
 function videoGenerationMethodLabelFor(method: VideoGenerationMethod) {
@@ -1880,6 +2322,7 @@ function videoGenerationMethodLabelFor(method: VideoGenerationMethod) {
 function syncVideoModelForGenerationMethod() {
   if (studioMode.value !== 'video') return
   if (requiresReferenceVideo15.value) {
+    if (supportsReferenceVideo(selectedModel.value) && referenceVideoModelOptions.value.includes(selectedModel.value)) return
     selectedModel.value = referenceVideoModelOptions.value.find(model => /^grok-imagine-video-1\.5$/i.test(model))
       || referenceVideoModelOptions.value[0]
       || ''
@@ -1893,16 +2336,34 @@ function syncVideoModelForGenerationMethod() {
 }
 
 function preferredModel() {
-  if (studioMode.value === 'video') return 'grok-imagine-video'
+  if (studioMode.value === 'video') {
+    if (videoCapability.value === 'minimax') return MINIMAX_H3_STUDIO_MODELS[0]
+    return videoCapability.value === 'seedance' ? SEEDANCE_FALLBACK_MODELS[0] : 'grok-imagine-video'
+  }
   if (imageCapability.value === 'grok') return 'grok-imagine-image'
   if (imageCapability.value === 'image2') return 'gpt-image-2'
   return 'gemini-3-pro-image-preview'
 }
 
+const seedanceCatalogOrder = Object.keys(SEEDANCE_VIDEO_TIERS)
+
 function filterModels(models: string[]) {
   const clean = Array.from(new Set(models.map(model => model.trim()).filter(Boolean)))
   if (studioMode.value === 'video') {
-    return clean.filter(model => /video/i.test(model))
+    // Relay groups price models one by one (Seedance and Zhongheng H3); list
+    // only the ones this group sells.
+    const prices = selectedGroup.value?.video_model_prices
+    const relayPriced = (model: string) => !prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || model.toLowerCase() in prices[SEEDANCE_VIDEO_PRICE_FAMILY]
+    if (videoCapability.value === 'minimax') {
+      return clean.filter(model => isMiniMaxH3StudioModel(model) && (!miniMaxH3Tier(model)?.zhongheng || model.toLowerCase() in (prices?.['minimax-h3'] || {})))
+    }
+    // List Seedance in catalog order, so lines of the same model stay together.
+    if (videoCapability.value === 'seedance') {
+      return clean
+        .filter(model => isSeedanceVideoModel(model) && relayPriced(model))
+        .sort((a, b) => seedanceCatalogOrder.indexOf(a.toLowerCase()) - seedanceCatalogOrder.indexOf(b.toLowerCase()))
+    }
+    return clean.filter(model => /video/i.test(model) && !isMiniMaxH3Model(model))
   }
   if (imageCapability.value === 'grok') return clean.filter(model => /grok.*imag.*image|grok-imagine$/i.test(model))
   if (imageCapability.value === 'image2') {
@@ -2000,6 +2461,7 @@ function saveVideoThumbnail(work: CreatorHistoryItem, thumbnail: string) {
 function applyHistoryUpdate(work: CreatorHistoryItem) {
   const current = historyItems.value.find(item => item.id === work.id)
   if (current && current.updatedAt > work.updatedAt) return
+  reuseLoadedVideoBlobs(work, current)
   historyItems.value = current
     ? historyItems.value.map(item => item.id === work.id ? work : item)
     : [work, ...historyItems.value]
@@ -2034,7 +2496,9 @@ async function syncHistory() {
   }
   historyItems.value = works.map(work => {
     const previous = current.get(work.id)
-    return previous && previous.updatedAt > work.updatedAt ? previous : work
+    if (previous && previous.updatedAt > work.updatedAt) return previous
+    reuseLoadedVideoBlobs(work, previous)
+    return work
   })
   if (selectedWork.value) {
     const latest = historyItems.value.find(work => work.id === selectedWork.value?.id)
@@ -2100,10 +2564,115 @@ async function switchMode(mode: StudioMode) {
 
 function useTemplate(template: PromptTemplate) {
   editorPrompt.value = template.prompt
+  appStore.showSuccess(`已填入「${template.title}」，请确认生成参数`)
+  revealSettingsOnMobile()
 }
 
+// On mobile the settings sit below the canvas; take the user straight to them.
+function revealSettingsOnMobile() {
+  if (!window.matchMedia?.('(max-width: 800px)').matches) return
+  void nextTick(() => {
+    const panel = settingsPanelElement.value
+    if (!panel) return
+    // Land the panel's top border exactly under the pinned toolbar, measured
+    // rather than a fixed scroll margin, since the toolbar height varies by device.
+    panel.style.scrollMarginTop = `${settingsRevealOffset()}px`
+    panel.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+    settleSettingsReveal(panel)
+  })
+}
+
+function settingsRevealOffset() {
+  const toolbar = toolbarElement.value
+  if (!toolbar) return 0
+  const top = Number.parseFloat(getComputedStyle(toolbar).top) || 0
+  return top + toolbar.getBoundingClientRect().height
+}
+
+// The canvas above the settings keeps resizing while the smooth scroll runs
+// (the result view swaps back to the brief and its height transitions), so
+// the scroll ends a few pixels off. Once it settles, close the remaining gap.
+let settingsRevealFrame = 0
+let stopSettingsReveal = () => {}
+function settleSettingsReveal(panel: HTMLElement) {
+  stopSettingsReveal()
+  // A touch or wheel means the user took over scrolling; never pull them back.
+  const stop = () => {
+    if (settingsRevealFrame) cancelAnimationFrame(settingsRevealFrame)
+    settingsRevealFrame = 0
+    window.removeEventListener('touchstart', stop)
+    window.removeEventListener('wheel', stop)
+  }
+  stopSettingsReveal = stop
+  window.addEventListener('touchstart', stop, { passive: true })
+  window.addEventListener('wheel', stop, { passive: true })
+  let lastTop = panel.getBoundingClientRect().top
+  let stillFrames = 0
+  let corrections = 0
+  const deadline = performance.now() + 2000
+  const step = () => {
+    settingsRevealFrame = 0
+    if (disposed || performance.now() > deadline) return stop()
+    // Watch the panel itself, so both scrolling and layout changes above it count as motion.
+    const top = panel.getBoundingClientRect().top
+    stillFrames = Math.abs(top - lastTop) < 0.5 ? stillFrames + 1 : 0
+    lastTop = top
+    if (stillFrames >= 6) {
+      const delta = top - settingsRevealOffset()
+      if (Math.abs(delta) < 1 || corrections >= 3) return stop()
+      corrections++
+      stillFrames = 0
+      window.scrollTo?.({ top: window.scrollY + delta, behavior: 'smooth' })
+    }
+    settingsRevealFrame = requestAnimationFrame(step)
+  }
+  settingsRevealFrame = requestAnimationFrame(step)
+}
+
+// Skip the prompt already in the editor so a repeat click always changes the text.
+function useRandomCategoryPrompt(category: PromptCategory) {
+  const candidates = category.prompts.filter(prompt => prompt !== editorPrompt.value)
+  const prompt = candidates[Math.floor(Math.random() * candidates.length)] ?? category.prompts[0]
+  useTemplate({ title: category.name, tag: category.name, subtitle: category.hint, prompt })
+}
+
+// Fade the brief only while text is hidden below; a permanent fade would need
+// padding that leaves an uneven gap above the button once the text fits.
+function updateBriefPromptClip() {
+  const element = briefPromptElement.value
+  briefPromptClipped.value = !!element && element.scrollTop + element.clientHeight < element.scrollHeight - 1
+}
+
+useResizeObserver(briefPromptElement, updateBriefPromptClip)
+
+// Phones size the stage to the current brief so short briefs leave no gap; keeping the last
+// height while the out-in transition swaps bodies lets the stage animate instead of collapsing.
+useResizeObserver(briefBodyElement, () => {
+  const height = briefBodyElement.value?.offsetHeight
+  if (height) briefBodyHeight.value = height
+})
+
 function adjustVideoDuration(delta: -1 | 1) {
-  configuredVideoDuration.value += delta
+  const tier = selectedVideoRelayTier.value
+  const next = configuredVideoDuration.value + delta
+  configuredVideoDuration.value = tier ? snapSeedanceSeconds(tier, next, delta) : next
+}
+
+function commitVideoDurationInput(event: Event) {
+  const input = event.target as HTMLInputElement
+  const typed = Math.round(Number(input.value))
+  if (input.value.trim() && Number.isFinite(typed)) {
+    const tier = selectedVideoRelayTier.value
+    configuredVideoDuration.value = tier ? snapSeedanceSeconds(tier, typed) : typed
+  }
+  // The bound value may be unchanged after clamping, so reset the field explicitly.
+  input.value = String(configuredVideoDuration.value)
+  fitVideoDurationInput(event)
+}
+
+function fitVideoDurationInput(event: Event) {
+  const input = event.target as HTMLInputElement
+  input.style.width = `${Math.max(1, input.value.length)}ch`
 }
 
 function previousTemplate() {
@@ -2386,7 +2955,18 @@ function captureSettingsScroll() {
   return () => { void nextTick(() => { panel.scrollTop = top }) }
 }
 
-async function generateFromCurrentSettings(source: string) {
+// On mobile the canvas is stacked above the settings, so the generate button
+// sits below the progress view; bring the new task into view. Regenerating
+// from a result returns the whole page to the top instead.
+function revealCanvasOnMobile(pageTop = false) {
+  if (!window.matchMedia?.('(max-width: 800px)').matches) return
+  void nextTick(() => {
+    if (pageTop) window.scrollTo?.({ top: 0, behavior: 'smooth' })
+    else canvasPanelElement.value?.scrollIntoView?.({ block: 'start', behavior: 'smooth' })
+  })
+}
+
+async function generateFromCurrentSettings(source: string, revealPageTop = false) {
   if (!canGenerate.value || !selectedApiKey.value || !selectedGroup.value) return
   const taskMode = studioMode.value
   const taskGroup = selectedGroup.value
@@ -2457,7 +3037,9 @@ async function generateFromCurrentSettings(source: string) {
     status: 'pending',
     prompt: taskPrompt,
     model: taskModel,
-    provider: taskMode === 'image' ? imageCapabilities.find(item => item.id === imageCapability.value)?.label || imageCapability.value : 'Grok 视频',
+    provider: taskMode === 'image'
+      ? imageCapabilities.find(item => item.id === imageCapability.value)?.label || imageCapability.value
+      : `${videoProviderLabel(taskModel)} 视频`,
     groupName: taskGroup.name,
     groupId: taskGroup.id,
     apiKeyId: selectedApiKey.value.id,
@@ -2507,6 +3089,7 @@ async function generateFromCurrentSettings(source: string) {
   selectedWork.value = work
   historyFilter.value = taskMode
   restoreSettingsScroll()
+  revealCanvasOnMobile(revealPageTop)
   try {
     await persistWork(work)
     if (taskMode === 'image' && imageSnapshot) await generateImageWork(work, imageSnapshot, task)
@@ -2519,11 +3102,12 @@ async function generateFromCurrentSettings(source: string) {
     task.progress = '作品已完成'
     await persistWork(work)
     if (historyItems.value.some(item => item.id === work.id)) applyHistoryUpdate(cloneWork(work))
-    appStore.showSuccess('作品生成完成')
+    if (missingOutputCount(work)) appStore.showWarning(work.error || `已生成 ${work.outputs.length} ${work.type === 'image' ? '张，部分图片' : '段，部分镜头'}生成失败`)
+    else appStore.showSuccess('作品生成完成')
   } catch (error) {
     work.status = 'failed'
     work.updatedAt = Date.now()
-    work.error = creatorGenerationErrorMessage(error, taskMode)
+    work.error = creatorGenerationErrorMessage(error, taskMode, imageSnapshot?.capability, videoSnapshot?.model)
     applyHistoryUpdate(cloneWork(work))
     await persistWork(work)
     appStore.showError(work.error)
@@ -2605,9 +3189,12 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   task.phase = 'generating'
   task.hasExactProgress = false
   const requestCount = Math.max(1, input.outputCount || 1)
-  const requestAttempts = input.capability === 'image2' ? requestCount : 1
-  const requestN = input.capability === 'image2' ? 1 : input.outputCount
   const isGeminiProtocol = input.platform === 'gemini' || input.platform === 'antigravity'
+  // Gemini generateContent returns one image per call and some upstreams
+  // ignore n, so keep requesting until the batch is full (one call per image
+  // at most). Image2 always asks for a single image per request.
+  const requestAttempts = requestCount
+  const requestsSingleImage = input.capability === 'image2' || isGeminiProtocol
   const usesOpenAIImageSize = input.capability === 'image2'
   const usesGptImageModel = /^gpt-image-/i.test(input.model.trim())
   // GPT Image models return b64_json by default and reject response_format.
@@ -2618,7 +3205,7 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   const generate = () => generateCreatorImage(input.apiKey, {
     model: input.model,
     prompt: input.prompt,
-    n: requestN,
+    n: requestsSingleImage ? 1 : requestCount - outputs.length,
     size: input.size,
     quality: input.quality,
     outputFormat: input.outputFormat,
@@ -2633,13 +3220,9 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
       imageSize: input.resolution,
     } : {}),
   })
-  for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
-    task.progress = requestCount > 1
-      ? `正在生成第 ${index + 1} / ${requestCount} 张图片`
-      : '正在调用图片模型，请稍候'
-    let result
+  const generateWithRetry = async (index: number) => {
     try {
-      result = await generate()
+      return await generate()
     } catch (error) {
       if (input.capability !== 'grok' || !isRetryableGrokTransientError(error)) throw error
       task.progress = 'Grok 上游暂时不可用，2 秒后自动重试（1/1）'
@@ -2647,7 +3230,26 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
       task.progress = requestCount > 1
         ? `正在重试第 ${index + 1} / ${requestCount} 张图片`
         : '正在重新调用 Grok 图片模型'
-      result = await generate()
+      return await generate()
+    }
+  }
+  // One failed image must not discard the images that already succeeded.
+  let lastError: unknown
+  task.failedCount = 0
+  for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
+    const failedNote = task.failedCount ? `（${task.failedCount} 张失败）` : ''
+    task.progress = requestCount > 1
+      ? `正在生成第 ${index + 1} / ${requestCount} 张图片${failedNote}`
+      : '正在调用图片模型，请稍候'
+    let result
+    try {
+      result = await generateWithRetry(index)
+    } catch (error) {
+      lastError = error
+      task.failedCount = requestsSingleImage ? task.failedCount + 1 : requestCount - outputs.length
+      // A batch request already asked for every remaining image.
+      if (!requestsSingleImage) break
+      continue
     }
     task.progress = '图片已生成，正在保存原图到当前浏览器'
     const batchOutputs: string[] = []
@@ -2677,7 +3279,11 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     await persistWork(work)
   }
   work.outputs = outputs
-  if (!work.outputs.length) throw new Error('模型没有返回可用图片')
+  if (!work.outputs.length) throw lastError ?? new Error('模型没有返回可用图片')
+  if (lastError && outputs.length < requestCount) {
+    const reason = creatorGenerationErrorMessage(lastError, 'image', input.capability)
+    work.error = `已生成 ${outputs.length} / ${requestCount} 张，其余 ${requestCount - outputs.length} 张生成失败：${reason}`
+  }
 }
 
 function isSingleOutputImageModel(model: string, _resolution: string, capability: ImageCapability) {
@@ -2823,14 +3429,38 @@ function imageDataUrlDimensions(output: string) {
   }
 }
 
-function creatorGenerationErrorMessage(error: unknown, mode: StudioMode = studioMode.value) {
+const IMAGE_CAPABILITY_PROVIDER_NAMES: Record<ImageCapability, string> = {
+  image2: 'GPT Image',
+  grok: 'Grok',
+  banner: 'Gemini（Banana）',
+}
+
+function creatorGenerationErrorMessage(
+  error: unknown,
+  mode: StudioMode = studioMode.value,
+  capability: ImageCapability = imageCapability.value,
+  videoModel = '',
+) {
   const message = errorMessage(error, '生成失败')
-  if (isRetryableGrokTransientError(error)) {
-    return mode === 'video'
-      ? `Grok 视频上游暂时不可用，系统已自动重试 ${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length} 次。请稍后带回参数重试；如果频繁出现，请为当前分组增加可用 Grok 账号。`
-      : 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
+  if (mode === 'video' || capability === 'grok') {
+    if (isRetryableGrokTransientError(error)) {
+      const videoProvider = videoProviderLabel(videoModel)
+      return mode === 'video'
+        ? `${videoProvider} 视频上游暂时不可用，系统已自动重试 ${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length} 次。请稍后带回参数重试；如果频繁出现，请为当前分组增加可用 ${videoProvider} 账号。`
+        : 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
+    }
+    if (mode === 'video') return message
+  } else {
+    // Only Grok image requests are auto-retried; other providers must name
+    // their own upstream instead of reusing the Grok-specific hint.
+    const provider = IMAGE_CAPABILITY_PROVIDER_NAMES[capability]
+    if (isNoAvailableAccountError(error)) {
+      return `当前创作分组暂无可用的 ${provider} 账号，请切换创作分组或稍后重试；如果频繁出现，请为该分组增加可用 ${provider} 账号。`
+    }
+    if (isRetryableGrokTransientError(error)) {
+      return `${provider} 上游服务暂时不可用，请稍后点击“带回参数重试”；如果频繁出现，请检查该分组的 ${provider} 账号状态。`
+    }
   }
-  if (mode === 'video') return message
   if (/fixed\s+4K\s+SKU.*size\s+requests/i.test(message)) {
     return '当前创作分组把请求路由到了固定 4K 图片模型，但所选尺寸不是 4K。请重试，或切换创作分组/输出尺寸。'
   }
@@ -2863,81 +3493,129 @@ function isRetryableGrokTransientError(error: unknown) {
   )
 }
 
+// The gateway answers an empty or exhausted account pool with 503
+// "No available accounts" or the generic "Service temporarily unavailable".
+function isNoAvailableAccountError(error: unknown) {
+  const candidate = typeof error === 'object' && error
+    ? error as { status?: number; code?: string | number; message?: string; error?: { message?: string } }
+    : {}
+  const text = candidate.error?.message || candidate.message || ''
+  // "No available compatible accounts" keeps its dedicated hint below.
+  if (/no available accounts/i.test(text)) return true
+  const status = Number(candidate.status || candidate.code)
+  return status === 503 && /^service temporarily unavailable\.?$/i.test(text.trim())
+}
+
 async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot, task: GenerationTask) {
   const key = input.apiKey
   const shots = input.shots
   const outputs: string[] = []
   const outputBlobs: Blob[] = []
+  // Request IDs and their original shot positions stay aligned with outputs;
+  // a failed shot is dropped so the finished shots remain usable.
   const requestIds: string[] = []
+  const shotIndexes: number[] = []
+  const failedShots: number[] = []
+  let lastError: unknown
+  const syncShotState = () => {
+    work.requestId = requestIds.join(',') || undefined
+    work.shotOutputIndexes = [...shotIndexes]
+    work.updatedAt = Date.now()
+  }
   for (let index = 0; index < shots.length; index++) {
     const shot = shots[index]
-    const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
-    const sourceImage = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
-    const imageDataUrl = sourceImage && !shot.followSourceAspect
-      ? await cropSourceImageToRatio(sourceImage, shot.aspectRatio)
-      : sourceImage
-    const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
-    task.phase = 'submitting'
-    task.hasExactProgress = false
-    task.progress = shots.length > 1 ? `正在提交镜头 ${index + 1} / ${shots.length}` : '正在提交视频任务，请稍候'
-    task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
-    const request = {
-      model: input.model,
-      prompt: shot.prompt,
-      duration: shot.duration,
-      resolution: shot.resolution,
-      aspectRatio: shot.aspectRatio,
-      imageDataUrl,
-      referenceImageDataUrls,
-    }
-    let created: Awaited<ReturnType<typeof createCreatorVideo>>
-    for (let attempt = 0; ; attempt++) {
-      try {
-        created = await createCreatorVideo(key, request)
-        break
-      } catch (error) {
-        if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
-        const retryNumber = attempt + 1
-        const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
-        const delaySeconds = retryDelay / 1000
-        task.progress = shots.length > 1
-          ? `镜头 ${index + 1} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
-          : `Grok 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
-        await delay(retryDelay)
-        task.progress = shots.length > 1
-          ? `正在重新提交镜头 ${index + 1} / ${shots.length}`
-          : '正在重新提交视频任务'
+    const failedNote = failedShots.length ? `（${failedShots.length} 个镜头失败）` : ''
+    let created: Awaited<ReturnType<typeof createCreatorVideo>> | undefined
+    try {
+      const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
+      const sourceImage = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
+      const imageDataUrl = sourceImage && !shot.followSourceAspect
+        ? await cropSourceImageToRatio(sourceImage, shot.aspectRatio)
+        : sourceImage
+      const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
+      task.phase = 'submitting'
+      task.hasExactProgress = false
+      task.progress = shots.length > 1 ? `正在提交镜头 ${index + 1} / ${shots.length}${failedNote}` : '正在提交视频任务，请稍候'
+      task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
+      const request = {
+        model: input.model,
+        prompt: shot.prompt,
+        duration: shot.duration,
+        resolution: shot.resolution,
+        aspectRatio: shot.aspectRatio,
+        imageDataUrl,
+        referenceImageDataUrls,
       }
+      for (let attempt = 0; ; attempt++) {
+        try {
+          created = await createCreatorVideo(key, request)
+          break
+        } catch (error) {
+          if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
+          const retryNumber = attempt + 1
+          const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
+          const delaySeconds = retryDelay / 1000
+          task.progress = shots.length > 1
+            ? `镜头 ${index + 1} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+            : `${videoProviderLabel(input.model)} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+          await delay(retryDelay)
+          task.progress = shots.length > 1
+            ? `正在重新提交镜头 ${index + 1} / ${shots.length}`
+            : '正在重新提交视频任务'
+        }
+      }
+      if (!created.id) throw new Error('视频接口没有返回任务 ID')
+      // Receiving an ID only means the task entered the provider queue. Keep the
+      // percentage hidden until polling confirms that rendering has started.
+      task.phase = 'generating'
+      task.hasExactProgress = false
+      task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
+      task.progress = shots.length > 1
+        ? `镜头 ${index + 1} 已提交，正在等待生成`
+        : '任务已提交，正在等待生成'
+      requestIds.push(created.id)
+      shotIndexes.push(index)
+      syncShotState()
+      await persistWork(work)
+      // Relay videos can take up to 30 minutes; keep polling longer than for Grok.
+      const relayVideo = isMiniMaxH3Model(input.model) || isSeedanceVideoModel(input.model)
+      const videoBlob = await waitForVideo(key, created.id, index, shots.length, task, relayVideo ? 450 : 150)
+      outputBlobs.push(videoBlob)
+      outputs.push(createTrackedObjectUrl(videoBlob))
+      work.outputs = [...outputs]
+      work.videoBlobs = [...outputBlobs]
+      work.updatedAt = Date.now()
+      await persistWork(work)
+    } catch (error) {
+      // A single-shot video, or a closed page, still fails as a whole.
+      if (shots.length === 1 || disposed) throw error
+      lastError = error
+      failedShots.push(index)
+      if (created?.id && requestIds[requestIds.length - 1] === created.id) {
+        requestIds.pop()
+        shotIndexes.pop()
+      }
+      syncShotState()
+      await persistWork(work)
+      task.progress = index < shots.length - 1
+        ? `镜头 ${index + 1} 生成失败，继续生成下一个镜头`
+        : `镜头 ${index + 1} 生成失败`
     }
-    if (!created.id) throw new Error('视频接口没有返回任务 ID')
-    // Receiving an ID only means the task entered the provider queue. Keep the
-    // percentage hidden until polling confirms that rendering has started.
-    task.phase = 'generating'
-    task.hasExactProgress = false
-    task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
-    task.progress = shots.length > 1
-      ? `镜头 ${index + 1} 已提交，正在等待生成`
-      : '任务已提交，正在等待生成'
-    requestIds.push(created.id)
-    work.requestId = requestIds.join(',')
-    work.updatedAt = Date.now()
-    await persistWork(work)
-    const videoBlob = await waitForVideo(key, created.id, index, shots.length, task)
-    outputBlobs.push(videoBlob)
-    outputs.push(createTrackedObjectUrl(videoBlob))
-    work.outputs = [...outputs]
-    work.videoBlobs = [...outputBlobs]
-    work.updatedAt = Date.now()
-    await persistWork(work)
   }
   work.outputs = outputs
+  if (!outputs.length) throw lastError ?? new Error('视频生成失败')
+  if (failedShots.length) {
+    const reason = creatorGenerationErrorMessage(lastError, 'video', undefined, input.model)
+    const failedLabels = failedShots.map(index => index + 1).join('、')
+    work.error = `已生成 ${outputs.length} / ${shots.length} 段，其余 ${failedShots.length} 段生成失败（镜头 ${failedLabels}）：${reason}`
+  }
   if (outputBlobs.length > 1) {
-    task.progress = '所有镜头已完成，正在合成完整视频'
+    task.progress = failedShots.length ? '已完成的镜头正在合成完整视频' : '所有镜头已完成，正在合成完整视频'
     await composeWorkVideo(work, outputBlobs, false)
   }
 }
 
-async function waitForVideo(apiKey: string, requestId: string, shotIndex: number, shotCount: number, task: GenerationTask) {
+async function waitForVideo(apiKey: string, requestId: string, shotIndex: number, shotCount: number, task: GenerationTask, maxAttempts = 150) {
   let monotonicProgress = task.percent
 
   const updateProgress = (candidate: number) => {
@@ -2945,10 +3623,23 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
     task.percent = monotonicProgress
   }
 
-  for (let attempt = 0; attempt < 150; attempt++) {
+  let consecutiveStatusFailures = 0
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (disposed) throw new Error('页面已关闭，任务可稍后从历史记录继续查看')
     if (attempt > 0) await delay(4000)
-    const status = await getCreatorVideoStatus(apiKey, requestId)
+    let status: Awaited<ReturnType<typeof getCreatorVideoStatus>>
+    try {
+      status = await getCreatorVideoStatus(apiKey, requestId)
+      consecutiveStatusFailures = 0
+    } catch (error) {
+      if (!isRetryableGrokTransientError(error)) throw error
+      consecutiveStatusFailures++
+      if (consecutiveStatusFailures >= VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES) {
+        throw new Error('视频任务已提交，但状态查询连续失败。任务可能仍在生成，请稍后在历史记录中重新打开该作品查看结果，不要重复提交。')
+      }
+      task.progress = `任务状态查询暂时失败，正在自动重试（${consecutiveStatusFailures}/${VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES - 1}）`
+      continue
+    }
     const normalized = String(status.status || '').toLowerCase()
     const rawProgress: unknown = status.progress
     const hasReportedProgress = rawProgress !== undefined
@@ -3035,6 +3726,7 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
     shotReferenceCounts: work.shotReferenceCounts ? [...work.shotReferenceCounts] : undefined,
     shotFollowSourceAspects: work.shotFollowSourceAspects ? [...work.shotFollowSourceAspects] : undefined,
     shotActualOutputSizes: work.shotActualOutputSizes ? [...work.shotActualOutputSizes] : undefined,
+    shotOutputIndexes: work.shotOutputIndexes ? [...work.shotOutputIndexes] : undefined,
   }
 }
 
@@ -3059,6 +3751,22 @@ async function captureVideoBlobsForPersistence(work: CreatorHistoryItem) {
       // The merged video can be recreated from its persisted segments.
     }
   }
+}
+
+// IndexedDB returns new Blob instances on every read. Keep the ones already in
+// memory when the bytes are unchanged so the blob: URL (and the <video>) stays.
+function sameVideoBlob(left?: Blob, right?: Blob) {
+  return Boolean(left && right && left.size === right.size && left.type === right.type)
+}
+
+function reuseLoadedVideoBlobs(work: CreatorHistoryItem, previous?: CreatorHistoryItem) {
+  if (work.type !== 'video' || !previous || previous === work || previous.requestId !== work.requestId) return
+  const previousBlobs = previous.videoBlobs
+  if (previousBlobs && work.videoBlobs?.length === previousBlobs.length
+    && work.videoBlobs.every((blob, index) => sameVideoBlob(blob, previousBlobs[index]))) {
+    work.videoBlobs = [...previousBlobs]
+  }
+  if (sameVideoBlob(work.mergedVideoBlob, previous.mergedVideoBlob)) work.mergedVideoBlob = previous.mergedVideoBlob
 }
 
 function restorePersistedVideoOutputs(work: CreatorHistoryItem) {
@@ -3102,14 +3810,60 @@ function findKeyForWork(work: CreatorHistoryItem) {
 }
 
 function createTrackedObjectUrl(blob: Blob) {
+  // History notifications strip blob: outputs. Reuse the URL for the same
+  // bytes, otherwise every save remounts the <video> and restarts loading.
+  const existing = blobObjectUrls.get(blob)
+  if (existing) return existing
   const objectUrl = URL.createObjectURL(blob)
   transientObjectUrls.add(objectUrl)
+  blobObjectUrls.set(blob, objectUrl)
   return objectUrl
 }
 
-async function selectGeneration(id: string) {
-  const work = historyItems.value.find(item => item.id === id)
-  if (work) await selectWork(work)
+// Opening a work from the drawer closes it and returns the page to the top.
+function openHistoryWork(work: CreatorHistoryItem) {
+  const fromDrawer = compactHistory.value && historyDrawerOpen.value
+  historyDrawerOpen.value = false
+  void selectWork(work)
+  // Wait for the drawer watcher to release the body scroll lock.
+  if (fromDrawer) void nextTick(() => { window.scrollTo?.({ top: 0, behavior: 'smooth' }) })
+}
+
+watch(historyDrawerOpen, open => {
+  bodyScrollLocked.value = open
+  historyDragOffset.value = 0
+  if (open) void nextTick(() => focusHistoryClose())
+  else if (document.activeElement === document.body || document.getElementById('creator-history-panel')?.contains(document.activeElement)) {
+    historyToggleElement.value?.focus({ preventScroll: true })
+  }
+})
+watch(compactHistory, compact => { if (!compact) historyDrawerOpen.value = false })
+
+// Chromium rejects focus() for about a frame after the panel stops being inert; retry until it sticks.
+function focusHistoryClose(attempts = 4) {
+  const close = historyCloseElement.value
+  if (!historyDrawerOpen.value || !close) return
+  close.focus()
+  if (document.activeElement !== close && attempts > 1) requestAnimationFrame(() => focusHistoryClose(attempts - 1))
+}
+
+// Swipe the phone sheet down to close it; drags inside the list keep scrolling the list.
+let historyDragStartY: number | null = null
+function startHistoryDrag(event: TouchEvent) {
+  const target = event.target as Element | null
+  historyDragStartY = phoneHistory.value && historyDrawerOpen.value && !target?.closest('.history-list')
+    ? event.touches[0].clientY
+    : null
+}
+function moveHistoryDrag(event: TouchEvent) {
+  if (historyDragStartY === null) return
+  historyDragOffset.value = Math.max(0, event.touches[0].clientY - historyDragStartY)
+}
+function endHistoryDrag() {
+  if (historyDragStartY === null) return
+  historyDragStartY = null
+  if (historyDragOffset.value > 80) historyDrawerOpen.value = false
+  historyDragOffset.value = 0
 }
 
 async function selectWork(work: CreatorHistoryItem) {
@@ -3117,7 +3871,7 @@ async function selectWork(work: CreatorHistoryItem) {
   restorePersistedVideoOutputs(work)
   selectedWork.value = work
   if (videoHistoryFeedback.value?.workId !== work.id) videoHistoryFeedback.value = null
-  const needsMergedVideo = isMultiShotVideo(work) && !work.mergedOutput
+  const needsMergedVideo = hasCompleteVideo(work) && !work.mergedOutput
   const shouldRefreshVideo = !activeGenerations.has(work.id) && work.type === 'video'
     && Boolean(work.requestId)
     && (work.status === 'pending' || !work.outputs.length || needsMergedVideo)
@@ -3157,17 +3911,25 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
   try {
     const outputs: string[] = []
     const outputBlobs: Blob[] = []
+    const keptRequestIds: string[] = []
+    const keptShotIndexes: number[] = []
     let pending = false
-    for (const requestId of work.requestId.split(',').map(id => id.trim()).filter(Boolean)) {
+    let failedError = ''
+    const requestIds = work.requestId.split(',').map(id => id.trim()).filter(Boolean)
+    // Only works that track per-shot outputs may keep finished shots when a
+    // later shot fails; older records still fail as a whole.
+    const tracksShots = Boolean(work.shotOutputIndexes) && requestIds.length === work.shotOutputIndexes?.length
+    for (const [requestIndex, requestId] of requestIds.entries()) {
       const status = await getCreatorVideoStatus(key.key, requestId)
       const normalized = String(status.status || '').toLowerCase()
       if (['failed', 'error', 'cancelled', 'canceled', 'expired'].includes(normalized)) {
-        work.status = 'failed'
-        work.error = normalized === 'expired'
+        failedError = normalized === 'expired'
           ? '该视频任务已过期，无法继续查询。请带回原参数重新生成。'
           : videoHistoryErrorMessage(status.error, '视频生成失败，请带回原参数重试。')
         continue
       }
+      keptRequestIds.push(requestId)
+      if (tracksShots) keptShotIndexes.push(work.shotOutputIndexes![requestIndex])
       if (['completed', 'succeeded', 'success', 'done'].includes(normalized) || status.url) {
         const blob = await getCreatorVideoContent(key.key, requestId)
         outputBlobs.push(blob)
@@ -3175,6 +3937,15 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
       } else {
         pending = true
       }
+    }
+    if (failedError && (!tracksShots || !keptRequestIds.length)) {
+      work.status = 'failed'
+      work.error = failedError
+    } else if (failedError) {
+      work.requestId = keptRequestIds.join(',')
+      work.shotOutputIndexes = keptShotIndexes
+      const total = resultOutputCount(work)
+      work.error = `已生成 ${keptRequestIds.length} / ${total} 段，其余 ${total - keptRequestIds.length} 段生成失败：${failedError}`
     }
     if (outputs.length) {
       work.outputs = outputs
@@ -3352,6 +4123,9 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     }
     clearReferenceImages()
 
+    if (work.type === 'video') {
+      videoCapability.value = isMiniMaxH3Model(work.model) ? 'minimax' : isSeedanceVideoModel(work.model) ? 'seedance' : 'grok'
+    }
     if (work.type === 'image') {
       imageCapability.value = work.imageCapability || inferImageCapability(work)
       imageResolution.value = work.resolution || '1K'
@@ -3407,16 +4181,18 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     await loadModels()
     if (sequence !== restoreSettingsSequence) return
     restoreSettingsScroll = captureSettingsScroll()
-    const restoringReferenceVideo = work.type === 'video' && requiresReferenceVideo15.value
+    // Reference videos keep their model when it still takes references;
+    // otherwise pick a reference-capable model of the current group.
+    const restoringReferenceVideo = work.type === 'video' && requiresReferenceVideo15.value && !supportsReferenceVideo(work.model)
     if (work.model && !restoringReferenceVideo) {
       if (!modelOptions.value.includes(work.model)) modelOptions.value = [work.model, ...modelOptions.value]
       selectedModel.value = work.model
     }
     if (restoringReferenceVideo) syncVideoModelForGenerationMethod()
     if (work.type === 'video') {
-      videoResolution.value = historicalVideoResolution === '1080p' && !videoSupports1080p.value
-        ? '720p'
-        : historicalVideoResolution
+      videoResolution.value = videoResolutionOptions.value.includes(historicalVideoResolution)
+        ? historicalVideoResolution
+        : videoResolutionOptions.value.includes('720p') ? '720p' : videoResolutionOptions.value[0]
     }
   } finally {
     if (sequence === restoreSettingsSequence) {
@@ -3470,6 +4246,7 @@ async function reuseWork(work: CreatorHistoryItem) {
   if (work.type === 'video' && shotPrompts.length > 1) selectedShotId.value = videoShots.value[0].id
   selectedWork.value = null
   await nextTick()
+  revealSettingsOnMobile()
 }
 
 async function regenerateWork(work: CreatorHistoryItem) {
@@ -3485,7 +4262,7 @@ async function regenerateWork(work: CreatorHistoryItem) {
       appStore.showError('无法按原参数重新生成，请检查原分组、模型和提示词是否仍然可用')
       return
     }
-    void generateFromCurrentSettings('重新生成')
+    void generateFromCurrentSettings('重新生成', true)
   } finally {
     regeneratingWorkId.value = ''
   }
@@ -3518,6 +4295,7 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     selectedWork.value = null
     restoreSettingsScroll()
     await nextTick()
+    revealSettingsOnMobile()
     appStore.showSuccess('已将作品加入参考图，并带回当时的生成参数')
   } catch (error) {
     appStore.showError(errorMessage(error, '无法将作品加入参考图'))
@@ -3597,9 +4375,52 @@ function resultOutputCount(work: CreatorHistoryItem) {
   return Math.max(1, work.outputCount || work.shotCount || work.outputs.length || 1)
 }
 
-function shouldShowResultParameters(work: CreatorHistoryItem) {
-  if (work.status === 'pending') return false
-  return work.outputs.length > 0 || (work.type === 'video' && Boolean(work.requestId))
+// Images that finished before a later request failed stay usable.
+function hasPartialImages(work: CreatorHistoryItem) {
+  return work.type === 'image' && work.status === 'failed' && work.outputs.some(Boolean)
+}
+
+// A pending record can already hold saved images (generated in another
+// window, or interrupted after saving); treat those images as a result.
+function hasResultImages(work: CreatorHistoryItem) {
+  return work.type === 'image' && work.outputs.some(Boolean)
+}
+
+function hasResultActions(work: CreatorHistoryItem) {
+  return work.status === 'completed' || hasPartialImages(work) || (work.status === 'pending' && hasResultImages(work))
+}
+
+function missingOutputCount(work: CreatorHistoryItem) {
+  if (work.status === 'pending' || !work.outputs.length) return 0
+  // Older videos predate per-shot tracking and always held every shot.
+  if (work.type === 'video' && !work.shotOutputIndexes) return 0
+  return Math.max(0, resultOutputCount(work) - work.outputs.length)
+}
+
+// Output index -> original shot index; failed shots leave gaps in outputs.
+function shotIndexForOutput(work: CreatorHistoryItem, index: number) {
+  return work.shotOutputIndexes?.[index] ?? index
+}
+
+function failedShotLabel(work: CreatorHistoryItem) {
+  const produced = new Set(work.shotOutputIndexes || [])
+  const failed = Array.from({ length: resultOutputCount(work) }, (_, index) => index).filter(index => !produced.has(index))
+  return failed.length ? `镜头 ${failed.map(index => index + 1).join('、')} ` : ''
+}
+
+// A complete video needs at least two finished shots to stitch together.
+function hasCompleteVideo(work: CreatorHistoryItem) {
+  return isMultiShotVideo(work) && work.outputs.length > 1
+}
+
+function completedVideoDuration(work: CreatorHistoryItem) {
+  if (!work.shotOutputIndexes || !work.shotDurations) return work.requestedDuration || 0
+  return work.outputs.reduce((sum, _output, index) => sum + (work.shotDurations?.[shotIndexForOutput(work, index)] || 0), 0)
+}
+
+function partialImageReason(work: CreatorHistoryItem) {
+  const reason = (work.error || '').replace(/^已生成 \d+ \/ \d+ [张段]，其余 \d+ [张段]生成失败(?:（[^）]*）)?：/, '')
+  return reason ? `失败原因：${reason}` : ''
 }
 
 function historyWorkTitle(work: CreatorHistoryItem) {
@@ -3608,7 +4429,7 @@ function historyWorkTitle(work: CreatorHistoryItem) {
 }
 
 function resultDescription(work: CreatorHistoryItem, index: number) {
-  return work.type === 'video' ? workShotPrompts(work)[index] || work.prompt : work.prompt
+  return work.type === 'video' ? workShotPrompts(work)[shotIndexForOutput(work, index)] || work.prompt : work.prompt
 }
 
 function completeVideoDescription(work: CreatorHistoryItem) {
@@ -3622,23 +4443,30 @@ function fullPromptText(work: CreatorHistoryItem) {
   return workShotPrompts(work).map((shotPrompt, index) => `镜头 ${index + 1}：${shotPrompt}`).join('\n')
 }
 
+// Roughly three lines on a laptop-width grid; shorter prompts render in full without a toggle.
+function isPromptLong(work: CreatorHistoryItem) {
+  const text = fullPromptText(work) || ''
+  return text.length > 150 || text.split('\n').length > 3
+}
+
 function shotDurationLabel(work: CreatorHistoryItem, index: number) {
-  const duration = work.shotDurations?.[index]
+  const duration = work.shotDurations?.[shotIndexForOutput(work, index)]
   return duration ? `${duration} 秒` : '分段视频'
 }
 
 function workAspectRatio(work: CreatorHistoryItem, index?: number) {
-  const shotIndex = index ?? 0
+  const shotIndex = index === undefined ? 0 : shotIndexForOutput(work, index)
   const method = work.shotGenerationMethods?.[shotIndex] || work.videoGenerationMethod
   if (work.type === 'video' && method === 'image' && work.shotFollowSourceAspects?.[shotIndex] === true) return '跟随原图'
   return index === undefined
     ? work.aspectRatio || '自动画幅'
-    : work.shotAspectRatios?.[index] || work.aspectRatio || '自动画幅'
+    : work.shotAspectRatios?.[shotIndex] || work.aspectRatio || '自动画幅'
 }
 
 function shotGenerationMeta(work: CreatorHistoryItem, index: number) {
-  const method = work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text'
-  const referenceCount = work.shotReferenceCounts?.[index] || 0
+  const shotIndex = shotIndexForOutput(work, index)
+  const method = work.shotGenerationMethods?.[shotIndex] || work.videoGenerationMethod || 'text'
+  const referenceCount = work.shotReferenceCounts?.[shotIndex] || 0
   return referenceCount
     ? `${videoGenerationMethodLabelFor(method)} · ${referenceCount} 张参考图`
     : videoGenerationMethodLabelFor(method)
@@ -3648,12 +4476,16 @@ function mergedDownloadName(work: CreatorHistoryItem) {
   return `creator-complete-${work.id}.mp4`
 }
 
+function metaParts(...values: Array<string | undefined>) {
+  return values.flatMap((value) => (value || '').split(' · ')).map((part) => part.trim()).filter(Boolean)
+}
+
 function resultMeta(work: CreatorHistoryItem) {
-  return `${work.provider} · ${work.model} · ${work.aspectRatio || '自动画幅'} · ${workResolutionLabel(work)}`
+  return `${work.provider} · ${modelLabel(work.model)} · ${work.aspectRatio || '自动画幅'} · ${workResolutionLabel(work)}`
 }
 
 function workResolutionLabel(work: CreatorHistoryItem, index?: number) {
-  const resolution = index === undefined ? work.resolution : work.shotResolutions?.[index] || work.resolution
+  const resolution = index === undefined ? work.resolution : work.shotResolutions?.[shotIndexForOutput(work, index)] || work.resolution
   if (!resolution) return '默认清晰度'
   const actualOutputSize = index === undefined || !isMultiShotVideo(work)
     ? work.actualOutputSize
@@ -3736,11 +4568,31 @@ function formatResultTime(timestamp: number) {
   }).format(timestamp)
 }
 
-function detailedResultMeta(work: CreatorHistoryItem) {
-  const parts = [work.provider, work.model, work.aspectRatio || '自动画幅', workResolutionLabel(work)]
-  if (work.type === 'video') parts.push(`${work.shotCount || 1} 个镜头`, `${work.requestedDuration || 0} 秒`)
-  parts.push(`${work.referenceCount || 0} 张参考图`)
-  return parts.join(' · ')
+function resultParameterFields(work: CreatorHistoryItem) {
+  const [tier, size] = workResolutionLabel(work).split(' · ')
+  const fields: Array<{ label: string; value: string; wide?: boolean }> = [
+    { label: '模型', value: modelLabel(work.model), wide: true },
+    { label: '类型', value: work.provider },
+    { label: '画幅', value: work.aspectRatio || '自动画幅' },
+    { label: '清晰度', value: tier },
+  ]
+  if (size) fields.push({ label: '输出尺寸', value: size })
+  if (work.type === 'video') {
+    fields.push({ label: '镜头数', value: `${work.shotCount || 1} 个` }, { label: '时长', value: `${work.requestedDuration || 0} 秒` })
+  }
+  fields.push(
+    { label: '生成数量', value: `${resultOutputCount(work)} ${work.type === 'image' ? '张' : '段'}` },
+    { label: '参考图', value: `${work.referenceCount || 0} 张` },
+    ...(work.status === 'pending'
+      ? [{ label: '提交时间', value: formatResultTime(work.createdAt) }]
+      : [
+          { label: '完成耗时', value: formatCompletionDuration(work) },
+          { label: '生成时间', value: formatResultTime(work.completedAt || work.updatedAt) },
+        ]),
+    { label: '版本', value: work.version || 'v1' },
+    { label: '来源', value: work.source || '初版作品' },
+  )
+  return fields.filter((field) => field.value)
 }
 
 function videoShotPrompt(shotPrompt: string) {
@@ -3754,7 +4606,7 @@ function formatSequenceDuration(seconds: number) {
 
 function previewResult(output: string, type: StudioMode, index: number) {
   if (type === 'image') {
-    previewUrl.value = output
+    openPreview(output)
     return
   }
   const video = document.querySelectorAll<HTMLVideoElement>('.result-segment-video')[index]
@@ -3807,52 +4659,84 @@ async function downloadOutput(url: string, work: CreatorHistoryItem, index: numb
   const outputKey = `${work.id}:${index}`
   downloadingOutputKey.value = outputKey
   try {
-    const extension = work.type === 'video' ? 'mp4' : imageFileExtension(url)
-    const filename = `creator-${Date.now()}-${index + 1}.${extension}`
-    let downloadUrl = url
-    let temporaryUrl = ''
-    const crossOriginDownload = work.type === 'image' && isCrossOriginHttpURL(url)
-    if (work.type === 'video') {
-      const cached = work.videoBlobs?.[index]
-      let blob: Blob
-      if (cached instanceof Blob && cached.size > 0 && (cached.type.startsWith('video/') || cached.type === 'application/octet-stream')) {
-        blob = cached
-      } else {
-        const key = findKeyForWork(work)
-        const requestId = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)[index]
-        blob = await downloadCreatorVideo(url, key?.key, requestId)
-        // Repeated clicks reuse the completed read even if the HTTP response
-        // was not cacheable. Generation/recovery already persists video blobs.
-        const blobs = work.videoBlobs ? [...work.videoBlobs] : []
-        blobs[index] = blob
-        work.videoBlobs = blobs
-      }
-      temporaryUrl = URL.createObjectURL(blob)
-      downloadUrl = temporaryUrl
-    } else if (crossOriginDownload) {
-      const key = findKeyForWork(work)
-      if (!key) throw new Error('未找到图片对应的可用 Key')
-      temporaryUrl = URL.createObjectURL(await loadCreatorImageBlob(key.key, url))
-      downloadUrl = temporaryUrl
-    } else if (!url.startsWith('blob:') && !url.startsWith('data:')) {
-      const response = await fetch(url)
-      if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`)
-      temporaryUrl = URL.createObjectURL(await response.blob())
-      downloadUrl = temporaryUrl
-    }
-    const anchor = document.createElement('a')
-    anchor.href = downloadUrl
-    anchor.download = filename
-    document.body.appendChild(anchor)
-    anchor.click()
-    anchor.remove()
-    if (temporaryUrl) window.setTimeout(() => URL.revokeObjectURL(temporaryUrl), 1000)
+    await saveOutput(url, work, index, Date.now())
   } catch (error) {
     const message = errorMessage(error, '作品下载失败')
     appStore.showError(/failed to fetch|network error/i.test(message) ? '下载连接失败，请稍后重试' : message)
   } finally {
     if (downloadingOutputKey.value === outputKey) downloadingOutputKey.value = ''
   }
+}
+
+async function downloadAllOutputs(work: CreatorHistoryItem) {
+  if (downloadingOutputKey.value || !work.outputs.length) return
+  const outputKey = `${work.id}:all`
+  downloadingOutputKey.value = outputKey
+  const timestamp = Date.now()
+  let failed = 0
+  let lastError: unknown
+  try {
+    for (const [index, url] of [...work.outputs].entries()) {
+      try {
+        await saveOutput(url, work, index, timestamp)
+      } catch (error) {
+        failed += 1
+        lastError = error
+      }
+      // Browsers may drop anchor clicks fired back-to-back.
+      if (index < work.outputs.length - 1) await new Promise(resolve => window.setTimeout(resolve, 300))
+    }
+    if (failed) {
+      const message = errorMessage(lastError, '作品下载失败')
+      const reason = /failed to fetch|network error/i.test(message) ? '下载连接失败，请稍后重试' : message
+      appStore.showError(failed === work.outputs.length ? reason : `${failed} ${work.type === 'image' ? '张图片' : '段视频'}下载失败：${reason}`)
+    }
+  } finally {
+    if (downloadingOutputKey.value === outputKey) downloadingOutputKey.value = ''
+  }
+}
+
+async function saveOutput(url: string, work: CreatorHistoryItem, index: number, timestamp: number) {
+  const extension = work.type === 'video' ? 'mp4' : imageFileExtension(url)
+  const filename = `creator-${timestamp}-${index + 1}.${extension}`
+  let downloadUrl = url
+  let temporaryUrl = ''
+  const crossOriginDownload = work.type === 'image' && isCrossOriginHttpURL(url)
+  if (work.type === 'video') {
+    const cached = work.videoBlobs?.[index]
+    let blob: Blob
+    if (cached instanceof Blob && cached.size > 0 && (cached.type.startsWith('video/') || cached.type === 'application/octet-stream')) {
+      blob = cached
+    } else {
+      const key = findKeyForWork(work)
+      const requestId = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)[index]
+      blob = await downloadCreatorVideo(url, key?.key, requestId)
+      // Repeated clicks reuse the completed read even if the HTTP response
+      // was not cacheable. Generation/recovery already persists video blobs.
+      const blobs = work.videoBlobs ? [...work.videoBlobs] : []
+      blobs[index] = blob
+      work.videoBlobs = blobs
+    }
+    temporaryUrl = URL.createObjectURL(blob)
+    downloadUrl = temporaryUrl
+  } else if (crossOriginDownload) {
+    const key = findKeyForWork(work)
+    if (!key) throw new Error('未找到图片对应的可用 Key')
+    temporaryUrl = URL.createObjectURL(await loadCreatorImageBlob(key.key, url))
+    downloadUrl = temporaryUrl
+  } else if (!url.startsWith('blob:') && !url.startsWith('data:')) {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`下载失败：HTTP ${response.status}`)
+    temporaryUrl = URL.createObjectURL(await response.blob())
+    downloadUrl = temporaryUrl
+  }
+  const anchor = document.createElement('a')
+  anchor.href = downloadUrl
+  anchor.download = filename
+  document.body.appendChild(anchor)
+  anchor.click()
+  anchor.remove()
+  if (temporaryUrl) window.setTimeout(() => URL.revokeObjectURL(temporaryUrl), 1000)
 }
 
 function isCrossOriginHttpURL(url: string) {
@@ -3910,7 +4794,7 @@ function delay(milliseconds: number) {
 watch([studioMode, imageCapability, selectedModel, selectedApiKey], loadImagePricing)
 watch([studioMode, selectedModel, selectedApiKey], loadVideoPricing)
 
-watch([studioMode, imageCapability], () => {
+watch([studioMode, imageCapability, videoCapability], () => {
   if (restoringWorkSettings.value) return
   activeTemplateIndex.value = 0
   promptTemplatePage.value = 0
@@ -3949,11 +4833,43 @@ watch(imageResolution, resolution => {
 })
 
 watch(videoResolutionOptions, options => {
-  if (!options.includes(videoResolution.value)) videoResolution.value = '720p'
+  const fallback = options.includes('720p') ? '720p' : options[0]
+  if (!options.includes(videoResolution.value)) videoResolution.value = fallback
   videoShots.value.forEach(shot => {
-    if (!options.includes(shot.resolution)) shot.resolution = '720p'
+    if (!options.includes(shot.resolution)) shot.resolution = fallback
   })
 })
+
+// Keep every shot within the selected relay tier: its duration range, its
+// aspect ratios, and no first-frame mode (relays take reference images instead).
+watch(selectedVideoRelayTier, tier => {
+  if (!tier) return
+  const seedance = seedanceVideoTier(selectedModel.value)
+  const clamp = (value: number) => snapSeedanceSeconds(tier, value)
+  const ratios = tier.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
+  const ratio = (value: string) => ratios.includes(value) ? value : '16:9'
+  // Relays have no first-frame mode; tiers without uploads fall back to text.
+  // Tiers that need references also leave text-to-video.
+  const fallback: VideoGenerationMethod = seedance && !seedance.supportsUploadedReferences ? 'text' : 'reference'
+  const needsReference = 'requiresReference' in tier && tier.requiresReference
+  const method = (value: VideoGenerationMethod) => value === 'image' || (value === 'reference' && fallback === 'text') || (value === 'text' && needsReference) ? fallback : value
+  videoDuration.value = clamp(videoDuration.value)
+  aspectRatio.value = ratio(aspectRatio.value)
+  videoGenerationMethod.value = method(videoGenerationMethod.value)
+  videoShots.value.forEach(shot => {
+    shot.duration = clamp(shot.duration)
+    shot.aspectRatio = ratio(shot.aspectRatio)
+    shot.generationMethod = method(shot.generationMethod)
+  })
+}, { immediate: true })
+
+// Grok has no relay tier; drop ratios it does not accept (e.g. 21:9 carried over from MiniMax).
+watch([studioMode, selectedVideoRelayTier], ([mode, tier]) => {
+  if (mode !== 'video' || tier) return
+  const ratio = (value: string) => GROK_VIDEO_ASPECT_RATIOS.includes(value) ? value : '16:9'
+  aspectRatio.value = ratio(aspectRatio.value)
+  videoShots.value.forEach(shot => { shot.aspectRatio = ratio(shot.aspectRatio) })
+}, { immediate: true })
 
 watch(aspectOptions, options => {
   if (studioMode.value === 'image' && imageCapability.value === 'image2' && imageSizeMode.value !== 'ratio') return
@@ -3969,9 +4885,22 @@ watch(selectedModel, model => {
   }
 })
 
+function stopToolbarStuckTracking() {
+  document.removeEventListener('scroll', scheduleToolbarStuck, { capture: true })
+  window.removeEventListener('resize', scheduleToolbarStuck)
+  if (toolbarStuckFrame) cancelAnimationFrame(toolbarStuckFrame)
+  toolbarStuckFrame = 0
+  stopSettingsReveal()
+}
+
 function activateStudio() {
   studioActive = true
   window.addEventListener('paste', handlePaste)
+  window.addEventListener('keydown', handlePreviewKeydown)
+  // Capture so scrolls of any ancestor container are seen, not only the window.
+  document.addEventListener('scroll', scheduleToolbarStuck, { capture: true, passive: true })
+  window.addEventListener('resize', scheduleToolbarStuck)
+  scheduleToolbarStuck()
   startTemplateAutoplay()
   generationClock.value = Date.now()
 }
@@ -3983,9 +4912,12 @@ onActivated(() => {
 onDeactivated(() => {
   studioActive = false
   window.removeEventListener('paste', handlePaste)
+  window.removeEventListener('keydown', handlePreviewKeydown)
+  stopToolbarStuckTracking()
   stopTemplateAutoplay()
   imageSizeDialogOpen.value = false
   videoParamsDialogOpen.value = false
+  historyDrawerOpen.value = false
   previewUrl.value = ''
   studioElement.value?.querySelectorAll<HTMLVideoElement>('video').forEach(video => video.pause())
 })
@@ -4008,6 +4940,8 @@ onBeforeUnmount(() => {
   videoPricingRequest?.abort()
   disposed = true
   window.removeEventListener('paste', handlePaste)
+  window.removeEventListener('keydown', handlePreviewKeydown)
+  stopToolbarStuckTracking()
   if (generationTimer !== undefined) window.clearInterval(generationTimer)
   stopTemplateAutoplay()
   const referenceUrls = [
@@ -4072,8 +5006,7 @@ onBeforeUnmount(() => {
   .toggle-row,
   .result-heading,
 .result-actions,
-.quick-templates,
-.canvas-footnote {
+.quick-templates {
   display: flex;
   align-items: center;
 }
@@ -4130,13 +5063,16 @@ onBeforeUnmount(() => {
 .new-creation-link { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid #9cd9cf; border-radius: var(--creator-radius); background: #effbf8; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .new-creation-link:hover { background: #dcf7ef; border-color: var(--creator-accent); }
 .new-creation-link:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 3px; }
-.generation-tasks { flex-shrink: 0; display: flex; align-items: center; gap: 8px; padding: 10px 20px; border-bottom: 1px solid var(--creator-line); overflow-x: auto; }
-.generation-tasks-label { flex-shrink: 0; font-size: 12px; color: var(--creator-muted); }
-.generation-task { display: inline-flex; align-items: center; gap: 8px; flex-shrink: 0; max-width: 220px; padding: 8px 12px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius); font-size: 12px; color: var(--creator-accent-strong); }
-.generation-task > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.generation-task .button-spinner { border-color: #c6e8df; border-top-color: var(--creator-accent); flex-shrink: 0; width: 12px; height: 12px; }
-.generation-task.active, .generation-task:hover { background: var(--creator-accent-soft); border-color: var(--creator-accent); }
-.generation-task:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
+.history-tab-generating { display: inline-flex; align-items: center; gap: 4px; margin-left: 2px; padding: 1px 6px; border-radius: 999px; color: var(--creator-accent-strong); background: var(--creator-accent-soft); font-size: 11px; }
+.history-tab-generating .button-spinner { width: 10px; height: 10px; border-width: 1.5px; border-color: #c6e8df; border-top-color: var(--creator-accent); }
+/* Running work: one static glyph inside a rotating arc, over a soft shimmer. */
+.history-generating { position: absolute; inset: 0; display: grid; place-items: center; background: linear-gradient(110deg, #e8f3f1 30%, #f4fbfa 50%, #e8f3f1 70%) 0 0 / 220% 100%; animation: creatorShimmer 1.8s ease-in-out infinite; }
+.history-generating.has-preview { background: rgb(255 255 255 / 45%); backdrop-filter: blur(1.5px); animation: none; }
+.history-generating-ring { position: relative; display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; color: var(--creator-accent-strong); background: #fff; box-shadow: 0 2px 6px rgb(24 138 121 / 14%); }
+.history-generating-ring::before { position: absolute; inset: -3px; border: 2px solid #d3eee9; border-top-color: var(--creator-accent); border-radius: 50%; content: ''; animation: creatorSpin .9s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .history-generating, .history-generating-ring::before { animation-duration: 3s; } }
+.history-item.generating { border-color: #a5ddd4; }
+.history-copy small.history-progress { color: var(--creator-accent-strong); }
 .pending-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
 .generation-new-creation { min-height: 40px; gap: 8px; padding: 0 16px; border-color: var(--creator-accent); border-radius: var(--creator-radius); background: var(--creator-accent); color: #fff; font-size: 13px; font-weight: 600; box-shadow: 0 6px 16px rgb(15 159 143 / 20%); transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
 .generation-new-creation:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); box-shadow: 0 8px 20px rgb(15 159 143 / 25%); }
@@ -4190,7 +5126,6 @@ onBeforeUnmount(() => {
 }
 .icon-action:hover,
 .collapse-action:hover,
-.history-reopen:hover,
 .brief-topline button:hover { border-color: #8fded2; color: var(--creator-accent-strong); background: #f4fcfa; }
 .icon-action:disabled { cursor: wait; opacity: .55; }
 .icon-action.danger:hover { border-color: #f0b5b5; color: #c84040; background: #fff6f6; }
@@ -4208,29 +5143,85 @@ onBeforeUnmount(() => {
 .history-panel,
 .settings-panel { min-width: 0; height: 100%; background: #fff; }
 .history-panel { display: flex; min-height: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--creator-line); }
-.history-collapsed .history-panel { display: none; }
-.playground-history-reopen-button {
-  width: auto;
-  height: 34px;
-  flex-shrink: 0;
-  gap: 6px;
-  padding: 0 10px;
-  border-color: #dbe5e4;
-  border-radius: var(--creator-radius);
-  color: #64748b;
-  background: #fff;
-  font-size: 12px;
-  white-space: nowrap;
+.history-collapsed .history-panel:not(.is-drawer) { display: none; }
+/* Compact-width history entry; shown by the 1120px breakpoint. */
+/* Same look as the desktop "历史记录" reopen button. */
+.history-drawer-toggle { position: relative; display: none; flex-shrink: 0; align-items: center; justify-content: center; }
+.history-drawer-toggle:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
+.history-drawer-toggle-live { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border: 2px solid #fff; border-radius: 50%; background: var(--creator-accent); animation: creatorStatusPulse 900ms ease-in-out infinite alternate; }
+.history-drawer-handle { display: none; }
+.history-drawer-backdrop { position: fixed; z-index: 49; inset: 0; background: rgb(15 23 42 / 42%); opacity: 0; pointer-events: none; transition: opacity 200ms ease; }
+.history-drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+/* Fixed, not teleported: no ancestor sets a transform or filter, so it escapes the studio card. */
+.history-panel.is-drawer {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(360px, 86vw);
+  height: auto;
+  color: #142033;
+  box-shadow: 0 20px 60px rgb(15 23 42 / 24%);
+  transform: translateX(-100%);
+  visibility: hidden;
+  transition: transform 240ms cubic-bezier(.2, .8, .2, 1), visibility 0s linear 240ms;
 }
-.playground-history-reopen-button:hover { border-color: #cce8e3; color: var(--creator-accent-strong); background: #edf9f7; }
-.playground-history-reopen-icon { display: inline-grid; width: 16px; height: 16px; place-items: center; }
-.playground-history-reopen-icon svg { width: 16px; height: 16px; }
+.history-panel.is-drawer.open { transform: none; visibility: visible; transition: transform 240ms cubic-bezier(.2, .8, .2, 1); }
+.history-panel.is-drawer.dragging { transition: none; }
+@media (prefers-reduced-motion: reduce) {
+  .history-panel.is-drawer,
+  .history-panel.is-drawer.open,
+  .history-drawer-backdrop { transition: none; }
+  .history-drawer-toggle-live { animation: none; }
+}
+/* Both history entries: one flat surface, the same height as the mode switch. */
+.playground-history-reopen-button,
+.history-drawer-toggle {
+  width: auto;
+  height: auto;
+  flex-shrink: 0;
+  padding: 0;
+  border: 1px solid #d7e4e2;
+  border-radius: var(--creator-radius-large);
+  color: #415066;
+  background: #fff;
+  box-shadow: 0 1px 2px rgb(29 82 75 / 5%);
+  white-space: nowrap;
+  transition: border-color 160ms ease, box-shadow 160ms ease, color 160ms ease;
+}
+.history-entry-surface {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  min-height: 48px;
+  padding: 0 16px 0 8px;
+}
+.history-entry-icon {
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 32px;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--creator-radius-small);
+  color: var(--creator-accent-strong);
+  background: var(--creator-accent-soft);
+  transition: 160ms ease;
+}
+.history-entry-copy { display: grid; align-content: center; text-align: left; line-height: 1.1; }
+.history-entry-copy small { margin-bottom: 3px; color: #9aa8bb; font-size: 8px; font-weight: 800; letter-spacing: .06em; }
+.history-entry-copy strong { font-size: 13px; font-weight: 700; }
+.history-drawer-toggle[aria-expanded="true"] { border-color: #a7e3d9; color: var(--creator-accent-strong); background: #fff; box-shadow: 0 4px 14px rgb(29 82 75 / 10%); }
+.history-drawer-toggle[aria-expanded="true"] small { color: #6e9e99; }
+/* Hover effects on the history entries are temporarily disabled. */
+.playground-history-reopen-button:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
 
 .history-heading { gap: 10px; padding: 22px 18px 14px; }
 .history-heading > div:first-child { min-width: 0; flex: 1; }
 .history-heading h2,
 .settings-heading h2 { margin: 0; color: #172033; font-size: 16px; font-weight: 750; }
-.history-heading p,
 .settings-heading p { margin: 3px 0 0; color: var(--creator-muted); font-size: 12px; }
 .history-count { display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border-radius: var(--creator-radius-small); color: #8794a8; background: #f1f5f8; font-size: 12px; font-weight: 700; }
 .collapse-action { width: 34px; }
@@ -4243,9 +5234,9 @@ onBeforeUnmount(() => {
 .history-list::-webkit-scrollbar-track { background: transparent; }
 .history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
 .history-list::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
-.history-item { position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: var(--creator-radius); text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
-.history-item:hover { border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
-.history-item.active { border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
+.history-item { --history-item-bg: #fff; position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr) 28px; align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: var(--creator-radius); text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
+.history-item:hover { --history-item-bg: #f7fcfb; border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
+.history-item.active { --history-item-bg: #eefbf8; border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
 .history-item-hitbox { position: absolute; z-index: 1; inset: 0; border-radius: inherit; }
 .history-item-hitbox:focus-visible { outline: 2px solid #39b9a5; outline-offset: -3px; }
 .history-preview { position: relative; display: grid; place-items: center; width: 52px; height: 52px; overflow: hidden; border-radius: var(--creator-radius-small); color: #8da09e; background: #e8f0ef; }
@@ -4254,21 +5245,21 @@ onBeforeUnmount(() => {
 .history-status { position: absolute; right: 4px; bottom: 4px; width: 8px; height: 8px; border: 2px solid #fff; border-radius: 50%; }
 .history-status.pending { background: #f0a63a; }
 .history-status.failed { background: #d84b4b; }
-.history-copy { min-width: 0; padding-right: 48px; align-self: center; }
+.history-copy { min-width: 0; align-self: center; }
 .history-copy strong,
 .history-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .history-copy strong { color: #344054; font-size: 12px; font-weight: 700; }
 .history-copy small { margin-top: 5px; color: #95a1b2; font-size: 10px; }
 .history-preview,
 .history-copy { pointer-events: none; }
-.history-item-actions { position: absolute; z-index: 2; top: 50%; right: 8px; display: flex; align-items: center; justify-content: flex-end; gap: 1px; opacity: 0; transform: translateY(-50%); pointer-events: none; transition: opacity 160ms ease; }
+/* Delete sits in its own grid column, so the title truncates before it instead of hiding under it.
+   The column is reserved even while the button is hidden, so hovering never reflows the text. */
+.history-item-actions { position: relative; z-index: 2; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 160ms ease; }
 .history-item:hover .history-item-actions,
-.history-item:focus-within .history-item-actions,
-.history-item.active .history-item-actions { opacity: 1; pointer-events: auto; }
-.history-item-actions button { display: grid; place-items: center; width: 23px; height: 28px; border-radius: var(--creator-radius-small); color: #8295a4; }
-.history-item-actions .history-delete { width: 28px; height: 28px; border-radius: 50%; }
-.history-item-actions button:hover { color: var(--creator-accent-strong); background: rgb(255 255 255 / 78%); }
+.history-item:focus-within .history-item-actions { opacity: 1; pointer-events: auto; }
+.history-item-actions .history-delete { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #8295a4; }
 .history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
+.history-item-actions .history-delete:disabled { cursor: not-allowed; opacity: .4; }
 .history-empty { display: grid; justify-items: center; padding: 90px 22px 30px; text-align: center; color: #92a0b3; }
 .history-empty > span { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 14px; border-radius: var(--creator-radius); background: #f3f7f7; }
 .history-empty strong { color: #58667a; font-size: 14px; }
@@ -4276,6 +5267,7 @@ onBeforeUnmount(() => {
 
 .canvas-panel {
   position: relative;
+  container-type: inline-size;
   display: flex;
   min-width: 0;
   min-height: 0;
@@ -4307,14 +5299,13 @@ onBeforeUnmount(() => {
 }
 .inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 24px; }
 .inspiration-intro { text-align: center; }
-.inspiration-mark,
-.generation-orbit { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #e8fbf7; }
+.inspiration-mark { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #e8fbf7; }
 .eyebrow { margin: 18px 0 10px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: 0; }
 .inspiration-intro h2,
 .generation-state h2,
 .result-heading h2 { margin: 0; color: #172033; font-size: 23px; font-weight: 780; }
 .inspiration-intro > p:last-child,
-.generation-state > p:not(.eyebrow) { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
+.generation-heading > p { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
 
 .featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-radius-large); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
 .brief-topline { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; min-height: 60px; margin: 0 24px; border-bottom: 1px solid #2b3e3b; color: #9db3af; font-size: 11px; font-weight: 700; }
@@ -4337,6 +5328,7 @@ onBeforeUnmount(() => {
 .brief-slide-leave-active { transition: opacity 220ms ease, transform 220ms ease; }
 .brief-slide-enter-from { opacity: 0; transform: translateX(12px); }
 .brief-slide-leave-to { opacity: 0; transform: translateX(-12px); }
+@media (prefers-reduced-motion: reduce) { .brief-stage { transition: none; } }
 .brief-navigation { display: flex; align-items: center; gap: 16px; min-height: 58px; padding: 12px 24px; border-top: 1px solid #263a36; background: rgb(255 255 255 / 2%); }
 .brief-navigation > label { flex-shrink: 0; color: #9bb0aa; font-size: 11px; }
 .brief-range { appearance: none; flex: 1; min-width: 0; height: 24px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
@@ -4349,9 +5341,10 @@ onBeforeUnmount(() => {
 .brief-position { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; min-width: 64px; justify-content: center; padding: 5px 8px; border: 1px solid #354a44; border-radius: var(--creator-radius); background: #192b25; font-size: 11px; font-variant-numeric: tabular-nums; }
 .brief-position strong { color: #dfba69; font-weight: 650; }
 .brief-position > span { color: #91a59e; }
-.quick-templates { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; margin-top: 22px; }
+.quick-templates { display: grid; gap: 10px; margin-top: 22px; }
+.quick-templates-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
 /* Section label with a hairline rule, so the chips read as a group rather than a form. */
-.quick-templates-label { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; color: #7d8b9c; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
+.quick-templates-label { display: flex; align-items: center; gap: 12px; color: #7d8b9c; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
 .quick-templates-label::after { content: ''; flex: 1; height: 1px; background: #e1eae8; }
 .quick-templates button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius); background: #fff; text-align: left; transition: border-color 160ms ease, background 160ms ease, transform 160ms ease; }
 .quick-templates button > span { display: grid; gap: 3px; min-width: 0; }
@@ -4367,33 +5360,71 @@ onBeforeUnmount(() => {
 @media (hover: none) { .quick-templates button > svg { opacity: .6; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .quick-templates button, .quick-templates button > svg { transition: none; transform: none; } }
 
-.generation-state { display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 16px; padding-block: 24px; text-align: center; }
-.generation-state > p:not(.eyebrow) { margin: 0; }
-.generation-orbit { position: relative; width: 76px; height: 76px; margin-bottom: 0; border-radius: 50%; animation: creatorPulse 2.2s ease-in-out infinite; }
-.generation-orbit::before { position: absolute; inset: 8px; border: 1px solid #9ee8dc; border-radius: var(--creator-radius-large); background: #edfcf8; content: ''; }
-.generation-orbit::after { position: absolute; inset: -5px; border: 2px solid #a9f0e4; border-right-color: var(--creator-accent-strong); border-radius: 50%; content: ''; animation: creatorSpin 2.4s linear infinite; }
-.generation-orbit > svg { position: relative; z-index: 1; }
-.generation-metrics { display: flex; align-items: center; gap: 10px; min-height: 30px; margin: 0; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; }
+.generation-state { --generation-row-width: clamp(320px, 92cqi, 1480px); --generation-frame-height: clamp(200px, calc(100vh - 500px), 720px); position: relative; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 22px; padding-block: 32px; text-align: center; isolation: isolate; }
+/* Soft aurora behind the stage; purely decorative. */
+.generation-state::before { position: absolute; z-index: -1; top: -12px; left: 50%; width: min(var(--generation-row-width), 100%); height: calc(var(--generation-frame-height) + 80px); border-radius: 50%; background: radial-gradient(closest-side at 35% 45%, rgb(56 214 189 / 20%), transparent), radial-gradient(closest-side at 68% 55%, rgb(96 165 250 / 13%), transparent); filter: blur(12px); content: ''; transform: translateX(-50%); animation: creatorAurora 7s ease-in-out infinite alternate; }
+.generation-heading { display: grid; justify-items: center; gap: 6px; }
+.generation-heading > p { margin: 0; }
+.generation-stage { display: flex; align-items: center; justify-content: center; gap: 12px; max-width: 100%; margin-bottom: 4px; }
+.generation-frame { position: relative; display: grid; flex: 0 1 auto; container-type: inline-size; width: var(--generation-frame-width); min-width: 0; place-items: center; overflow: hidden; border: 1px solid #cfeee8; border-radius: var(--creator-radius-large); background: linear-gradient(110deg, #ecf8f6 30%, #f8fdfc 50%, #ecf8f6 70%) 0 0 / 220% 100%; box-shadow: 0 14px 34px rgb(24 104 93 / 10%), inset 0 0 0 4px rgb(255 255 255 / 55%); }
+.generation-frame.is-current { border-color: #8fdccf; animation: creatorShimmer 1.8s ease-in-out infinite; }
+.generation-frame.is-current::after { position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(180deg, transparent 40%, rgb(15 159 143 / 9%) 50%, transparent 60%) 0 0 / 100% 260%; content: ''; animation: creatorScan 2.6s ease-in-out infinite; }
+.generation-frame.is-queued { border-style: dashed; background: rgb(255 255 255 / 55%); box-shadow: none; }
+.generation-frame.is-done { border-color: #a5ddd4; animation: creatorFrameIn .45s ease-out; }
+.generation-frame > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+/* Scale with the frame so narrow mobile frames keep the spinner proportional. */
+.generation-frame-ring { position: relative; z-index: 1; display: grid; place-items: center; width: clamp(24px, 34cqi, 44px); height: clamp(24px, 34cqi, 44px); border-radius: 50%; color: var(--creator-accent-strong); background: #fff; box-shadow: 0 6px 16px rgb(24 138 121 / 16%); }
+.generation-frame-ring > svg { width: 40%; height: 40%; }
+.generation-frame-ring::before { position: absolute; inset: -3px; border: 2px solid #d3eee9; border-top-color: var(--creator-accent); border-right-color: var(--creator-accent); border-radius: 50%; content: ''; animation: creatorSpin 1.1s linear infinite; }
+.generation-frame-index { color: #a7bbb7; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.generation-frame.is-failed { border-style: dashed; border-color: #ecc9c4; background: #fff6f5; box-shadow: none; }
+.generation-frame-failed { display: grid; justify-items: center; gap: 4px; color: #c0574d; font-size: 11px; font-weight: 600; }
+.generation-frame-open { position: absolute; z-index: 1; inset: 0; border-radius: inherit; cursor: zoom-in; }
+.generation-frame-open:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: -3px; }
+.generation-frame-actions { position: absolute; z-index: 2; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity 150ms ease; }
+.generation-frame:hover .generation-frame-actions, .generation-frame-actions:focus-within { opacity: 1; }
+.generation-frame-action { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgb(255 255 255 / 80%); border-radius: 50%; color: var(--creator-accent-strong); background: rgb(255 255 255 / 94%); box-shadow: 0 3px 10px rgb(15 32 29 / 28%); }
+.generation-frame-action > svg { width: 16px; height: 16px; }
+.generation-frame-action:disabled { cursor: wait; opacity: .5; }
+/* Touch screens have no hover, so finished frames always show their actions. */
+@media (hover: none) { .generation-frame-actions { opacity: 1; } }
+/* Narrow frames (several per row on phones) stay clean: a tap opens the preview, which has save and edit. */
+@container (max-width: 160px) {
+  .generation-frame-actions { display: none; }
+}
+.generation-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 0; margin: 2px 0 0; padding: 0; color: #93a3a0; font-size: 11px; font-weight: 500; list-style: none; }
+.generation-tags li + li::before { margin: 0 8px; color: #c3d0cd; content: '·'; }
+.generation-progress-card { display: grid; gap: 10px; width: min(max(440px, calc(var(--generation-row-width) * .6)), 92%); padding: 14px 16px; border: 1px solid #e0eeeb; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 82%); box-shadow: 0 8px 22px rgb(29 61 57 / 6%); }
+.generation-metrics { display: flex; align-items: center; gap: 10px; min-height: 24px; margin: 0; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; }
 .generation-metrics > span,
-.generation-metrics > strong { display: inline-flex; align-items: center; height: 30px; line-height: 1; }
-.generation-metrics strong { font-size: 14px; font-variant-numeric: tabular-nums; }
-.generation-percent { justify-content: center; min-width: 42px; padding: 0 10px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; text-align: center; }
-.progress-track { width: min(420px, 82%); height: 4px; margin: 0; overflow: hidden; border-radius: 4px; background: #d9f5ef; }
-.progress-track span { display: block; height: 100%; border-radius: inherit; background: var(--creator-accent-strong); transition: width .6s ease; }
-.progress-track.indeterminate span { width: 34%; animation: creatorProgress 1.7s ease-in-out infinite; }
-.generation-note { display: grid; max-width: min(320px, 100%); margin: 0; color: #82938f; font-size: 11px; font-weight: 400; line-height: 1.7; overflow-wrap: anywhere; text-wrap: pretty; }
+.generation-metrics > strong { display: inline-flex; align-items: center; gap: 5px; height: 24px; line-height: 1; }
+.generation-metrics > span { color: #74888a; font-weight: 600; }
+.generation-metrics strong { font-size: 15px; font-variant-numeric: tabular-nums; }
+.generation-metrics em { margin-left: auto; color: #5d716d; font-size: 12px; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; }
+.generation-percent { justify-content: center; min-width: 42px; margin-left: auto; padding: 0 10px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; text-align: center; }
+.progress-track { width: 100%; height: 6px; margin: 0; overflow: hidden; border-radius: 999px; background: #e3f4f1; }
+.progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); transition: width .6s ease; }
+/* 双段伸缩：长段、短段轮流从左端伸出、边走边伸缩、在右端收尾，同一时刻只有一段，前一段走完才从起点再出；位置和长度都按轨道百分比，宽度自适应；用 clip-path 裁出段落，不改 left/right，避免逐帧重排 */
+.progress-track.indeterminate span { position: relative; width: 100%; background: none; transition: none; }
+.progress-track.indeterminate span::before, .progress-track.indeterminate span::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); clip-path: inset(0 100% 0 0 round 999px); animation: creatorProgressLong 2.2s linear infinite; }
+.progress-track.indeterminate span::after { animation-name: creatorProgressShort; }
+@media (prefers-reduced-motion: reduce) { .progress-track.indeterminate span::before { clip-path: none; opacity: .6; animation: none; } .progress-track.indeterminate span::after { display: none; } }
+.generation-prompt { display: -webkit-box; margin: 2px 0 0; padding: 12px 0 0; overflow: hidden; border-top: 1px solid #edf4f2; color: #7b8b8e; font-size: 12px; line-height: 1.7; text-align: left; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+@media (prefers-reduced-motion: reduce) { .generation-state::before, .generation-frame.is-current, .generation-frame.is-current::after, .generation-frame.is-done { animation: none; } }
 .result-workspace { padding: 32px 0 24px; }
 .result-heading { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .result-heading > div { min-width: 0; }
 .result-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
 .result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.result-heading-complete { align-items: flex-start; flex-wrap: wrap; }
+.result-heading-complete { align-items: flex-end; flex-wrap: wrap; }
 .result-heading-complete > div:first-child { flex: 1 1 240px; }
 .result-heading h2 { font-size: 20px; font-weight: 700; line-height: 1.4; }
-.result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; margin-left: auto; }
+.result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; }
 .result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); white-space: nowrap; color: #728093; background: #fff; font-size: 11px; }
 .result-heading-actions .secondary-command { min-height: 34px; padding: 0 12px; flex-shrink: 0; white-space: nowrap; font-weight: 600; border-color: #d6e4e1; color: #3f5d59; }
 .result-heading-actions .icon-action { flex-shrink: 0; width: 34px; height: 34px; }
+.result-heading-actions .download-all-command { display: inline-flex; align-items: center; gap: 6px; }
+.result-heading-actions .download-all-command:disabled { cursor: wait; opacity: .68; }
 .result-heading-actions .primary-soft { border-color: var(--creator-accent); color: #fff; background: var(--creator-accent); }
 .result-heading-actions .primary-soft:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); }
 .complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
@@ -4407,13 +5438,9 @@ onBeforeUnmount(() => {
 .video-result-frame { position: relative; width: 100%; overflow: hidden; }
 .complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
 .video-result-frame { display: grid; border-radius: inherit; max-height: min(58vh, 620px); }
-.video-loading-overlay,
 .video-loading-media { color: #dcebe8; background: #142321; }
 .video-loading-media { display: grid; height: auto; }
-.video-loading-overlay { position: absolute; z-index: 2; inset: 0; display: grid; justify-items: center; align-content: center; padding: 24px; text-align: center; }
-.video-loading-overlay strong,
 .video-loading-content strong { margin-top: 13px; color: #f1f8f6; font-size: 14px; font-weight: 700; }
-.video-loading-overlay p,
 .video-loading-content p { margin: 7px 0 0; color: #9bb4af; font-size: 11px; line-height: 1.5; }
 .video-loading-content { display: grid; justify-items: center; align-content: center; width: 100%; height: 100%; }
 .video-loading-spinner { display: inline-grid; width: 42px; height: 42px; place-items: center; border: 2px solid rgb(146 224 211 / 28%); border-top-color: #79dfd0; border-radius: 50%; color: #9cebe0; animation: creatorSpin 900ms linear infinite; }
@@ -4421,12 +5448,11 @@ onBeforeUnmount(() => {
 .video-loading-grid { margin-bottom: 24px; }
 .video-loading-card { box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
 .video-loading-actions { min-height: 76px; }
-.complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 10px 12px 10px 18px; }
-.complete-video-card > footer div { min-width: 0; }
-.complete-video-card > footer strong,
-.complete-video-card > footer span { display: block; }
-.complete-video-card > footer strong { color: var(--creator-accent-strong); font-size: 12px; }
-.complete-video-card > footer span { overflow: hidden; margin-top: 5px; color: #8795a7; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+/* Bottom padding = header padding (14px) + the eyebrow's half-leading (~3px), so the tag pills sit as far from the bottom edge as the eyebrow text does from the top. */
+.complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 10px 16px 17px; }
+.complete-video-card > footer > div { min-width: 0; flex: 1; }
+.complete-video-card > footer strong { display: block; color: var(--creator-accent-strong); font-size: 14px; line-height: 1.4; }
+.complete-video-card > footer .result-tags { margin-top: 8px; }
 .complete-video-card > footer .secondary-command { display: inline-flex; align-items: center; flex: 0 0 auto; gap: 6px; border-color: #9fddd3; color: var(--creator-accent-strong); background: #f0fbf8; }
 .complete-video-pending { display: grid; min-height: 290px; justify-items: center; place-content: center; padding: 32px; color: var(--creator-accent-strong); text-align: center; }
 .complete-video-pending > span { display: grid; width: 54px; height: 54px; place-items: center; border: 1px solid #a9e3d9; border-radius: var(--creator-radius); background: #ecfbf7; }
@@ -4468,11 +5494,23 @@ onBeforeUnmount(() => {
 .result-media.video { display: block; width: 100%; height: auto; object-fit: contain; }
 .result-actions { justify-content: space-between; gap: 16px; min-height: 76px; padding: 12px 14px 12px 16px; border-top: 1px solid #e6eeec; color: #64748b; font-size: 13px; }
 .result-description { min-width: 0; flex: 1; }
-.result-description strong { color: var(--creator-accent-strong); font-size: 14px; }
-.result-description span { margin-left: 6px; color: #718096; font-size: 12px; }
+.result-description strong { display: block; color: var(--creator-accent-strong); font-size: 14px; line-height: 1.4; }
+.result-model { display: block; overflow: hidden; margin-top: 5px; color: #718096; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.result-meta { display: flex; flex-wrap: wrap; gap: 2px 0; margin-top: 5px; color: #718096; font-size: 12px; line-height: 1.5; }
+.result-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-meta > span + span::before { content: '·'; margin: 0 6px; color: #b4bfcc; }
 .result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
-.result-segment-grid .result-description p { display: -webkit-box; line-height: 1.45; text-overflow: initial; white-space: normal; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-description p.result-prompt { display: -webkit-box; margin-top: 4px; color: #7b8b8e; font-size: 12px; line-height: 1.5; text-overflow: initial; white-space: normal; word-break: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
+/* 标题与按钮同一行，提示词和标签各自占满整行 */
+.result-actions:has(> .result-tags) { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "prompt prompt" "tags tags"; align-items: center; column-gap: 12px; row-gap: 0; }
+.result-actions:has(> .result-tags) > .result-description { display: contents; }
+.result-actions:has(> .result-tags) > .result-description > strong { grid-area: title; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-actions:has(> .result-tags) > .result-description > p.result-prompt { grid-area: prompt; margin-top: 8px; }
+.result-actions:has(> .result-tags) > .result-media-actions { grid-area: actions; }
+.result-actions:has(> .result-tags) > .result-tags { grid-area: tags; margin-top: 10px; }
+.result-tags { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
+.result-tags li { max-width: 100%; overflow: hidden; padding: 2px 8px; border-radius: 999px; color: #5b6b7f; background: #eef3f2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .result-workspace .icon-action,
 .result-workspace .secondary-command { border-radius: var(--creator-radius); }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
@@ -4482,76 +5520,82 @@ onBeforeUnmount(() => {
 .result-error.muted { border-color: #cbdad7; color: #758a87; background: #f5f9f8; }
 .result-error.muted strong { color: #4c615e; }
 .result-error.muted p { color: #7d8c8a; }
+.partial-result-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid #f0d9a8; border-radius: var(--creator-radius); color: #a26a12; background: #fffaf0; }
+.partial-result-notice > div { flex: 1; min-width: 0; }
+.partial-result-notice strong { display: block; color: #7a4f0d; font-size: 13px; }
+.partial-result-notice p { margin: 3px 0 0; color: #94723c; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
+.partial-result-notice .secondary-command { flex-shrink: 0; }
 .status-check-icon { animation: creatorSpin .85s linear infinite; }
 .status-check-command { display: inline-flex; align-items: center; gap: 7px; border-color: #8eddd0; color: var(--creator-accent-strong); background: #effbf8; }
 .status-check-command:disabled { cursor: wait; opacity: .68; }
 .video-status-feedback { display: flex; align-items: flex-start; gap: 7px; width: min(460px, 100%); margin-top: 13px; padding: 10px 12px; border: 1px solid #cce4df; border-radius: var(--creator-radius); color: #52706b; background: #fff; font-size: 11px; line-height: 1.6; text-align: left; }
 .video-status-feedback svg { flex: 0 0 auto; margin-top: 2px; }
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
-.result-parameters { margin-top: 14px; }
+.result-parameters { container-type: inline-size; margin-top: 14px; }
 /* One grouped panel with hairline dividers instead of six separate tiles. */
-.result-stat-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #e2ebe9; }
+.result-stat-grid { display: grid; grid-auto-flow: row dense; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #fbfdfd; }
 .result-card { border-radius: var(--creator-radius-large); }
-.result-stat-grid article { min-width: 0; padding: 14px 16px; background: #fbfdfd; }
-.result-stat-grid span,
-.result-parameter-details div > span { display: block; color: #64748b; font-size: 10px; }
-.result-stat-grid strong { display: block; overflow: hidden; margin-top: 8px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-.result-parameter-details { margin-top: 10px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #fbfdfd; }
-.result-parameter-details summary { display: flex; align-items: center; justify-content: space-between; min-height: 50px; padding: 0 16px; color: #526176; font-size: 12px; cursor: pointer; list-style: none; }
-.result-parameter-details summary::-webkit-details-marker { display: none; }
-.result-parameter-details summary svg { color: var(--creator-accent-strong); transition: transform 160ms ease; }
-.result-parameter-details[open] summary svg { transform: rotate(180deg); }
-.result-parameter-details[open] summary { border-bottom: 1px solid #e2e9e8; }
-.result-parameter-details > div { padding: 15px 16px 0; }
-.result-parameter-details > div:last-child { padding-bottom: 17px; }
-.result-parameter-details p { margin: 7px 0 0; color: #334155; font-size: 12px; line-height: 1.75; }
-.result-parameter-details .full-prompt { white-space: pre-wrap; }
+/* Spread shadows draw the cell dividers so a partially filled last row stays clean. */
+.result-stat-grid article { min-width: 0; padding: 12px 14px; background: #fbfdfd; box-shadow: 0 0 0 1px #e2ebe9; }
+.result-stat-grid article.wide { grid-column: span 2; }
+.result-stat-grid span { display: block; color: #64748b; font-size: 10px; }
+.result-stat-grid strong { display: block; overflow: hidden; margin-top: 6px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+@container (min-width: 420px) { .result-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@container (min-width: 600px) { .result-stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+@container (min-width: 880px) { .result-stat-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
+.result-stat-grid .result-prompt-cell { grid-column: 1 / -1; }
+.result-prompt-cell .full-prompt { margin: 6px 0 0; color: #334155; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
+.result-prompt-cell .full-prompt.clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
+.result-prompt-toggle { display: inline-flex; align-items: center; gap: 3px; margin-top: 6px; padding: 0; border: 0; color: var(--creator-accent-strong); background: none; font-size: 12px; cursor: pointer; }
+.result-prompt-toggle svg { transition: transform 160ms ease; }
+.result-prompt-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.result-prompt-toggle:focus-visible { border-radius: 4px; outline: 2px solid var(--creator-accent-strong); outline-offset: 2px; }
 .secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: var(--creator-radius); background: #fff; font-size: 12px; font-weight: 700; }
-.canvas-footnote { flex: 0 0 auto; gap: 6px; margin: 0 24px 14px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #9aa8b8; font-size: 10px; }
 
 .professional-workspace { align-self: stretch; margin-top: 28px; margin-bottom: 70px; padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
 .sequence-shot { cursor: pointer; }
 .sequence-shot.active { border-color: #55d4c2; background: #f0fcf9; box-shadow: 0 7px 18px rgb(24 138 121 / 10%); }
 .sequence-shot:focus-visible { outline: 2px solid #39b9a5; outline-offset: 2px; }
 .sequence-shot.active .sequence-shot-index { border-color: #0f9f8f; color: #fff; background: #0f9f8f; }
-.sequence-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 38px; align-items: center; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid #dce8e5; }
-.sequence-eyebrow { display: flex; align-items: center; gap: 6px; margin: 0 0 7px; color: var(--creator-accent-strong); font-size: 8px; font-weight: 850; }
+.sequence-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 36px; align-items: center; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid #dce8e5; }
+.sequence-eyebrow { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: .04em; }
 .sequence-eyebrow i { width: 7px; height: 7px; border-radius: 50%; background: #39d6bd; box-shadow: 0 0 0 4px #e0faf5; }
-.sequence-header h2 { display: flex; align-items: center; gap: 10px; margin: 0; color: #1f2d3d; font-size: 16px; font-weight: 780; }
-.sequence-header h2 span { display: inline-flex; min-height: 28px; align-items: center; padding: 0 10px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
-.sequence-header > div:first-child > p:last-child { margin: 5px 0 0; color: #8a98aa; font-size: 9px; }
+.sequence-header h2 { display: flex; align-items: center; gap: 10px; margin: 0; color: #1f2d3d; font-size: 16px; font-weight: 750; }
+.sequence-header h2 span { display: inline-flex; min-height: 24px; align-items: center; padding: 0 8px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 11px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.sequence-header > div:first-child > p:last-child { margin: 4px 0 0; color: #8a98aa; font-size: 12px; }
 .sequence-header dl { display: flex; margin: 0; }
-.sequence-header dl > div { min-width: 76px; padding: 0 15px; border-left: 1px solid #dae5e3; }
-.sequence-header dt { color: #91a0b2; font-size: 8px; }
-.sequence-header dd { margin: 5px 0 0; color: #273548; font-size: 12px; font-weight: 750; font-variant-numeric: tabular-nums; }
-.sequence-add { display: grid; place-items: center; width: 38px; height: 38px; border: 1px solid #92e3d5; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #edfcf9; }
-.sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 8px; color: #8fa0b4; font-size: 8px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.sequence-header dl > div { min-width: 76px; padding: 0 16px; border-left: 1px solid #dae5e3; }
+.sequence-header dt { color: #91a0b2; font-size: 10px; }
+.sequence-header dd { margin: 4px 0 0; color: #273548; font-size: 14px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.sequence-add { display: grid; place-items: center; width: 36px; height: 36px; border: 1px solid #92e3d5; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #edfcf9; }
+.sequence-ruler { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 8px; margin: 12px 0 10px; color: #8fa0b4; font-size: 10px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .sequence-ruler i { height: 1px; background: repeating-linear-gradient(90deg, #b9d6d1 0 1px, transparent 1px 22%); border-bottom: 1px solid #d4e3e0; }
-.sequence-track { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 2px 2px 8px; }
-.sequence-shot { position: relative; display: grid; grid-template-columns: 76px minmax(0, 1fr); width: 100%; gap: 10px; min-height: 132px; padding: 10px 9px 9px 50px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius-large); background: #fff; }
-.sequence-shot::before { position: absolute; top: 39px; bottom: 10px; left: 28px; width: 1px; background: #d9e8e5; content: ''; }
-.sequence-shot-index { position: absolute; top: 10px; left: 13px; display: grid; place-items: center; width: 29px; height: 24px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 9px; font-weight: 800; }
-.sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 88px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
+/* Two cards per row only when each still has room for a readable description. */
+.sequence-track { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; padding: 2px 2px 8px; }
+.sequence-shot { position: relative; display: grid; grid-template-columns: 84px minmax(0, 1fr); width: 100%; gap: 12px; min-height: 136px; padding: 12px 12px 12px 52px; border: 1px solid #d6e3e1; border-radius: var(--creator-radius-large); background: #fff; }
+.sequence-shot::before { position: absolute; top: 42px; bottom: 12px; left: 27px; width: 1px; background: #d9e8e5; content: ''; }
+.sequence-shot-index { position: absolute; top: 12px; left: 12px; display: grid; place-items: center; width: 30px; height: 24px; border: 1px solid #b9e1da; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #effbf8; font-size: 11px; font-weight: 800; }
+.sequence-shot-preview { position: relative; display: grid; place-items: center; min-height: 100px; overflow: hidden; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: linear-gradient(135deg, #e8f6f3, #f7fbfa); }
 .sequence-shot-preview::before { position: absolute; top: 11px; left: 10px; width: 38px; height: 15px; border-top: 1px solid #bddbd5; border-left: 1px solid #bddbd5; transform: skewX(-28deg); content: ''; }
-.sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 34px; height: 34px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
-.sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 7px; font-weight: 750; font-variant-numeric: tabular-nums; }
-.sequence-shot-content { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
-.sequence-shot-content > header { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; min-height: 24px; }
-.sequence-shot-content > header > strong { color: #64748b; font-size: 8px; }
-.sequence-shot-content > header > span { display: flex; align-items: center; gap: 3px; color: #91a0b2; font-size: 7px; }
+.sequence-shot-preview > span { position: relative; display: grid; z-index: 1; place-items: center; width: 36px; height: 36px; border: 1px solid #73dac9; border-radius: 50%; background: #dff9f4; }
+.sequence-shot-preview small { position: absolute; right: 7px; bottom: 6px; color: #68867f; font-size: 10px; font-weight: 750; font-variant-numeric: tabular-nums; }
+.sequence-shot-content { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.sequence-shot-content > header { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 24px; }
+.sequence-shot-content > header > strong { color: #64748b; font-size: 11px; letter-spacing: .03em; }
+.sequence-shot-content > header > span { display: flex; align-items: center; gap: 4px; color: #91a0b2; font-size: 10px; }
 .sequence-shot-content > header > span i { width: 5px; height: 5px; border-radius: 50%; background: #c4d0d8; }
 .sequence-shot-content > header > div { display: flex; gap: 1px; margin-left: auto; }
-.sequence-shot-content > header button { display: grid; place-items: center; width: 21px; height: 21px; border-radius: var(--creator-radius-small); color: #718096; }
+.sequence-shot-content > header button { display: grid; place-items: center; width: 24px; height: 24px; border-radius: var(--creator-radius-small); color: #718096; }
 .sequence-shot-content > header button:hover:not(:disabled) { color: var(--creator-accent-strong); background: #eff9f7; }
 .sequence-shot-content > header button:disabled { opacity: .25; }
-.sequence-shot-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; flex: none; margin: 0; padding: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #344054; font-size: 10px; line-height: 1.5; }
+.sequence-shot-prompt { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; flex: none; margin: 0; padding: 0; overflow: hidden; white-space: pre-wrap; overflow-wrap: anywhere; color: #344054; font-size: 12px; line-height: 1.6; }
 .sequence-shot-prompt.empty { color: #a7b3c0; }
-.sequence-shot-content footer { display: flex; flex-shrink: 0; margin-top: auto; flex-wrap: wrap; align-items: center; gap: 4px; }
-.sequence-shot-content footer > span { padding: 3px 5px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius-small); color: #607b76; background: #f5faf9; font-size: 7px; }
-.sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 9px; font-weight: 700; }
-.sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 11px; padding-top: 11px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 8px; }
+.sequence-shot-content footer { display: flex; flex-shrink: 0; margin-top: auto; flex-wrap: wrap; align-items: center; gap: 5px; }
+.sequence-shot-content footer > span { padding: 2px 7px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius-small); color: #607b76; background: #f5faf9; font-size: 10px; }
+.sequence-inline-add { display: flex; grid-column: 1 / -1; width: 100%; min-height: 52px; align-items: center; justify-content: center; gap: 7px; border: 1px dashed #9ccfc6; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #f3fbf9; font-size: 12px; font-weight: 700; }
+.sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 11px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
-.sequence-footer strong { color: #6f8092; font-size: 8px; }
+.sequence-footer strong { color: #6f8092; font-size: 11px; }
 .sequence-footer strong.invalid { color: #c9463b; }
 
 .settings-panel {
@@ -4582,13 +5626,7 @@ onBeforeUnmount(() => {
 .capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: var(--creator-radius-large); background: #eff5f4; }
 .capability-switch button { min-height: 45px; border-radius: var(--creator-radius); color: #6e7e93; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .capability-switch button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 3px 12px rgb(26 76 70 / 9%); }
-.online-dot { display: inline-block; width: 7px; height: 7px; margin-left: 4px; border-radius: 50%; background: #0db884; }
-.video-capability-card { display: flex; align-items: center; gap: 11px; min-height: 62px; margin-bottom: 18px; padding: 9px 12px; border: 1px solid #9ee6da; border-radius: var(--creator-radius); background: #f2fcf9; }
-.video-capability-icon { display: grid; flex: 0 0 36px; place-items: center; width: 36px; height: 36px; border-radius: var(--creator-radius-small); color: var(--creator-accent-strong); background: #cff8ef; }
-.video-capability-card strong,
-.video-capability-card small { display: block; }
-.video-capability-card strong { color: #263548; font-size: 13px; font-weight: 750; }
-.video-capability-card small { margin-top: 4px; color: #7f8da0; font-size: 10px; }
+.capability-switch button:disabled { color: #b4c0cc; cursor: not-allowed; }
 .field-block { margin-bottom: 16px; }
 .field-block > label,
 .field-row label { display: block; margin-bottom: 7px; color: #4b5b70; font-size: 12px; font-weight: 750; }
@@ -4619,7 +5657,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-resolution-grid button { min-height: 50px; border: 1px solid #d8e2e1; border-radius: var(--creator-radius); color: #65758a; background: #fff; font-size: 14px; font-weight: 800; transition: 150ms ease; }
 .image-resolution-grid button.active { border-color: #3ad5c0; color: #087f74; background: #effbf8; }
 .image-ratio-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; }
-.video-ratio-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .video-aspect-source-hint { margin: -2px 0 10px; color: var(--creator-accent-strong); }
 .image-ratio-grid button { display: grid; min-height: 80px; place-items: center; align-content: center; gap: 7px; border: 1px solid #d8e2e8; border-radius: var(--creator-radius); color: #66768c; background: #fff; font-size: 12px; font-weight: 750; transition: 150ms ease; }
 .image-ratio-grid button:disabled { opacity: .4; cursor: not-allowed; }
@@ -4723,6 +5760,12 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .stepper button:last-child { border-left: 1px solid #e0e6eb; }
 .stepper button:disabled { color: #c2cbd5; }
 .stepper strong { flex: 1; text-align: center; color: #455267; font-size: 13px; }
+.stepper-value { display: flex; flex: 1; align-self: stretch; align-items: center; justify-content: center; gap: .3em; min-width: 0; color: #455267; font-size: 13px; font-weight: 700; cursor: text; transition: background-color .15s; }
+.stepper-value:hover,
+.stepper-value:focus-within { background: #f7f9fb; }
+.stepper-value input { width: 2ch; min-width: 1ch; padding: 0; border: 0; color: inherit; font: inherit; font-variant-numeric: tabular-nums; text-align: center; background: transparent; outline: none; appearance: textfield; -moz-appearance: textfield; }
+.stepper-value input::-webkit-inner-spin-button,
+.stepper-value input::-webkit-outer-spin-button { margin: 0; -webkit-appearance: none; }
 .toggle-row { position: relative; justify-content: space-between; gap: 12px; margin-bottom: 16px; padding: 12px; border: 1px solid #dbe5e3; border-radius: var(--creator-radius-large); background: #f8fbfa; cursor: pointer; }
 .toggle-row.wide { grid-column: 1 / -1; margin: 0; }
 .toggle-row span { min-width: 0; }
@@ -4753,23 +5796,83 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .settings-heading > svg { width: 16px; height: 16px; }
 
 .modal-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 58%); backdrop-filter: blur(5px); }
-.image-preview { z-index: 80; background: rgb(15 23 42 / 80%); }
-.image-preview-content { --creator-image-background: transparent; --creator-image-text: #dce8e5; width: calc(100vw - 48px); height: calc(100dvh - 96px); max-width: 1600px; border-radius: var(--creator-radius-large); }
-.preview-close { position: fixed; top: 18px; right: 18px; border-color: rgb(255 255 255 / 30%); color: #fff; background: rgb(17 24 39 / 75%); }
+/* The bottom band is reserved for the action buttons: 16px below them, 36px button, 16px above.
+   The top gets the same band so the image stays vertically centred. */
+.image-preview {
+  --preview-actions-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  --preview-actions-reserve: calc(var(--preview-actions-bottom) + 52px);
+  z-index: 80;
+  background: rgb(15 23 42 / 80%);
+}
+.modal-backdrop.image-preview { padding: var(--preview-actions-reserve) 24px; }
+.image-preview-content { --creator-image-background: transparent; --creator-image-text: #dce8e5; width: calc(100vw - 48px); height: calc(100dvh - 2 * var(--preview-actions-reserve)); max-width: 1600px; border-radius: var(--creator-radius-large); }
+.preview-close { position: fixed; z-index: 1; top: 18px; right: 18px; border-color: rgb(255 255 255 / 30%); color: #fff; background: rgb(17 24 39 / 75%); }
+.preview-nav {
+  position: fixed;
+  z-index: 1;
+  top: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border: 1px solid rgb(255 255 255 / 25%);
+  border-radius: 50%;
+  color: #fff;
+  background: rgb(17 24 39 / 65%);
+  cursor: pointer;
+  transform: translateY(-50%);
+  transition: background-color 140ms ease, border-color 140ms ease;
+}
+.preview-nav:hover { border-color: rgb(255 255 255 / 45%); background: rgb(17 24 39 / 85%); }
+.preview-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+.preview-nav.is-prev { left: 18px; }
+.preview-nav.is-next { right: 18px; }
+/* Sits in the reserved band below the image. */
+.preview-actions { position: fixed; z-index: 1; bottom: var(--preview-actions-bottom); left: 50%; display: flex; gap: 10px; transform: translateX(-50%); }
+.preview-action { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 16px; border: 1px solid rgb(255 255 255 / 25%); border-radius: var(--creator-radius); color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; background: rgb(17 24 39 / 65%); }
+.preview-action:disabled { cursor: wait; opacity: .6; }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
-@keyframes creatorPulse { 50% { transform: scale(1.04); box-shadow: 0 0 0 12px rgb(41 185 164 / 6%); } }
+@keyframes creatorShimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@keyframes creatorAurora { from { opacity: .7; transform: translateX(-50%) scale(.96); } to { opacity: 1; transform: translateX(-50%) scale(1.04); } }
+@keyframes creatorScan { from { background-position: 0 100%; } to { background-position: 0 0; } }
+@keyframes creatorFrameIn { from { opacity: 0; transform: scale(.96); } }
 @keyframes creatorStatusPulse { to { opacity: .35; transform: scale(.92); } }
-@keyframes creatorProgress {
-  0% { transform: translateX(-105%); }
-  50% { transform: translateX(95%); }
-  100% { transform: translateX(295%); }
+/* 头部 = u + s·u(1-u)，尾部 = u - s·u(1-u)：两端都只向右走，长度 200s·u(1-u)% 中段最长（长段 s=1 → 50%，短段 s=.5 → 25%），出右端时收成 0 */
+@keyframes creatorProgressLong {
+  0% { clip-path: inset(0 100% 0 0% round 999px); }
+  6% { clip-path: inset(0 81% 0 1% round 999px); }
+  12% { clip-path: inset(0 64% 0 4% round 999px); }
+  18% { clip-path: inset(0 49% 0 9% round 999px); }
+  24% { clip-path: inset(0 36% 0 16% round 999px); }
+  30% { clip-path: inset(0 25% 0 25% round 999px); }
+  36% { clip-path: inset(0 16% 0 36% round 999px); }
+  42% { clip-path: inset(0 9% 0 49% round 999px); }
+  48% { clip-path: inset(0 4% 0 64% round 999px); }
+  54% { clip-path: inset(0 1% 0 81% round 999px); }
+  60%, 100% { clip-path: inset(0 0% 0 100% round 999px); }
+}
+@keyframes creatorProgressShort {
+  0%, 60% { clip-path: inset(0 100% 0 0% round 999px); }
+  65% { clip-path: inset(0 82.03% 0 7.031% round 999px); }
+  70% { clip-path: inset(0 65.62% 0 15.62% round 999px); }
+  75% { clip-path: inset(0 50.78% 0 25.78% round 999px); }
+  80% { clip-path: inset(0 37.5% 0 37.5% round 999px); }
+  85% { clip-path: inset(0 25.78% 0 50.78% round 999px); }
+  90% { clip-path: inset(0 15.62% 0 65.62% round 999px); }
+  95% { clip-path: inset(0 7.031% 0 82.03% round 999px); }
+  100% { clip-path: inset(0 0% 0 100% round 999px); }
 }
 
 :global(.dark) .creator-studio { --creator-line: #30413f; color: #e7efed; }
 :global(.dark) .studio-toolbar,
 :global(.dark) .history-panel,
 :global(.dark) .settings-panel { background: #111b1a; }
+:global(.dark) .history-panel.is-drawer { color: #e7efed; }
+:global(.dark) .history-drawer-toggle { border-color: #344744; color: #c3cfcc; background: #172321; box-shadow: none; }
+:global(.dark) .history-drawer-toggle[aria-expanded="true"] { border-color: #39776d; color: #83ddd0; background: #172321; }
+:global(.dark) .history-drawer-toggle-live { border-color: #172321; }
 :global(.dark) .studio-grid { background: #0d1716; }
 :global(.dark) .studio-title,
 :global(.dark) .history-heading h2,
@@ -4783,12 +5886,10 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .mode-option.active,
 :global(.dark) .history-tabs button.active,
 :global(.dark) .capability-switch button.active { border-color: #3b514d; background: #263532; }
+:global(.dark) .capability-switch button:disabled { color: #4f625f; }
 :global(.dark) .mode-option-icon { border-color: #3c504d; color: #aab9b6; background: #1b2927; }
 :global(.dark) .mode-option-image.active .mode-option-icon { border-color: #39776d; color: #71d9c9; background: #18332f; }
 :global(.dark) .mode-option-video.active .mode-option-icon { border-color: #355f9e; color: #75a7ff; background: #172b49; }
-:global(.dark) .video-capability-card { border-color: #347a6f; background: #15302c; }
-:global(.dark) .video-capability-card strong { color: #e5efed; }
-:global(.dark) .video-capability-card small { color: #91a49f; }
 :global(.dark) .ready-status { border-color: #26745d; color: #71dab5; background: #142b24; }
 :global(.dark) .connection-action { color: #b8c7c4; }
 :global(.dark) .connection-action:hover { color: #7de0d1; background: #1b312e; box-shadow: inset 0 0 0 1px #35514c; }
@@ -4797,8 +5898,11 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .studio-input,
 :global(.dark) .stepper,
 :global(.dark) .stepper button { border-color: #354643; color: #c3cfcc; background: #172321; }
-:global(.dark) .playground-history-reopen-button { border-color: #354643; color: #9aafa9; background: #172321; }
-:global(.dark) .playground-history-reopen-button:hover { border-color: #354643; color: #83ddd0; background: #18332f; }
+:global(.dark) .stepper-value { color: #c3cfcc; }
+:global(.dark) .stepper-value:hover,
+:global(.dark) .stepper-value:focus-within { background: #1d2b29; }
+:global(.dark) .playground-history-reopen-button { border-color: #344744; color: #c3cfcc; background: #172321; box-shadow: none; }
+:global(.dark) .history-entry-icon { color: #71d9c9; background: #18332f; }
 :global(.dark) .studio-input { color: #ecf3f2; }
 :global(.dark) .image-size-mode-tabs,
 :global(.dark) .image-size-result { background: #172321; }
@@ -4813,8 +5917,30 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .history-item:hover,
 :global(.dark) .advanced-grid,
 :global(.dark) .toggle-row { background: #172321; }
-:global(.dark) .history-item { border-color: #354643; background: #131f1d; box-shadow: none; }
-:global(.dark) .history-item.active { border-color: #357f74; background: #17322e; }
+:global(.dark) .history-item { --history-item-bg: #131f1d; border-color: #354643; background: #131f1d; box-shadow: none; }
+:global(.dark) .history-item:hover { --history-item-bg: #172321; }
+:global(.dark) .history-item.active { --history-item-bg: #17322e; border-color: #357f74; background: #17322e; }
+:global(.dark) .history-item.generating { border-color: #357f74; }
+:global(.dark) .generation-frame { border-color: #2f4d48; background-image: linear-gradient(110deg, #16302c 30%, #1f3c37 50%, #16302c 70%); box-shadow: 0 14px 34px rgb(0 0 0 / 28%); }
+:global(.dark) .generation-frame.is-queued { border-color: #33504b; background: rgb(255 255 255 / 3%); }
+:global(.dark) .generation-frame-ring { color: #79dfd0; background: #17322e; }
+:global(.dark) .generation-frame-ring::before { border-color: #2c4a45; border-top-color: #79dfd0; border-right-color: #79dfd0; }
+:global(.dark) .generation-frame.is-failed { border-color: #5a3430; background: rgb(216 75 75 / 8%); }
+:global(.dark) .generation-frame-failed { color: #ff9a90; }
+:global(.dark) .generation-frame-action { border-color: rgb(255 255 255 / 12%); color: #79dfd0; background: rgb(19 31 29 / 92%); }
+:global(.dark) .partial-result-notice { border-color: #5b4724; color: #f0c06a; background: #2a2416; }
+:global(.dark) .partial-result-notice strong { color: #f6d39a; }
+:global(.dark) .partial-result-notice p { color: #c9ad7f; }
+:global(.dark) :global(.dark) .generation-tags { color: #8fa29e; }
+:global(.dark) .generation-tags li + li::before { color: #4a5f5b; }
+:global(.dark) .generation-progress-card { border-color: #30413f; background: rgb(19 31 29 / 80%); box-shadow: none; }
+:global(.dark) .progress-track { background: #213532; }
+:global(.dark) .generation-prompt { border-top-color: #273a37; color: #93a7a3; }
+:global(.dark) .result-description p.result-prompt { color: #93a7a3; }
+:global(.dark) .history-generating { background-image: linear-gradient(110deg, #1a2a27 30%, #223632 50%, #1a2a27 70%); }
+:global(.dark) .history-generating.has-preview { background: rgb(19 31 29 / 55%); }
+:global(.dark) .history-generating-ring { color: #79dfd0; background: #17322e; box-shadow: none; }
+:global(.dark) .history-generating-ring::before { border-color: #2c4a45; border-top-color: #79dfd0; }
 :global(.dark) .history-item-actions button:hover { background: #223431; }
 :global(.dark) .history-item-actions .history-delete:hover { color: #ff8a8a; background: #3a2424; }
 :global(.dark) .history-copy strong,
@@ -4829,15 +5955,16 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .result-card { border-color: #334642; background: #14211f; }
 :global(.dark) .professional-workspace,
 :global(.dark) .result-stat-grid article,
-:global(.dark) .result-parameter-details,
 :global(.dark) .sequence-shot { border-color: #334642; background: #14211f; }
 :global(.dark) .sequence-header h2,
 :global(.dark) .sequence-header dd,
 :global(.dark) .sequence-shot-prompt,
 :global(.dark) .result-stat-grid strong,
-:global(.dark) .result-parameter-details p { color: #dbe7e5; }
-:global(.dark) .result-stat-grid { border-color: #334642; background: #334642; }
+:global(.dark) .result-prompt-cell .full-prompt { color: #dbe7e5; }
+:global(.dark) .result-stat-grid { border-color: #334642; background: #14211f; }
+:global(.dark) .result-stat-grid article { box-shadow: 0 0 0 1px #334642; }
 :global(.dark) .result-actions { border-top-color: #2a3b38; }
+:global(.dark) .result-tags li { color: #a5bdb6; background: #1d302c; }
 :global(.dark) .sequence-header h2 span { border-color: #347a6f; color: #83ddd0; background: #15302c; }
 :global(.dark) .prompt-tool { background: #14211f; }
 :global(.dark) .prompt-tool > header { border-color: #334642; }
@@ -4863,45 +5990,100 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 @media (max-width: 1120px) {
   .studio-grid,
   .studio-grid.history-collapsed { grid-template-columns: minmax(0, 1fr) 350px; }
-  .history-panel { display: none; }
+  .history-panel:not(.is-drawer) { display: none; }
   .history-reopen { display: none; }
+  .history-drawer-toggle { display: inline-flex; }
+  /* Stretch to the mode switch's height so the two read as one row. */
+  .toolbar-actions { align-self: stretch; }
+  .history-drawer-toggle { align-self: stretch; }
   .studio-toolbar { grid-template-columns: 1fr auto; }
   .studio-title { display: none; }
   .mode-switch { justify-self: start; width: min(410px, 100%); }
 }
 
 @media (max-width: 800px) {
-  .creator-studio { height: auto; min-height: auto; overflow: visible; }
-  .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: block; padding: 8px; }
-  .mode-switch { width: 100%; }
-  .toolbar-actions { display: none; }
+  /* Match the settings panel's 16px inline padding stacked above the canvas. */
+  .creator-studio { --creator-workspace-gutter: 16px; --creator-workspace-width: calc(100% - 32px); height: auto; min-height: auto; overflow: visible; }
+  /* The settings panel follows directly below; keep the button's lower gap equal to the row gap above it. */
+  .generation-state { padding-bottom: 22px; }
+  .generation-stage { width: 100%; }
+  .generation-frame { flex: 1 1 0; width: auto; max-width: var(--generation-frame-mobile-max); }
+  .generation-progress-card { width: 100%; }
+  /* The card no longer clips (overflow: visible for sticky), so round the toolbar to match it. */
+  .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: flex; gap: 8px; align-items: stretch; padding: 8px; border-radius: var(--creator-surface-radius) var(--creator-surface-radius) 0 0; transition: border-radius 160ms ease; }
+  .studio-toolbar.is-stuck { border-radius: 0; }
+  .mode-switch { flex: 1 1 auto; min-width: 0; width: auto; }
+  /* Only the history entry stays; status and refresh live on wider layouts. */
+  .toolbar-actions { display: flex; flex: none; align-items: center; }
+  .toolbar-actions > :not(.history-drawer-toggle) { display: none; }
+  /* Phones get a bottom sheet instead of the side drawer. */
+  .history-panel.is-drawer {
+    top: auto;
+    right: 0;
+    width: auto;
+    height: min(80vh, 640px);
+    height: min(80dvh, 640px);
+    padding-bottom: env(safe-area-inset-bottom);
+    border-right: 0;
+    border-radius: 20px 20px 0 0;
+    transform: translateY(100%);
+  }
+  .history-drawer-handle { display: block; flex: none; width: 40px; height: 4px; margin: 10px auto 0; border-radius: 999px; background: #cfd9d8; }
+  .history-panel.is-drawer .history-heading { padding-top: 12px; }
+  /* Same inset as the tabs above so the cards line up with them on both sides. */
+  .history-panel.is-drawer .history-list { padding-inline: 16px; }
   .studio-grid,
   .studio-grid.history-collapsed { display: flex; flex: none; flex-direction: column; min-height: auto; overflow: visible; }
-  .settings-panel { order: 1; height: auto; border-bottom: 1px solid var(--creator-line); border-left: 0; }
-  .settings-scroll { height: auto; max-height: none; padding: 18px 16px 22px; scrollbar-gutter: auto; }
-  .canvas-panel { order: 2; height: auto; min-height: 610px; overflow: visible; }
+  /* Browse a brief or check the current result first, then configure and generate below. */
+  /* Fallback only: revealSettingsOnMobile sets the measured toolbar offset inline. */
+  /* Bottom of the unclipped card, so it carries the card's lower corners like the toolbar does the upper ones. */
+  .settings-panel { order: 2; height: auto; border-top: 1px solid var(--creator-line); border-left: 0; border-radius: 0 0 var(--creator-surface-radius) var(--creator-surface-radius); scroll-margin-top: 136px; }
+  /* Not a scroll container on mobile: with overscroll-behavior: contain it would swallow page swipes. */
+  .settings-scroll { height: auto; max-height: none; overflow: visible; overscroll-behavior: auto; padding: 18px 16px 22px; scrollbar-gutter: auto; }
+  /* Size to content: a fixed floor leaves a blank band above the settings when the result is short.
+     The scroll margin clears the sticky site header (64px) and studio toolbar when scrolled into view. */
+  .canvas-panel { order: 1; height: auto; min-height: 0; overflow: visible; scroll-margin-top: 136px; }
   .inspiration-workspace { padding-top: 30px; }
   .professional-workspace { margin-top: 16px; padding: 13px; }
-  .sequence-header { grid-template-columns: minmax(0, 1fr) 38px; }
+  .sequence-header { grid-template-columns: minmax(0, 1fr) 36px; }
   .sequence-header dl { display: none; }
   .sequence-track { grid-template-columns: minmax(0, 1fr); }
   .sequence-shot { width: 100%; }
-  .brief-stage { height: 460px; }
-  .brief-body { grid-template-columns: minmax(0, 1fr); grid-template-rows: 172px minmax(0, 1fr); }
-  .brief-summary { padding: 0 0 18px; border-right: 0; border-bottom: 1px solid #33423f; }
-  .brief-copy { padding: 18px 0 0; }
+  /* The stage follows each brief's height (measured in script) so short briefs leave no gap. */
+  .brief-stage { height: var(--brief-stage-height, auto); transition: height 220ms ease; }
+  .brief-body { --brief-body-pad-block: 20px; grid-template-columns: minmax(0, 1fr); height: auto; padding: var(--brief-body-pad-block) 24px; }
+  .brief-summary { padding: 0 0 16px; border-right: 0; border-bottom: 1px solid #33423f; }
+  .brief-summary h3 { margin: 12px 0 4px; font-size: 24px; }
+  .brief-summary small { display: none; }
+  .brief-copy { padding: 16px 0 0; }
+  /* The margin plus the line's half-leading (~5px) matches the card padding below the button. */
+  .brief-copy p { flex: 0 1 auto; margin: 10px 0 calc(var(--brief-body-pad-block) - 5px); }
+  /* The scroller's bottom edge rarely lands on a line boundary; fade the cut line out while more text is below. */
+  .brief-copy p.is-clipped {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
+  }
+  .brief-copy button { align-self: stretch; justify-content: center; min-height: 44px; }
+  .brief-topline button { width: 36px; height: 36px; }
+  /* The topline already shows the position; avoid a second counter. */
+  .brief-position { display: none; }
+  .brief-navigation { min-height: 52px; }
+  .quick-templates { margin-top: 18px; }
+  .quick-templates-list { display: flex; gap: 8px; margin-inline: calc(-1 * var(--creator-workspace-gutter)); padding: 2px var(--creator-workspace-gutter) 4px; overflow-x: auto; scroll-padding-inline: var(--creator-workspace-gutter); scroll-snap-type: x proximity; scrollbar-width: none; overscroll-behavior-x: contain; }
+  .quick-templates-list::-webkit-scrollbar { display: none; }
+  .quick-templates-list button { flex: 0 0 auto; min-width: 124px; scroll-snap-align: start; }
   .result-grid { grid-template-columns: 1fr; }
   .complete-video-card > header { align-items: flex-start; flex-direction: column; gap: 10px; }
   .complete-video-card > footer { align-items: flex-start; flex-direction: column; }
   .result-media { height: clamp(280px, 62vh, 460px); }
   .result-media.landscape { height: auto; }
   .result-media.fitted { height: auto; max-height: clamp(280px, 62vh, 460px); }
-  .result-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 480px) {
   .mode-option { min-height: 40px; }
   .mode-option span { font-size: 11px; }
+  .history-entry-surface { gap: 8px; padding-right: 12px; }
   .two-column-fields,
   .advanced-grid { grid-template-columns: 1fr; }
   .video-params-result { flex-direction: column; align-items: flex-start; }
@@ -4914,23 +6096,23 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .image-size-confirm { min-width: 0; flex: 1; }
   .toggle-row.wide { grid-column: auto; }
   .featured-brief { margin-top: 18px; }
-  .brief-topline { margin: 0 14px; }
-  .brief-body { padding: 18px 14px; }
-  .brief-summary h3 { font-size: 23px; }
-  .quick-templates { display: none; }
+  .brief-summary h3 { font-size: 22px; }
   .sequence-footer { align-items: flex-start; flex-direction: column; }
-  .canvas-footnote { margin-right: 12px; margin-left: 12px; }
   .modal-backdrop { padding: 10px; }
 }
 
 @media (hover: none) {
-  .history-item-actions { opacity: 1; pointer-events: auto; }
+  /* No hover on touch: keep delete reachable but quiet so it doesn't compete with the title. */
+  .history-item-actions { opacity: .55; pointer-events: auto; }
+  .history-item.active .history-item-actions { opacity: .8; }
 }
 .image-cost-preview { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 8px; padding: 14px 2px 4px; border-top: 1px solid #e8eeed; }
 .image-cost-copy { min-width: 0; }
 .image-cost-label { color: #53647a; font-size: 12px; font-weight: 600; }
 .image-cost-copy p { margin: 4px 0 0; color: #8b98aa; font-size: 11px; line-height: 1.5; }
-.video-duration-estimate { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 16px 0 0; padding: 0 13px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-large); background: #f8fcfb; }
+.video-summary { margin-top: 16px; padding-top: 16px; border-top: 1px solid #e8eeed; }
+.video-summary .video-cost-preview { margin-top: 8px; padding-top: 6px; border-top: 0; }
+.video-duration-estimate { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; padding: 0 13px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-large); background: #f8fcfb; }
 .video-duration-estimate span { color: #65758a; font-size: 12px; font-weight: 700; }
 .video-duration-estimate strong { margin-left: 5px; color: var(--creator-accent-strong); font-size: 14px; }
 .video-duration-estimate small { overflow: hidden; color: #8c9bae; font-size: 10px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -4940,7 +6122,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .image-cost-total.is-status strong { color: #8b98aa; font-size: 12px; font-weight: 500; letter-spacing: 0; }
 .image-price-retry { margin-top: 4px; color: var(--creator-accent-strong); font-size: 11px; text-decoration: underline; text-underline-offset: 3px; }
 .image-tier-price { display: block; margin-top: 4px; font-size: 11px; font-weight: 500; }
-:global(.dark) .image-cost-preview { border-color: #2c3e42; }
+:global(.dark) .image-cost-preview,
+:global(.dark) .video-summary { border-color: #2c3e42; }
 :global(.dark) .image-cost-label { color: #b6c3ce; }
 :global(.dark) .image-cost-total strong { color: #e2ecef; }
 :global(.dark) .image-cost-total.is-status strong { color: #8b98aa; }

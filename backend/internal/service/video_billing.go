@@ -103,12 +103,12 @@ func NormalizeVideoModelPrices(in map[string]map[string]float64) map[string]map[
 			if price < 0 {
 				continue
 			}
-			if family == MiniMaxH3PriceFamily {
+			if family == MiniMaxH3PriceFamily || family == SeedanceVideoPriceFamily {
 				if math.IsNaN(price) || math.IsInf(price, 0) {
 					continue
 				}
 				key := strings.ToLower(strings.TrimSpace(tierKey))
-				if _, ok := miniMaxH3RequestSeconds(key); ok || key == MiniMaxH3PerSecond {
+				if family == MiniMaxH3PriceFamily && validMiniMaxH3TariffKey(key) || family == SeedanceVideoPriceFamily && validSeedanceVideoTariffKey(key) {
 					normalizedTiers[key] = price
 				}
 				continue

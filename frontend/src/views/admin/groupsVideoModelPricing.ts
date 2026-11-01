@@ -66,8 +66,11 @@ export function serializeVideoModelPrices(form: VideoModelPricesForm): VideoMode
   return result
 }
 
+// Relay families price model IDs, not resolutions, and have their own forms.
+const relayPriceFamilies = ['seedance', 'minimax-h3']
+
 export function videoModelPriceFamilyRows(form: VideoModelPricesForm) {
-  const known = new Set<string>(grokVideoPriceFamilies.map(({ key }) => key))
+  const known = new Set<string>([...grokVideoPriceFamilies.map(({ key }) => key), ...relayPriceFamilies])
   const extra = Object.keys(form)
     .map(normalizeFamily)
     .filter((family) => family && !known.has(family))

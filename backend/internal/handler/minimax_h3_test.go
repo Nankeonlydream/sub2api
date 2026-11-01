@@ -24,9 +24,9 @@ func TestMiniMaxH3GroupGateAndLookupOwnership(t *testing.T) {
 			key, _ := middleware.GetAPIKeyFromContext(c)
 			key.Group.Platform = service.PlatformMiniMax
 			key.Group.AllowImageGeneration = false // video has its own switch
-			key.Group.VideoModelPrices = map[string]map[string]float64{service.MiniMaxH3PriceFamily: {"request_1s": 0.02}}
+			key.Group.VideoModelPrices = map[string]map[string]float64{service.MiniMaxH3PriceFamily: {"request_10s": 0.02}}
 			key.Group.RateMultiplier = 0.1
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"MiniMax-H3","prompt":"waves","seconds":"1"}`))
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"Minimax-H3-768p-933-10s","prompt":"waves"}`))
 			c.Request.Header.Set("Content-Type", "application/json")
 			upstream.call = func(req *http.Request, _ int64) (*http.Response, error) {
 				if scenario == "upstream unavailable" {
@@ -40,7 +40,7 @@ func TestMiniMaxH3GroupGateAndLookupOwnership(t *testing.T) {
 				key.Group.VideoModelPrices = nil
 				want, calls = http.StatusBadRequest, 0
 			case "wrong duration":
-				key.Group.VideoModelPrices[service.MiniMaxH3PriceFamily] = map[string]float64{"request_5s": 0.08}
+				key.Group.VideoModelPrices[service.MiniMaxH3PriceFamily] = map[string]float64{"request_15s": 0.08}
 				want, calls = http.StatusBadRequest, 0
 			case "wrong content type":
 				c.Request.Header.Set("Content-Type", "multipart/form-data")
@@ -69,7 +69,7 @@ func TestMiniMaxH3GroupGateAndLookupOwnership(t *testing.T) {
 				require.NoError(t, err)
 				require.NotNil(t, pending)
 				require.InDelta(t, 0.02, *pending.MiniMaxH3BaseCost, 1e-9)
-				require.Equal(t, 1, pending.VideoDurationSeconds)
+				require.Equal(t, 10, pending.VideoDurationSeconds)
 				require.Greater(t, bindings.writes, 0)
 			}
 		})
@@ -84,7 +84,7 @@ func TestMiniMaxH3CompletionBillsRequestedSecondsOnce(t *testing.T) {
 	taskID := service.MiniMaxH3TaskKey("task")
 	base := 0.02
 	pending := service.GrokVideoPendingBilling{
-		Model: "video-alias", BillingModel: "video-alias", UpstreamModel: "MiniMax-H3",
+		Model: "video-alias", BillingModel: "video-alias", UpstreamModel: "Minimax-H3-768p-933-10s",
 		VideoResolution: "768p", VideoDurationSeconds: 1, MiniMaxH3BaseCost: &base,
 	}
 	require.NoError(t, h.gatewayService.StoreGrokVideoPendingBilling(context.Background(), taskID, subject.UserID, key.ID, pending))
@@ -92,17 +92,17 @@ func TestMiniMaxH3CompletionBillsRequestedSecondsOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "768p", loaded.VideoResolution)
 	queued := &service.OpenAIForwardResult{ResponseID: taskID}
-	require.Nil(t, prepareMiniMaxH3CompletionBilling(context.Background(), h, key, subject, taskID, queued))
+	require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, queued))
 	completed := &service.OpenAIForwardResult{ResponseID: taskID, VideoCount: 1, VideoDurationSeconds: 15}
 	foreign := subject
 	foreign.UserID++
-	require.Nil(t, prepareMiniMaxH3CompletionBilling(context.Background(), h, key, foreign, taskID, completed))
-	result := prepareMiniMaxH3CompletionBilling(context.Background(), h, key, subject, taskID, completed)
+	require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, foreign, taskID, completed))
+	result := prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, completed)
 	require.NotNil(t, result)
 	require.Equal(t, 1, result.VideoDurationSeconds, "bill requested seconds, not upstream response or MP4 length")
 	require.Equal(t, "768p", result.VideoResolution)
 	require.Equal(t, base, *result.MiniMaxH3BaseCost)
 	require.Equal(t, "video-alias", result.BillingModel)
-	require.Nil(t, prepareMiniMaxH3CompletionBilling(context.Background(), h, key, subject, taskID, completed))
+	require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, completed))
 	require.NotEqual(t, service.StableGrokVideoBillingRequestID("task"), result.RequestID)
 }

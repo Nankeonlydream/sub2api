@@ -1,14 +1,41 @@
 import { flushPromises, mount } from '@vue/test-utils'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CreatorVideoThumbnail from '../CreatorVideoThumbnail.vue'
-import { getCreatorVideoThumbnail } from '@/services/creatorVideoThumbnail'
+import { getCreatorVideoThumbnail, isBlankCreatorVideoThumbnail } from '@/services/creatorVideoThumbnail'
 
-vi.mock('@/services/creatorVideoThumbnail', () => ({ getCreatorVideoThumbnail: vi.fn() }))
+vi.mock('@/services/creatorVideoThumbnail', () => ({ getCreatorVideoThumbnail: vi.fn(), isBlankCreatorVideoThumbnail: vi.fn() }))
 
 describe('CreatorVideoThumbnail', () => {
   beforeEach(() => {
     vi.stubGlobal('IntersectionObserver', undefined)
     vi.mocked(getCreatorVideoThumbnail).mockReset().mockResolvedValue('data:image/webp;base64,cover')
+    vi.mocked(isBlankCreatorVideoThumbnail).mockReset().mockReturnValue(false)
+  })
+
+  it('recaptures a saved cover that decodes as a blank frame and emits the replacement', async () => {
+    vi.mocked(isBlankCreatorVideoThumbnail).mockReturnValueOnce(true)
+    const blob = new Blob(['video'], { type: 'video/mp4' })
+    const wrapper = mount(CreatorVideoThumbnail, { props: { cacheKey: 'blank', videoBlob: blob, thumbnail: 'data:image/webp;base64,blank' } })
+    await flushPromises()
+    await wrapper.get('img').trigger('load')
+    await flushPromises()
+    expect(wrapper.find('.video-thumbnail-play').exists()).toBe(false)
+    expect(getCreatorVideoThumbnail).toHaveBeenCalledWith('blank', blob, expect.any(AbortSignal))
+    expect(wrapper.emitted('ready')?.[0]).toEqual(['data:image/webp;base64,cover'])
+    expect(wrapper.get('img').attributes('src')).toBe('data:image/webp;base64,cover')
+    wrapper.unmount()
+  })
+
+  it('retries a failed extraction when the tab becomes visible again', async () => {
+    vi.mocked(getCreatorVideoThumbnail).mockResolvedValueOnce('')
+    const wrapper = mount(CreatorVideoThumbnail, { props: { cacheKey: 'retry', src: '/video.mp4' } })
+    await flushPromises()
+    expect(wrapper.find('.video-thumbnail-placeholder').classes()).not.toContain('is-loading')
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(getCreatorVideoThumbnail).toHaveBeenCalledTimes(2)
+    expect(wrapper.emitted('ready')?.[0]).toEqual(['data:image/webp;base64,cover'])
+    wrapper.unmount()
   })
   afterEach(() => vi.unstubAllGlobals())
 

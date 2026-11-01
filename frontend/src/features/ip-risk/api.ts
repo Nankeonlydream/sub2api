@@ -3,8 +3,10 @@ import { apiClient } from '@/api/client'
 export interface IPThreshold { limit: number; window_seconds: number }
 export interface IPBlockRule { network: string; note: string; enabled: boolean; expires_at: number }
 export interface AnonymousAPIConfig { enabled: boolean; threshold: number; window_seconds: number; ban_seconds: number; max_tracked_ips: number; reset_on_success: boolean }
+export interface MultiAccountConfig { enabled: boolean; observe_only: boolean; ip_limit: number; subnet_limit: number; window_seconds: number; revoke_sessions: boolean; notify_admin: boolean }
 export interface IPRiskConfig {
   anonymous_api: AnonymousAPIConfig
+  multi_account: MultiAccountConfig
   enabled: boolean
   observe_only: boolean
   whitelist: string[]
@@ -39,6 +41,7 @@ export interface IPRiskEvent {
   reason: string
   error_reason: string
   decision: string
+  user_ids?: number[]
 }
 export interface IPBan { network: string; reason: string; created_at: number; expires_at: number; observe_only: boolean }
 export interface IPRiskSnapshot {

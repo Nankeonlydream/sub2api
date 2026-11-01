@@ -138,9 +138,21 @@ func RegisterGatewayRoutes(
 			})
 		}
 	}
-	videoGenerationHandler := func(c *gin.Context) {
-		if getGroupPlatform(c) == service.PlatformMiniMax {
+	// Video relays serve MiniMax-H3 from MiniMax groups and Seedance from
+	// DeepSeek groups through the same JSON OpenAI Videos API.
+	relayVideos := func(c *gin.Context) bool {
+		switch getGroupPlatform(c) {
+		case service.PlatformMiniMax:
 			h.OpenAIGateway.MiniMaxH3Videos(c)
+		case service.PlatformDeepseek:
+			h.OpenAIGateway.SeedanceVideos(c)
+		default:
+			return false
+		}
+		return true
+	}
+	videoGenerationHandler := func(c *gin.Context) {
+		if relayVideos(c) {
 			return
 		}
 		// Video status/content lookups below already allow Composite groups; keep
@@ -159,8 +171,7 @@ func RegisterGatewayRoutes(
 		})
 	}
 	videoStatusHandler := func(c *gin.Context) {
-		if getGroupPlatform(c) == service.PlatformMiniMax {
-			h.OpenAIGateway.MiniMaxH3Videos(c)
+		if relayVideos(c) {
 			return
 		}
 		// Video status requests do not carry a model, so composite groups cannot
@@ -179,8 +190,7 @@ func RegisterGatewayRoutes(
 		})
 	}
 	videoContentHandler := func(c *gin.Context) {
-		if getGroupPlatform(c) == service.PlatformMiniMax {
-			h.OpenAIGateway.MiniMaxH3Videos(c)
+		if relayVideos(c) {
 			return
 		}
 		// Video content requests do not carry a model, so composite groups cannot

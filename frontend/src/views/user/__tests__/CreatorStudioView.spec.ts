@@ -1,10 +1,10 @@
 import { config, flushPromises, mount } from '@vue/test-utils'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import type { ApiKey, Group } from '@/types'
 import BaseDialog from '@/components/common/BaseDialog.vue'
 import CreatorStudioView from '../CreatorStudioView.vue'
 import StudioRouteCache from '@/components/common/StudioRouteCache.vue'
-import { defineComponent, h, ref } from 'vue'
+import { defineComponent, h, nextTick, ref } from 'vue'
 
 config.global.stubs = { teleport: true, transition: true }
 
@@ -178,6 +178,12 @@ function videoParamsDialog(wrapper: StudioWrapper) {
   return wrapper.findAllComponents(BaseDialog).find(dialog => dialog.props('title') === '设置视频参数')!
 }
 
+async function openGrokVideo(wrapper: StudioWrapper) {
+  await wrapper.findAll('.mode-option')[1].trigger('click')
+  await flushPromises()
+  await wrapper.findAll('.video-capability-switch button').find(button => button.text() === 'Grok 视频')!.trigger('click')
+}
+
 async function setVideoParams(wrapper: StudioWrapper, params: { ratio?: string, resolution?: string }) {
   await wrapper.get('#video-params').trigger('click')
   const dialog = videoParamsDialog(wrapper)
@@ -192,6 +198,25 @@ async function videoResolutionChoices(wrapper: StudioWrapper) {
   const choices = dialog.findAll('.image-resolution-grid button').map(button => button.attributes('data-resolution'))
   await dialog.get('.image-size-cancel').trigger('click')
   return choices
+}
+
+// The global setup matches every media query; evaluate max-width queries against a chosen width instead.
+function mockViewportWidth(width: number) {
+  const original = window.matchMedia
+  window.matchMedia = ((query: string) => {
+    const maxWidth = Number(/max-width:\s*(\d+)px/.exec(query)?.[1])
+    return {
+      matches: Number.isFinite(maxWidth) ? width <= maxWidth : true,
+      media: query,
+      onchange: null,
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }
+  }) as unknown as typeof window.matchMedia
+  return () => { window.matchMedia = original }
 }
 
 describe('CreatorStudioView', () => {
@@ -379,9 +404,9 @@ describe('CreatorStudioView', () => {
     await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
 
-    expect(wrapper.findAll('.capability-switch .online-dot')).toHaveLength(3)
+    expect(wrapper.findAll('.capability-switch .online-dot')).toHaveLength(0)
     expect(wrapper.findAll('.capability-switch button').map(button => button.text().trim())).toEqual([
-      'Image2 生图',
+      'Image 生图',
       'Grok 生图',
       'Banner 生图',
     ])
@@ -538,6 +563,87 @@ describe('CreatorStudioView', () => {
     }))
   })
 
+  it('requests one Banana image per call until the requested count is filled', async () => {
+    listGroups.mockResolvedValue([bananaGroup])
+    listKeys.mockResolvedValue({ items: [bananaKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gemini-3.1-flash-image' }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[2].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('Banana 多张图片')
+    await wrapper.get('button[title="增加数量"]').trigger('click')
+    await wrapper.get('button[title="增加数量"]').trigger('click')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(generateImage).toHaveBeenCalledTimes(3)
+    expect(generateImage.mock.calls.every(call => call[1].protocol === 'gemini' && call[1].n === 1)).toBe(true)
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ outputCount: 3 }))
+    expect(putHistory.mock.calls.at(-1)?.[0].outputs).toHaveLength(3)
+    wrapper.unmount()
+  })
+
+  it('keeps the finished Banana images downloadable when one of the batch fails', async () => {
+    listGroups.mockResolvedValue([bananaGroup])
+    listKeys.mockResolvedValue({ items: [bananaKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gemini-3.1-flash-image' }])
+    generateImage
+      .mockResolvedValueOnce({ data: [{ url: 'data:image/png;base64,QQ==' }] })
+      .mockRejectedValueOnce(Object.assign(new Error('Upstream request failed'), { status: 502 }))
+      .mockResolvedValueOnce({ data: [{ url: 'data:image/png;base64,Qw==' }] })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[2].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('Banana 部分失败')
+    await wrapper.get('button[title="增加数量"]').trigger('click')
+    await wrapper.get('button[title="增加数量"]').trigger('click')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    // The failed second image does not stop the third request.
+    expect(generateImage).toHaveBeenCalledTimes(3)
+    const saved = putHistory.mock.calls.at(-1)?.[0]
+    expect(saved).toMatchObject({ status: 'completed', outputCount: 3 })
+    expect(saved.outputs).toHaveLength(2)
+    expect(saved.error).toContain('已生成 2 / 3 张')
+    expect(wrapper.find('.result-error').exists()).toBe(false)
+    expect(wrapper.get('.partial-result-notice').text()).toContain('1 张未生成')
+    expect(wrapper.get('.result-count-pill').text()).toBe('2 / 3 张')
+    expect(wrapper.findAll('.result-card')).toHaveLength(2)
+    expect(wrapper.findAll('button[title="下载作品"]')).toHaveLength(2)
+    expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('已生成 2 / 3 张'))
+    expect(showSuccess).not.toHaveBeenCalledWith('作品生成完成')
+    wrapper.unmount()
+  })
+
+  it('opens legacy failed batches with their finished images instead of hiding them', async () => {
+    listGroups.mockResolvedValue([bananaGroup])
+    listKeys.mockResolvedValue({ items: [bananaKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gemini-3.1-flash-image' }])
+    listHistory.mockResolvedValue([{
+      id: 'legacy-partial', type: 'image', status: 'failed', prompt: '旧的部分失败', model: 'gemini-3.1-flash-image',
+      provider: 'Banner 生图', groupName: bananaGroup.name, createdAt: 1, updatedAt: 1, outputCount: 4,
+      outputs: ['data:image/png;base64,QQ==', 'data:image/png;base64,Qg==', 'data:image/png;base64,Qw=='],
+      imageCapability: 'banner', aspectRatio: '16:9', resolution: '4K',
+      error: 'The string did not match the expected pattern.',
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('[aria-label="打开作品：旧的部分失败"]').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.result-error').exists()).toBe(false)
+    expect(wrapper.get('.result-heading h2').text()).toBe('本次创作')
+    expect(wrapper.get('.partial-result-notice').text()).toContain('已生成 3 / 4 张，1 张未生成')
+    expect(wrapper.get('.partial-result-notice').text()).toContain('The string did not match the expected pattern.')
+    expect(wrapper.findAll('button[title="下载作品"]')).toHaveLength(3)
+    wrapper.unmount()
+  })
+
   it('keeps the requested Grok tier when inspecting an older original larger than 1024px', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listHistory.mockResolvedValue([{
@@ -627,7 +733,8 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('.template-dialog').exists()).toBe(false)
     expect(wrapper.find('.prompt-template-grid').exists()).toBe(false)
     expect(wrapper.get('.prompt-toggle').text()).toBe('打开模板')
-    expect(wrapper.text()).toContain('作品仅保存在当前浏览器')
+    expect(wrapper.text()).not.toContain('最多保留')
+    expect(wrapper.text()).not.toContain('作品仅保存在当前浏览器')
 
     await wrapper.get('.prompt-toggle').trigger('click')
     expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
@@ -635,39 +742,41 @@ describe('CreatorStudioView', () => {
 
     const nextPage = wrapper.findAll('.prompt-page-actions button')[1]
     await nextPage.trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('2/9')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('2/17')
     expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
 
     await nextPage.trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('3/9')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('3/17')
     expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
 
-    for (let page = 3; page < 9; page++) await nextPage.trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('9/9')
+    for (let page = 3; page < 17; page++) await nextPage.trigger('click')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('17/17')
     const lastPageTemplates = wrapper.findAll('.prompt-template-grid button')
-    expect(lastPageTemplates).toHaveLength(2)
-    expect(lastPageTemplates[1].text()).toContain('黎明信号')
-    await lastPageTemplates[1].trigger('click')
-    expect((wrapper.get('#creator-prompt').element as HTMLTextAreaElement).value).toContain('黎明时分的红色岩石荒原')
+    expect(lastPageTemplates).toHaveLength(4)
+    expect(lastPageTemplates[3].text()).toContain('远山层叠')
+    await lastPageTemplates[3].trigger('click')
+    expect((wrapper.get('#creator-prompt').element as HTMLTextAreaElement).value).toContain('层层山脊剪影')
     await nextPage.trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('1/9')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('1/17')
 
     await wrapper.get('.prompt-toggle').trigger('click')
     expect(wrapper.find('.prompt-template-grid').exists()).toBe(false)
 
     await wrapper.findAll('.mode-option')[1].trigger('click')
     await flushPromises()
-    expect(wrapper.get('.video-capability-card').text()).toContain('Grok 生视频')
-    expect(wrapper.get('.video-capability-card').text()).toContain('使用独立的视频分组和用户 Key')
+    const videoTabs = wrapper.findAll('.video-capability-switch button')
+    expect(videoTabs.map(button => button.text())).toEqual(['Seedance 视频', 'Grok 视频', 'MiniMax H3 视频'])
+    expect(videoTabs.map(button => button.attributes('disabled') !== undefined)).toEqual([false, false, false])
+    expect(wrapper.get('.video-capability-switch button.active').text()).toBe('Seedance 视频')
     await wrapper.get('.prompt-toggle').trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('1/9')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('1/17')
     expect(wrapper.findAll('.prompt-template-grid button')).toHaveLength(6)
-    for (let page = 1; page < 9; page++) await wrapper.findAll('.prompt-page-actions button')[1].trigger('click')
-    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('9/9')
-    const lastVideoTemplate = wrapper.findAll('.prompt-template-grid button')[1]
-    expect(lastVideoTemplate.text()).toContain('群星露台')
+    for (let page = 1; page < 17; page++) await wrapper.findAll('.prompt-page-actions button')[1].trigger('click')
+    expect(wrapper.find('.prompt-page-actions > span').text()).toBe('17/17')
+    const lastVideoTemplate = wrapper.findAll('.prompt-template-grid button')[3]
+    expect(lastVideoTemplate.text()).toContain('远山后拉')
     await lastVideoTemplate.trigger('click')
-    expect((wrapper.get('#creator-prompt').element as HTMLTextAreaElement).value).toContain('夜晚山间小屋的露台')
+    expect((wrapper.get('#creator-prompt').element as HTMLTextAreaElement).value).toContain('画面上方逐渐留出大片淡橙色天空')
   })
 
   it('updates the history heading when the history category changes', async () => {
@@ -684,20 +793,60 @@ describe('CreatorStudioView', () => {
     expect(wrapper.text()).toContain('还没有视频作品')
   })
 
+  it('squares the sticky toolbar corners once it pins below the studio top', async () => {
+    const wrapper = mount(CreatorStudioView, {
+      attachTo: document.body,
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    onTestFinished(() => wrapper.unmount())
+    await flushPromises()
+    const toolbar = wrapper.get('.studio-toolbar')
+    const studio = wrapper.get('.creator-studio')
+    const rect = (top: number) => ({ top } as DOMRect)
+    // The card's 1px top border offsets the resting toolbar; that alone must not count as stuck.
+    vi.spyOn(studio.element, 'clientTop', 'get').mockReturnValue(1)
+    vi.spyOn(studio.element, 'getBoundingClientRect').mockReturnValue(rect(-200))
+    const toolbarRect = vi.spyOn(toolbar.element, 'getBoundingClientRect').mockReturnValue(rect(-199))
+    document.dispatchEvent(new Event('scroll'))
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    await nextTick()
+    expect(toolbar.classes()).not.toContain('is-stuck')
+
+    toolbarRect.mockReturnValue(rect(64))
+
+    document.dispatchEvent(new Event('scroll'))
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    await nextTick()
+    expect(toolbar.classes()).toContain('is-stuck')
+
+    toolbarRect.mockReturnValue(rect(-199))
+    document.dispatchEvent(new Event('scroll'))
+    await new Promise(resolve => requestAnimationFrame(resolve))
+    await nextTick()
+    expect(toolbar.classes()).not.toContain('is-stuck')
+  })
+
   it('reopens collapsed history from the left toolbar without covering the workspace', async () => {
+    const restoreViewport = mockViewportWidth(1440)
+    onTestFinished(restoreViewport)
     const wrapper = mount(CreatorStudioView, {
       global: {
         stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
       },
     })
     await flushPromises()
+    expect(wrapper.get('.history-panel').classes()).not.toContain('is-drawer')
+    expect(wrapper.get('.history-panel').attributes('role')).toBeUndefined()
 
     await wrapper.get('.collapse-action').trigger('click')
     const reopenButton = wrapper.get('.studio-toolbar .studio-title .history-reopen')
     expect(reopenButton.element.previousElementSibling?.textContent).toBe('创作中心')
     expect(wrapper.find('.toolbar-actions .history-reopen').exists()).toBe(false)
     expect(reopenButton.attributes('aria-label')).toBe('展开历史记录')
-    expect(reopenButton.get('.history-reopen > span:last-child').text()).toBe('历史记录')
+    expect(reopenButton.get('.history-entry-copy small').text()).toBe('HISTORY')
+    expect(reopenButton.get('.history-entry-copy strong').text()).toBe('历史记录')
     expect(reopenButton.attributes('aria-controls')).toBe('creator-history-panel')
     expect(reopenButton.attributes('aria-expanded')).toBe('false')
     expect(wrapper.find('.studio-grid .history-reopen').exists()).toBe(false)
@@ -719,20 +868,20 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 50')
-    expect(wrapper.get('.brief-summary h3').text()).toBe('雾港早餐')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 100')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('白底主图')
 
     await vi.advanceTimersByTimeAsync(3000)
-    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 50')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 100')
     await vi.advanceTimersByTimeAsync(250)
-    expect(wrapper.get('.brief-summary h3').text()).toBe('竹影茶席')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('日照金山')
 
     await wrapper.findAll('.brief-topline button')[0].trigger('click')
-    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 50')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 100')
     await vi.advanceTimersByTimeAsync(2999)
-    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 50')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('01 / 100')
     await vi.advanceTimersByTimeAsync(1)
-    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 50')
+    expect(wrapper.get('.brief-topline > span:nth-child(2)').text()).toBe('02 / 100')
 
     wrapper.unmount()
     vi.useRealTimers()
@@ -746,12 +895,12 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     const slider = wrapper.get('.brief-range')
-    expect(slider.attributes('max')).toBe('50')
-    await slider.setValue('50')
-    expect(wrapper.get('.brief-position').text()).toBe('50/ 50')
+    expect(slider.attributes('max')).toBe('100')
+    await slider.setValue('100')
+    expect(wrapper.get('.brief-position').text()).toBe('100/ 100')
     await vi.advanceTimersByTimeAsync(250)
-    expect(wrapper.get('.brief-summary h3').text()).toBe('黎明信号')
-    expect(slider.attributes('aria-valuetext')).toContain('黎明信号')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('远山层叠')
+    expect(slider.attributes('aria-valuetext')).toContain('远山层叠')
 
     await wrapper.findAll('.brief-topline button')[1].trigger('click')
     expect((slider.element as HTMLInputElement).value).toBe('1')
@@ -759,17 +908,131 @@ describe('CreatorStudioView', () => {
 
     await wrapper.findAll('.mode-option')[1].trigger('click')
     await flushPromises()
-    expect(slider.attributes('max')).toBe('50')
+    expect(slider.attributes('max')).toBe('100')
     await vi.advanceTimersByTimeAsync(250)
-    expect(wrapper.get('.brief-summary h3').text()).toBe('晨光开窗')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('360° 展示')
     expect(wrapper.findAll('.quick-templates button')).toHaveLength(10)
-    await slider.setValue('50')
+    await slider.setValue('100')
     await vi.advanceTimersByTimeAsync(250)
-    expect(wrapper.get('.brief-summary h3').text()).toBe('群星露台')
-    expect(slider.attributes('aria-valuetext')).toContain('第 50 份，共 50 份')
+    expect(wrapper.get('.brief-summary h3').text()).toBe('远山后拉')
+    expect(slider.attributes('aria-valuetext')).toContain('第 100 份，共 100 份')
 
     wrapper.unmount()
     vi.useRealTimers()
+  })
+
+  it('fills a random prompt from a quick category and never repeats the current one', async () => {
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    const categories = wrapper.findAll('.quick-templates button')
+    expect(categories).toHaveLength(10)
+    expect(categories[0].text()).toContain('电商产品')
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+    try {
+      const prompt = wrapper.get<HTMLTextAreaElement>('#creator-prompt')
+      await categories[0].trigger('click')
+      const first = prompt.element.value
+      expect(first).toContain('香水')
+      expect(showSuccess).toHaveBeenCalledWith('已填入「电商产品」，请确认生成参数')
+
+      await categories[0].trigger('click')
+      expect(prompt.element.value).not.toBe(first)
+
+      await wrapper.findAll('.mode-option')[1].trigger('click')
+      await flushPromises()
+      expect(wrapper.findAll('.quick-templates button')[0].text()).toContain('产品广告')
+    } finally {
+      random.mockRestore()
+      wrapper.unmount()
+    }
+  })
+
+  it('on mobile, jumps from a used brief to the settings and back to the canvas on generate', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    const restoreViewport = mockViewportWidth(390)
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+
+      const title = wrapper.get('.brief-summary h3').text()
+      await wrapper.get('.brief-copy button').trigger('click')
+      await flushPromises()
+      expect(showSuccess).toHaveBeenCalledWith(`已填入「${title}」，请确认生成参数`)
+      expect(scrolled.at(-1)?.classList.contains('settings-panel')).toBe(true)
+
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      expect(generateImage).toHaveBeenCalledTimes(1)
+      expect(scrolled.at(-1)?.classList.contains('canvas-panel')).toBe(true)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+    }
+  })
+
+  it('on mobile, opens history as a drawer and closes it when a work is opened', async () => {
+    const restoreViewport = mockViewportWidth(390)
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    const windowScrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    listHistory.mockResolvedValue([{
+      id: 'mobile-work', type: 'image', status: 'completed', prompt: '手机上的作品', model: 'grok-imagine-image',
+      provider: 'Grok 生图', groupName: group.name, createdAt: 1, updatedAt: 1, outputCount: 1,
+      outputs: ['data:image/png;base64,UE5H'], aspectRatio: '1:1', resolution: '1K',
+    }])
+    try {
+      const wrapper = mount(CreatorStudioView, {
+        attachTo: document.body,
+        global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } },
+      })
+      await flushPromises()
+
+      const panel = wrapper.get('#creator-history-panel')
+      const toggle = wrapper.get('.toolbar-actions .history-drawer-toggle')
+      expect(panel.classes()).toContain('is-drawer')
+      expect(panel.attributes('role')).toBe('dialog')
+      expect(panel.attributes('aria-hidden')).toBe('true')
+      expect(toggle.attributes('aria-expanded')).toBe('false')
+      expect(toggle.get('.history-drawer-toggle-label').text()).toBe('历史记录')
+      expect(toggle.text()).not.toMatch(/\d/)
+
+      await toggle.trigger('click')
+      await flushPromises()
+      expect(panel.classes()).toContain('open')
+      expect(panel.attributes('aria-hidden')).toBeUndefined()
+      expect(toggle.attributes('aria-expanded')).toBe('true')
+      expect(document.activeElement).toBe(wrapper.get('[aria-label="关闭作品历史"]').element)
+
+      await panel.trigger('keydown', { key: 'Escape' })
+      await flushPromises()
+      expect(panel.classes()).not.toContain('open')
+      expect(document.activeElement).toBe(toggle.element)
+
+      await toggle.trigger('click')
+      await wrapper.get('.history-drawer-backdrop').trigger('click')
+      expect(panel.classes()).not.toContain('open')
+
+      await toggle.trigger('click')
+      await wrapper.get('[aria-label="打开作品：手机上的作品"]').trigger('click')
+      await flushPromises()
+      expect(panel.classes()).not.toContain('open')
+      expect(wrapper.get('.result-heading h2').text()).toBe('本次创作')
+      expect(scrolled).toHaveLength(0)
+      expect(windowScrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+      windowScrollTo.mockRestore()
+    }
   })
 
   it('shows only the file-size error when an oversized reference image is selected', async () => {
@@ -825,6 +1088,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.findAll('.history-item').length).toBeLessThan(20)
     expect(wrapper.get('.history-list').text()).toContain('作品 90')
     await wrapper.get('[aria-label="打开作品：作品 90"]').trigger('click')
+    await flushPromises()
     expect(wrapper.get('.result-media img').attributes('src')).toBe('data:image/png;base64,original-90')
     expect(wrapper.get('.result-media [role="status"]').text()).toContain('正在加载图片')
     await wrapper.findAll('.history-tabs button')[1].trigger('click')
@@ -889,7 +1153,9 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    expect(wrapper.get('.history-item-actions').findAll('button')).toHaveLength(2)
+    // The card itself opens the work; only delete remains as a separate action.
+    expect(wrapper.get('.history-item-actions').findAll('button')).toHaveLength(1)
+    expect(wrapper.find('.history-item-actions [aria-label="打开作品"]').exists()).toBe(false)
     expect(wrapper.get('.history-preview .creator-thumbnail').attributes('aria-busy')).toBe('true')
     expect(wrapper.get('.history-preview [role="img"]').attributes('aria-label')).toBe('缩略图加载中')
     expect(wrapper.find('.history-preview img').exists()).toBe(false)
@@ -937,6 +1203,104 @@ describe('CreatorStudioView', () => {
       expect(frame.classes()).not.toContain('landscape')
       expect(frame.attributes('style')).toContain('aspect-ratio: 3 / 4')
     }
+  })
+
+  it('closes the image preview with Escape and switches images with arrow keys', async () => {
+    const work = {
+      id: 'preview-keys',
+      type: 'image',
+      status: 'completed',
+      prompt: '两辆车停在旷野公路旁',
+      model: 'gemini-nano-banana-2.1',
+      provider: 'Banner 生图',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,AAA', 'data:image/png;base64,BBB', 'data:image/png;base64,CCC'],
+    } as const
+    listHistory.mockResolvedValue([work])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+      attachTo: document.body,
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const images = wrapper.findAllComponents({ name: 'CreatorImage' })
+    const resultImages = images.filter(image => image.classes().includes('result-media'))
+    expect(resultImages).toHaveLength(3)
+    resultImages[0].vm.$emit('preview')
+    await flushPromises()
+
+    const preview = () => wrapper.find('.image-preview')
+    const previewSrc = () => wrapper.getComponent('.image-preview-content').props('src')
+    expect(preview().exists()).toBe(true)
+    expect(previewSrc()).toBe(work.outputs[0])
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight' }))
+    await flushPromises()
+    expect(previewSrc()).toBe(work.outputs[1])
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft' }))
+    await flushPromises()
+    expect(previewSrc()).toBe(work.outputs[0])
+
+    await wrapper.get('.preview-nav.is-next').trigger('click')
+    expect(previewSrc()).toBe(work.outputs[1])
+    expect(preview().exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+    expect(preview().exists()).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('shows result parameters and the full prompt inline in the stat grid', async () => {
+    const longPrompt = '用彩色纸张搭建一座微缩花园，珊瑚粉花朵与鼠尾草绿叶片层层交叠。'.repeat(6)
+    const work = {
+      id: 'inline-parameters',
+      type: 'image',
+      status: 'completed',
+      prompt: longPrompt,
+      model: 'gemini-nano-banana-2.1',
+      provider: 'Banner 生图',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,UE5H'],
+      aspectRatio: '16:9',
+      resolution: '4K',
+      actualOutputSize: '3840x2160',
+    } as const
+    listHistory.mockResolvedValue([work])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const grid = wrapper.get('.result-stat-grid')
+    expect(grid.get('article.wide').text()).toContain('gemini-nano-banana-2.1')
+    expect(grid.text()).toContain('3840×2160')
+    expect(grid.text()).toContain('完成耗时')
+    const prompt = grid.get('.result-prompt-cell .full-prompt')
+    expect(prompt.text()).toBe(longPrompt)
+    expect(prompt.classes()).toContain('clamped')
+
+    const toggle = grid.get('.result-prompt-toggle')
+    await toggle.trigger('click')
+    expect(prompt.classes()).not.toContain('clamped')
+    expect(toggle.attributes('aria-expanded')).toBe('true')
+    expect(toggle.text()).toContain('收起')
+    wrapper.unmount()
   })
 
   it('restores the historical group, model, prompt, ratio, resolution, and count when selected', async () => {
@@ -1009,6 +1373,9 @@ describe('CreatorStudioView', () => {
       { id: 'grok-imagine-image' },
       { id: 'grok-imagine-image-quality' },
     ])
+    // The global matchMedia stub reports a phone viewport, so regenerating scrolls the page.
+    const windowScrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    onTestFinished(() => windowScrollTo.mockRestore())
 
     const wrapper = mount(CreatorStudioView, {
       global: {
@@ -1042,6 +1409,99 @@ describe('CreatorStudioView', () => {
       source: '重新生成',
     }))
     expect(showSuccess).toHaveBeenCalledWith('作品生成完成')
+  })
+
+  it('on mobile, returns the page to the top when regenerating a result', async () => {
+    listHistory.mockResolvedValue([{
+      id: 'mobile-regenerate-source', type: 'image', status: 'completed', prompt: '手机上重新生成', model: 'grok-imagine-image-quality',
+      provider: 'Grok 生图', groupName: group.name, groupId: group.id, imageCapability: 'grok', createdAt: 1, updatedAt: 1,
+      outputCount: 1, outputs: ['data:image/png;base64,T0xE'], aspectRatio: '1:1', resolution: '1K',
+    }])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-image' }, { id: 'grok-imagine-image-quality' }])
+    const restoreViewport = mockViewportWidth(390)
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    const windowScrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.get('.toolbar-actions .history-drawer-toggle').trigger('click')
+      await wrapper.get('[aria-label="打开作品：手机上重新生成"]').trigger('click')
+      await flushPromises()
+      windowScrollTo.mockClear()
+
+      await wrapper.findAll('.result-heading-actions button')
+        .find(button => button.text().includes('重新生成'))!
+        .trigger('click')
+      await flushPromises()
+      expect(generateImage).toHaveBeenCalledTimes(1)
+      expect(windowScrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+      expect(scrolled).toHaveLength(0)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+      windowScrollTo.mockRestore()
+    }
+  })
+
+  it('on mobile, retrying a failed work with its settings jumps to the settings panel', async () => {
+    const restoreViewport = mockViewportWidth(390)
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    listHistory.mockResolvedValue([{
+      id: 'mobile-failed-retry', type: 'image', status: 'failed', prompt: '手机上失败重试', model: 'grok-imagine-image',
+      provider: 'Grok 生图', groupName: group.name, createdAt: 1, updatedAt: 1, outputCount: 1,
+      outputs: [], aspectRatio: '1:1', resolution: '1K', error: '上游服务暂时不可用',
+    }])
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      scrolled.length = 0
+      await wrapper.get('.result-error button').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.result-error').exists()).toBe(false)
+      expect(scrolled.at(-1)?.classList.contains('settings-panel')).toBe(true)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+    }
+  })
+
+  it('on mobile, editing from the preview jumps to the settings panel', async () => {
+    const restoreViewport = mockViewportWidth(390)
+    const originalScrollIntoView = Element.prototype.scrollIntoView
+    const scrolled: Element[] = []
+    Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    listHistory.mockResolvedValue([{
+      id: 'mobile-edit', type: 'image', status: 'completed', prompt: '手机上编辑', model: 'grok-imagine-image',
+      provider: 'Grok 生图', groupName: group.name, createdAt: 1, updatedAt: 1, outputCount: 1,
+      outputs: ['data:image/png;base64,UE5H'], aspectRatio: '1:1', resolution: '1K',
+    }])
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      await wrapper.get('button[title="预览作品"]').trigger('click')
+      await flushPromises()
+      scrolled.length = 0
+      await wrapper.findAll('.preview-action')[1].trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.image-preview').exists()).toBe(false)
+      expect(wrapper.findAll('.reference-item')).toHaveLength(1)
+      expect(scrolled.at(-1)?.classList.contains('settings-panel')).toBe(true)
+      wrapper.unmount()
+    } finally {
+      restoreViewport()
+      Element.prototype.scrollIntoView = originalScrollIntoView
+    }
   })
 
   it('uses a generated image as a reference and restores its original settings', async () => {
@@ -1251,6 +1711,132 @@ describe('CreatorStudioView', () => {
     anchorClick.mockRestore()
   })
 
+  it('downloads every image of the selected work from the result heading', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const work = {
+      id: 'image-download-all',
+      type: 'image',
+      status: 'completed',
+      prompt: '批量下载',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,QQ==', 'data:image/png;base64,Qg==', 'data:image/png;base64,Qw=='],
+    } as const
+    listHistory.mockResolvedValue([work])
+    const downloaded: { href: string; filename: string }[] = []
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded.push({ href: this.href, filename: this.download })
+    })
+
+    try {
+      const wrapper = mount(CreatorStudioView, {
+        global: {
+          stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+        },
+      })
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      const downloadAll = wrapper.get('.download-all-command')
+      await downloadAll.trigger('click')
+      expect(downloadAll.attributes('disabled')).toBeDefined()
+      await vi.runAllTimersAsync()
+      await flushPromises()
+
+      expect(downloaded.map(item => item.href)).toEqual(work.outputs)
+      const stamp = downloaded[0].filename.match(/^creator-(\d+)-1\.png$/)?.[1]
+      expect(stamp).toBeDefined()
+      expect(downloaded.map(item => item.filename)).toEqual([1, 2, 3].map(n => `creator-${stamp}-${n}.png`))
+      expect(downloadAll.attributes('disabled')).toBeUndefined()
+      expect(showError).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      anchorClick.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('offers one-click download for a single image result', async () => {
+    const work = {
+      id: 'image-download-single',
+      type: 'image',
+      status: 'completed',
+      prompt: '单张下载',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['data:image/png;base64,QQ=='],
+    } as const
+    listHistory.mockResolvedValue([work])
+    const downloaded: string[] = []
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded.push(this.href)
+    })
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    const downloadAll = wrapper.get('.download-all-command')
+    expect(downloadAll.text()).toContain('一键下载')
+    await downloadAll.trigger('click')
+    await flushPromises()
+
+    expect(downloaded).toEqual(work.outputs)
+    expect(showError).not.toHaveBeenCalled()
+    wrapper.unmount()
+    anchorClick.mockRestore()
+  })
+
+  it('offers one-click download for every video segment', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const videoBlobs = [new Blob(['shot-one'], { type: 'video/mp4' }), new Blob(['shot-two'], { type: 'video/mp4' })]
+    listHistory.mockResolvedValue([{
+      id: 'video-download-all', type: 'video', status: 'completed',
+      prompt: '雨后街道', model: 'grok-imagine-video', provider: 'Grok 视频',
+      groupName: group.name, groupId: group.id, apiKeyId: createdKey.id,
+      createdAt: Date.now(), updatedAt: Date.now(),
+      outputs: ['blob:shot-one', 'blob:shot-two'], videoBlobs, outputCount: 2,
+    }])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    const filenames: string[] = []
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      filenames.push(this.download)
+    })
+
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.findAll('.history-tabs button')[1].trigger('click')
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      const downloadAll = wrapper.get('.download-all-command')
+      expect(downloadAll.text()).toContain('一键下载')
+      await downloadAll.trigger('click')
+      await vi.runAllTimersAsync()
+      await flushPromises()
+
+      const stamp = filenames[0]?.match(/^creator-(\d+)-1\.mp4$/)?.[1]
+      expect(stamp).toBeDefined()
+      expect(filenames).toEqual([1, 2].map(n => `creator-${stamp}-${n}.mp4`))
+      expect(URL.createObjectURL).toHaveBeenCalledWith(videoBlobs[0])
+      expect(URL.createObjectURL).toHaveBeenCalledWith(videoBlobs[1])
+      expect(downloadVideo).not.toHaveBeenCalled()
+      expect(showError).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      anchorClick.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
   it('downloads a cross-origin image through the authenticated same-origin proxy', async () => {
     const work = {
       id: 'legacy-image-download-1',
@@ -1302,25 +1888,28 @@ describe('CreatorStudioView', () => {
     anchorClick.mockRestore()
   })
 
-  it('offers every official video aspect ratio and submits ultra-wide ratios', async () => {
+  it('offers only Grok-supported video aspect ratios', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
 
     await wrapper.get('#video-params').trigger('click')
-    const ratios = videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio'))
-    expect(ratios).toEqual(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2'])
+    const ratioButtons = videoParamsDialog(wrapper).findAll('.image-ratio-grid button')
+    expect(ratioButtons.map(button => button.attributes('data-ratio'))).toEqual(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9'])
+    expect(ratioButtons.filter(button => button.attributes('disabled') !== undefined).map(button => button.attributes('data-ratio'))).toEqual(['21:9'])
+    expect(ratioButtons[7].attributes('title')).toBe('官方 Grok 不支持此比例')
+    expect(videoParamsDialog(wrapper).text()).toContain('官方 Grok 不支持 21:9 参数')
     await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
 
-    await setVideoParams(wrapper, { ratio: '5:2' })
-    expect(wrapper.get('#video-params').text()).toContain('5:2')
+    await setVideoParams(wrapper, { ratio: '2:3' })
+    expect(wrapper.get('#video-params').text()).toContain('2:3')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('海边公路航拍')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
-    expect(createVideo).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({ aspectRatio: '5:2' }))
+    expect(createVideo).toHaveBeenCalledWith(createdKey.key, expect.objectContaining({ aspectRatio: '2:3' }))
     wrapper.unmount()
   })
 
@@ -1334,7 +1923,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一只小猫奔跑')
     await wrapper.get('.generate-button').trigger('click')
@@ -1374,7 +1963,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
 
     expect(await videoResolutionChoices(wrapper)).toEqual(['480p', '720p'])
@@ -1435,6 +2024,46 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
+  it('restores the exact Seedance line of a reference video, not the first reference-capable one', async () => {
+    const sdGroup = { ...group, id: 7810, name: 'Seedance', description: '', platform: 'deepseek', video_model_prices: { seedance: { 'xseadanco2.0': 4.8, '00sd2.0': 1.5 } } } as Group
+    const sdKey = { ...createdKey, id: 32, key: 'sk-sd', group_id: sdGroup.id, group: sdGroup } as ApiKey
+    listGroups.mockResolvedValue([group, sdGroup])
+    listKeys.mockResolvedValue({ items: [createdKey, sdKey], total: 2, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'Xseadanco2.0' }, { id: '00sd2.0' }])
+    listHistory.mockResolvedValue([{
+      id: 'seedance-reference-history',
+      type: 'video',
+      status: 'completed',
+      prompt: '山顶俯瞰云海的延时镜头',
+      model: '00sd2.0',
+      provider: 'Seedance 视频',
+      groupName: sdGroup.name,
+      groupId: sdGroup.id,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['blob:seedance-video'],
+      aspectRatio: '16:9',
+      resolution: '720p',
+      requestedDuration: 15,
+      referenceCount: 1,
+      videoGenerationMethod: 'reference',
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('reference')
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('00sd2.0')
+    // The low-price line is listed first.
+    expect(wrapper.findAll('#creator-model option').map(option => option.text()))
+      .toEqual(['Seedance 2.0 720p · 低价按条', 'Seedance 2.0 720p · 满血 · 按条'])
+    wrapper.unmount()
+  })
+
   it('restores a completed video from IndexedDB without querying the upstream task again', async () => {
     const persistedVideo = new Blob(['persisted-video'], { type: 'video/mp4' })
     const work = {
@@ -1484,6 +2113,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('[aria-label="播放视频"]').exists()).toBe(true)
     expect(wrapper.get('.video-badge').text()).toContain('视频')
     expect(wrapper.get('.result-parameters').text()).toContain('生成数量')
+    expect(wrapper.get('.result-actions .result-prompt').text()).toBe('雨后的城市街道')
     expect(getVideoStatus).not.toHaveBeenCalled()
     expect(getVideoContent).not.toHaveBeenCalled()
     const originalFetch = globalThis.fetch
@@ -1583,7 +2213,7 @@ describe('CreatorStudioView', () => {
     const parameters = wrapper.get('.result-parameters')
     expect(parameters.text()).toContain('完成耗时')
     expect(parameters.text()).toContain('3 段')
-    expect(parameters.text()).toContain('查看完整提示词与参数')
+    expect(parameters.text()).toContain('完整提示词')
     wrapper.unmount()
   })
 
@@ -1798,7 +2428,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('.result-error').text()).toContain('未找到该视频任务')
     expect(wrapper.text()).not.toContain('Video request not found')
     expect(wrapper.find('.status-check-command').exists()).toBe(false)
-    expect(wrapper.get('.result-parameters').text()).toContain('查看完整提示词与参数')
+    expect(wrapper.get('.result-parameters').text()).toContain('完整提示词')
     expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({
       id: work.id,
       status: 'failed',
@@ -1893,9 +2523,8 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLAnchorElement>('.complete-video-card footer a').attributes('download')).toBe('creator-complete-multi-shot-video.mp4')
     expect(wrapper.findAll('.result-segment-grid .result-card')).toHaveLength(2)
     expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['森林推进', '城市跟拍'])
-    expect(wrapper.get('.result-parameter-details').attributes('open')).toBeUndefined()
-    expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 1：森林推进')
-    expect(wrapper.get('.result-parameter-details .full-prompt').text()).toContain('镜头 2：城市跟拍')
+    expect(wrapper.get('.result-prompt-cell .full-prompt').text()).toContain('镜头 1：森林推进')
+    expect(wrapper.get('.result-prompt-cell .full-prompt').text()).toContain('镜头 2：城市跟拍')
   })
 
   it('preserves worker errors and retries composition using persisted segments', async () => {
@@ -1958,7 +2587,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一只小猫奔跑')
     await wrapper.get('.generate-button').trigger('click')
@@ -2008,7 +2637,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('镜头缓慢向前推进')
     await wrapper.get('.generate-button').trigger('click')
@@ -2044,7 +2673,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
 
     expect(wrapper.get<HTMLSelectElement>('#creator-model').findAll('option').map(option => option.text())).toEqual([
@@ -2057,7 +2686,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.find('.reference-field').exists()).toBe(false)
     await wrapper.get('#video-params').trigger('click')
     expect(videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio'))).toEqual([
-      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9', '5:2',
+      '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9',
     ])
     await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
 
@@ -2112,7 +2741,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLSelectElement>('#creator-model').setValue('grok-imagine-video-1.5')
     await setVideoParams(wrapper, { ratio: '4:3' })
@@ -2177,7 +2806,7 @@ describe('CreatorStudioView', () => {
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     try {
       await flushPromises()
-      await wrapper.findAll('.mode-option')[1].trigger('click')
+      await openGrokVideo(wrapper)
       await flushPromises()
       await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('image')
       const input = wrapper.get<HTMLInputElement>('input[type="file"]')
@@ -2189,7 +2818,7 @@ describe('CreatorStudioView', () => {
       const params = videoParamsDialog(wrapper)
       await params.get('[data-aspect-source="custom"]').trigger('click')
       expect(params.get('.video-aspect-source-hint').text()).toContain('居中裁剪')
-      expect(params.findAll('.image-ratio-grid button').every(button => button.attributes('disabled') === undefined)).toBe(true)
+      expect(params.findAll('.image-ratio-grid button').filter(button => button.attributes('disabled') !== undefined).map(button => button.attributes('data-ratio'))).toEqual(['21:9'])
       await params.get('.image-ratio-grid button[data-ratio="9:16"]').trigger('click')
       await params.get('.image-size-confirm').trigger('click')
       expect(wrapper.get('#video-params').text()).toContain('9:16')
@@ -2220,7 +2849,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLSelectElement>('#video-generation-method').setValue('reference')
 
@@ -2250,6 +2879,118 @@ describe('CreatorStudioView', () => {
       ]),
     }))
     expect(createVideo.mock.calls[0][1].referenceImageDataUrls).toHaveLength(7)
+    wrapper.unmount()
+  })
+
+  it('creates MiniMax H3 video only in priced MiniMax groups and lists only the 10-15s tiers', async () => {
+    const h3Group = { ...group, id: 7700, name: 'MiniMax', description: '', platform: 'minimax', video_model_prices: { 'minimax-h3': { '768p': 0.1, '1440p': 0.15 } } } as Group
+    const textGroup = { ...group, id: 7701, name: 'MiniMax 文本', description: '', platform: 'minimax' } as Group
+    const h3Key = { ...createdKey, id: 30, key: 'sk-h3', group_id: h3Group.id, group: h3Group } as ApiKey
+    listGroups.mockResolvedValue([group, h3Group, textGroup])
+    listKeys.mockResolvedValue({ items: [h3Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'Minimax-H3-768p-933-10s-15s' },
+      { id: 'MiniMax-H3-933-1440p-10s' },
+      { id: 'MiniMax-H3-933-1440p-10-15s' },
+      { id: 'MiniMax-M2' },
+    ])
+    listKeys.mockResolvedValue({ items: [createdKey, h3Key], total: 2, page: 1, page_size: 100, pages: 1 })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await openGrokVideo(wrapper)
+    await flushPromises()
+    expect(wrapper.findAll('#creator-group option').map(option => option.text())).toEqual([group.name])
+    await wrapper.findAll('.video-capability-switch button')[2].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('#creator-group option').map(option => option.text())).toEqual(['MiniMax'])
+    expect(wrapper.findAll('#creator-model option').map(option => option.text()))
+      .toEqual(['MiniMax H3 标清版 768p · 按秒 · 10–15秒 · 8种画幅', 'MiniMax H3 高清版 2K · 按秒 · 10–15秒 · 8种画幅'])
+    expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('text')
+    expect(wrapper.get('#video-generation-method option[value="text"]').attributes('disabled')).toBeUndefined()
+    expect(wrapper.get('#video-generation-method option[value="image"]').attributes('disabled')).toBeDefined()
+    expect(await videoResolutionChoices(wrapper)).toEqual(['768p'])
+    // The 8s default snaps up to the 10s tier minimum.
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('10')
+    expect(wrapper.findAll('.video-control-row button').map(button => button.attributes('disabled') !== undefined)).toEqual([true, false])
+    await wrapper.findAll('.video-control-row button')[1].trigger('click')
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('11')
+    // Typed durations are clamped to the tier range on commit.
+    await wrapper.get('#creator-video-duration').setValue('99')
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('15')
+    await wrapper.get('#creator-video-duration').setValue('13')
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('13')
+    await wrapper.get('#creator-video-duration').setValue('')
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('13')
+    await wrapper.get('#creator-video-duration').setValue('11')
+
+    await wrapper.get<HTMLSelectElement>('#creator-model').setValue('MiniMax-H3-933-1440p-10-15s')
+    await flushPromises()
+    expect(await videoResolutionChoices(wrapper)).toEqual(['1440p'])
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('11')
+    await wrapper.get('#video-params').trigger('click')
+    expect(videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio')))
+      .toEqual(['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '21:9'])
+    await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
+
+    await wrapper.findAll('.video-control-row button')[1].trigger('click')
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('海边木栈道慢步')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    await vi.waitFor(() => expect(createVideo).toHaveBeenCalledTimes(1))
+    expect(createVideo).toHaveBeenCalledWith('sk-h3', expect.objectContaining({
+      model: 'MiniMax-H3-933-1440p-10-15s',
+      duration: 12,
+      resolution: '1440p',
+    }))
+    wrapper.unmount()
+  })
+
+  it('lists priced Seedance lines in catalog order with a line hint', async () => {
+    const sdGroup = { ...group, id: 7800, name: 'Seedance', description: '', platform: 'deepseek', video_model_prices: { seedance: { '00sd2.0': 1.5, 'ttsedanco2.0-720': 0.345 } } } as Group
+    const textGroup = { ...group, id: 7801, name: 'DeepSeek 文本', description: '', platform: 'deepseek' } as Group
+    const sdKey = { ...createdKey, id: 31, key: 'sk-sd', group_id: sdGroup.id, group: sdGroup } as ApiKey
+    listGroups.mockResolvedValue([group, sdGroup, textGroup])
+    listKeys.mockResolvedValue({ items: [createdKey, sdKey], total: 2, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([
+      { id: 'TTsedanco2.0-720' },
+      { id: 'Xseadanco2.0' },
+      { id: '00sd2.0' },
+      { id: 'deepseek-v4-pro' },
+    ])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await openGrokVideo(wrapper)
+    await flushPromises()
+    expect(wrapper.findAll('#creator-group option').map(option => option.text())).toEqual([group.name])
+    await wrapper.findAll('.video-capability-switch button')[0].trigger('click')
+    await flushPromises()
+
+    // Priced catalog models are listed by name in catalog order; unpriced
+    // (Xseadanco2.0) and non-video models are not.
+    expect(wrapper.findAll('#creator-group option').map(option => option.text())).toEqual(['Seedance'])
+    expect(wrapper.findAll('#creator-model option').map(option => option.text()))
+      .toEqual(['Seedance 2.0 720p · 低价按条', 'Seedance 2.0 720p · 官转 · 按秒'])
+    expect(wrapper.get<HTMLSelectElement>('#creator-model').element.value).toBe('00sd2.0')
+    expect(await videoResolutionChoices(wrapper)).toEqual(['720p'])
+
+    await wrapper.get<HTMLSelectElement>('#creator-model').setValue('TTsedanco2.0-720')
+    await flushPromises()
+    expect(wrapper.get('[data-testid="seedance-tier-hint"]').text()).toBe('官转真实满血，原生不卡脸 · 按秒计费 · 5–15 秒')
+    expect(wrapper.get('#video-generation-method option[value="image"]').attributes('disabled')).toBeDefined()
+    expect(wrapper.get('#video-generation-method option[value="reference"]').attributes('disabled')).toBeUndefined()
+    await wrapper.get('#video-params').trigger('click')
+    expect(videoParamsDialog(wrapper).findAll('.image-ratio-grid button').map(button => button.attributes('data-ratio')))
+      .toEqual(['1:1', '16:9', '9:16'])
+    await videoParamsDialog(wrapper).get('.image-size-cancel').trigger('click')
+
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('纸飞机掠过湖面')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+    expect(createVideo).toHaveBeenCalledWith('sk-sd', expect.objectContaining({
+      model: 'TTsedanco2.0-720',
+      resolution: '720p',
+    }))
     wrapper.unmount()
   })
 
@@ -2298,7 +3039,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('镜头向前推进')
     await wrapper.get('.generate-button').trigger('click')
@@ -2317,7 +3058,7 @@ describe('CreatorStudioView', () => {
       global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('镜头向前推进')
     await wrapper.get('.generate-button').trigger('click')
@@ -2344,7 +3085,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('让人物跳舞')
 
@@ -2374,6 +3115,143 @@ describe('CreatorStudioView', () => {
     }
   })
 
+  it('keeps polling a submitted video task through transient status errors', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    createVideo.mockResolvedValueOnce({ id: 'polled-video' })
+    getVideoStatus
+      .mockResolvedValueOnce({ id: 'polled-video', status: 'processing' })
+      .mockRejectedValueOnce(Object.assign(new Error('Upstream request failed'), { status: 502 }))
+      .mockResolvedValueOnce({ id: 'polled-video', status: 'completed' })
+
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await openGrokVideo(wrapper)
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('纸船漂过池塘')
+
+    vi.useFakeTimers()
+    try {
+      const generation = wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(4000)
+      await flushPromises()
+      expect(wrapper.get('.generation-state').text()).toContain('状态查询暂时失败，正在自动重试（1/4）')
+      await vi.advanceTimersByTimeAsync(4000)
+      await generation
+      await flushPromises()
+      expect(getVideoStatus).toHaveBeenCalledTimes(3)
+      expect(createVideo).toHaveBeenCalledTimes(1)
+      expect(showSuccess).toHaveBeenCalledWith('作品生成完成')
+      expect(showError).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      createVideo.mockReset()
+      getVideoStatus.mockReset()
+    }
+  })
+
+  it('names MiniMax H3 instead of Grok when video submission stays unavailable', async () => {
+    const h3Group = { ...group, id: 7700, name: 'MiniMax', description: '', platform: 'minimax', video_model_prices: { 'minimax-h3': { '768p': 0.1 } } } as Group
+    const h3Key = { ...createdKey, id: 30, key: 'sk-h3', group_id: h3Group.id, group: h3Group } as ApiKey
+    listGroups.mockResolvedValue([group, h3Group])
+    listKeys.mockResolvedValue({ items: [createdKey, h3Key], total: 2, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'Minimax-H3-768p-933-10s' }])
+    createVideo.mockRejectedValue(Object.assign(new Error('Upstream request failed'), { status: 502 }))
+
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await flushPromises()
+    await wrapper.findAll('.video-capability-switch button')[2].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('纸船漂过池塘')
+
+    vi.useFakeTimers()
+    try {
+      const generation = wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(7000)
+      await generation
+      await flushPromises()
+      const message = showError.mock.calls.at(-1)?.[0] as string
+      expect(message).toContain('MiniMax H3 视频上游暂时不可用')
+      expect(message).not.toContain('Grok')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      createVideo.mockReset()
+    }
+  })
+
+  it('keeps the finished video element when a history save broadcasts a stripped copy', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    let urlCount = 0
+    vi.mocked(URL.createObjectURL).mockImplementation(() => `blob:creator-video-${++urlCount}`)
+    // Like the real store after an unsaved write: blob: outputs are not stored.
+    let notify: ((work: unknown) => void) | undefined
+    subscribeHistory.mockImplementation(listener => { notify = listener; return vi.fn() })
+    putHistory.mockImplementation(async work => { notify?.({ ...work, outputs: [...work.outputs] }); return false })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await openGrokVideo(wrapper)
+      await flushPromises()
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('晨光卧室')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      const firstVideo = wrapper.get('video')
+      const src = firstVideo.attributes('src')
+      Object.defineProperty(firstVideo.element, 'videoWidth', { value: 2560, configurable: true })
+      Object.defineProperty(firstVideo.element, 'videoHeight', { value: 1440, configurable: true })
+      await firstVideo.trigger('loadedmetadata')
+      await flushPromises()
+
+      expect(wrapper.get('video').attributes('src')).toBe(src)
+      expect(wrapper.get('video').element).toBe(firstVideo.element)
+      expect(urlCount).toBe(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
+  it('keeps the selected video element when returning to the tab re-reads history', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    let urlCount = 0
+    vi.mocked(URL.createObjectURL).mockImplementation(() => `blob:creator-video-${++urlCount}`)
+    // IndexedDB hands back a new Blob instance with the same bytes on every read.
+    const storedWork = () => ({
+      id: 'video-refocus', type: 'video', status: 'completed', prompt: '晨光卧室',
+      model: 'grok-imagine-video', provider: 'Grok 视频', groupName: group.name, groupId: group.id,
+      apiKeyId: createdKey.id, createdAt: 1000, updatedAt: 2000, completedAt: 2000,
+      outputs: [], videoBlobs: [new Blob(['same video'], { type: 'video/mp4' })],
+      outputCount: 1, aspectRatio: '16:9', resolution: '720p', requestId: 'refocus-task',
+    })
+    listHistory.mockImplementation(async () => [storedWork()])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('.history-tabs button')[1].trigger('click')
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      const firstVideo = wrapper.get('video')
+
+      window.dispatchEvent(new Event('focus'))
+      document.dispatchEvent(new Event('visibilitychange'))
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.get('video').element).toBe(firstVideo.element)
+      expect(urlCount).toBe(1)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('submits every text-only professional shot with the text-to-video model', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([
@@ -2391,7 +3269,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第一个镜头')
@@ -2411,6 +3289,52 @@ describe('CreatorStudioView', () => {
     ])
   })
 
+  it('keeps finished professional shots when another shot fails', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    createVideo
+      .mockResolvedValueOnce({ id: 'video-shot-1' })
+      .mockRejectedValueOnce(Object.assign(new Error('Invalid URL (POST /v1/videos/generations)'), { status: 400 }))
+      .mockResolvedValueOnce({ id: 'video-shot-3' })
+    getVideoStatus.mockImplementation(async (_key: string, id: string) => ({ id, status: 'completed' }))
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    try {
+      await flushPromises()
+      await openGrokVideo(wrapper)
+      await flushPromises()
+      await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第一个镜头')
+      await wrapper.get('.sequence-add').trigger('click')
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头')
+      await wrapper.get('.sequence-add').trigger('click')
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第三个镜头')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+
+      expect(createVideo).toHaveBeenCalledTimes(3)
+      expect(showError).not.toHaveBeenCalled()
+      expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('已生成 2 / 3 段'))
+      expect(composeVideoSegments).toHaveBeenCalledTimes(1)
+      expect(composeVideoSegments.mock.calls[0][0]).toHaveLength(2)
+      expect(wrapper.find('.result-error').exists()).toBe(false)
+      expect(wrapper.get('.partial-result-notice').text()).toContain('镜头 2')
+      expect(wrapper.get('.partial-result-notice').text()).toContain('Invalid URL')
+      expect(wrapper.findAll('.result-segment-grid .result-description strong').map(item => item.text())).toEqual(['镜头 1', '镜头 3'])
+      expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['第一个镜头', '第三个镜头'])
+      const saved = putHistory.mock.calls.at(-1)?.[0]
+      expect(saved).toMatchObject({ status: 'completed', requestId: 'video-shot-1,video-shot-3', shotOutputIndexes: [0, 2] })
+    } finally {
+      wrapper.unmount()
+      createVideo.mockReset()
+      getVideoStatus.mockReset()
+    }
+  })
+
   it('keeps references and video parameters independent for every professional shot', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([
@@ -2427,7 +3351,7 @@ describe('CreatorStudioView', () => {
       },
     })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
 
@@ -2766,6 +3690,34 @@ describe('CreatorStudioView', () => {
     expect(wrapper.text()).not.toContain('No available compatible accounts')
   })
 
+  it.each([
+    ['image2', 'gpt-image-2', 'Service temporarily unavailable', 503, '当前创作分组暂无可用的 GPT Image 账号'],
+    ['banner', 'gemini-3.1-flash-image', 'No available accounts', 503, '当前创作分组暂无可用的 Gemini（Banana） 账号'],
+    ['image2', 'gpt-image-2', 'Upstream service temporarily unavailable', 502, 'GPT Image 上游服务暂时不可用'],
+    ['banner', 'gemini-3.1-flash-image', 'Upstream service temporarily unavailable', 502, 'Gemini（Banana） 上游服务暂时不可用'],
+  ] as const)('names the %s provider instead of Grok for upstream failures (%#)', async (capability, model, upstreamMessage, status, expected) => {
+    const isImage2 = capability === 'image2'
+    listGroups.mockResolvedValue([isImage2 ? image2Group : bananaGroup])
+    listKeys.mockResolvedValue({ items: [isImage2 ? image2Key : bananaKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: model }])
+    generateImage.mockRejectedValueOnce(Object.assign(new Error(upstreamMessage), { status }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    await wrapper.findAll('.capability-switch button')[isImage2 ? 0 : 2].trigger('click')
+    await flushPromises()
+    await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('上游错误提示')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    // Only Grok image requests are retried automatically.
+    expect(generateImage).toHaveBeenCalledTimes(1)
+    expect(showError).toHaveBeenCalledWith(expect.stringContaining(expected))
+    expect(wrapper.text()).toContain(expected)
+    expect(wrapper.text()).not.toContain('Grok 上游服务暂时不可用')
+    wrapper.unmount()
+  })
+
   it('explains a fixed 4K account mapping mismatch without exposing the upstream message', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
@@ -2946,6 +3898,9 @@ describe('CreatorStudioView', () => {
       expect(settings.scrollTop).toBe(420)
       expect(wrapper.get('.generate-button').attributes('disabled')).toBeDefined()
       expect(wrapper.get('.generation-state').text()).toContain('1 / 2')
+      // One ratio-shaped frame per requested image: the first is drawing, the second waits.
+      expect(wrapper.findAll('.generation-frame').map(frame => frame.classes().find(name => name.startsWith('is-')))).toEqual(['is-current', 'is-queued'])
+      expect(wrapper.get('.generation-tags').text()).toContain('2 张')
       expect(wrapper.find('a.new-creation-link').exists()).toBe(false)
       await wrapper.get('.generation-state button.new-creation-link').trigger('click')
       expect(settings.scrollTop).toBe(420)
@@ -2953,16 +3908,19 @@ describe('CreatorStudioView', () => {
       promptFocus.mockRestore()
       expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('')
       expect(wrapper.find('.generation-state').exists()).toBe(false)
-      expect(wrapper.findAll('.generation-task')).toHaveLength(1)
+      expect(wrapper.find('.generation-tasks').exists()).toBe(false)
+      expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
+      expect(wrapper.get('.history-item.generating .history-progress').text()).toContain('1 / 2')
       now.mockReturnValue(20_000)
       await wrapper.get('#creator-prompt').setValue('第二张图')
       await wrapper.get('button[title="减少数量"]').trigger('click')
       await wrapper.get('.generate-button').trigger('click')
       await flushPromises()
       expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第二张图'])
-      expect(wrapper.findAll('.generation-task')).toHaveLength(2)
+      expect(wrapper.findAll('.history-item.generating')).toHaveLength(2)
+      expect(wrapper.get('.history-tab-generating').text()).toBe('2')
       // Selecting either running work shows its own progress, without resubmitting.
-      await wrapper.findAll('.generation-task')[0].trigger('click')
+      await wrapper.get('[aria-label="打开作品：第一组图"]').trigger('click')
       await flushPromises()
       expect(wrapper.get('.generation-state').text()).toContain('1 / 2')
       await wrapper.findAll('.history-item-hitbox')[0].trigger('click')
@@ -2973,7 +3931,7 @@ describe('CreatorStudioView', () => {
       finishSecond({ data: [{ url: '/second-result.png' }] })
       await flushPromises()
       expect(wrapper.get('.result-media img').attributes('src')).toBe('/second-result.png')
-      expect(wrapper.findAll('.generation-task')).toHaveLength(1)
+      expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
       // A's second batch still uses A's captured prompt/count, after browsing B.
       now.mockReturnValue(40_000)
       finishFirst({ data: [{ url: '/first-result.png' }] })
@@ -2981,7 +3939,8 @@ describe('CreatorStudioView', () => {
       expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第二张图', '第一组图'])
       expect(wrapper.get('.result-media img').attributes('src')).toBe('/second-result.png')
       expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二张图')
-      expect(wrapper.find('.generation-tasks').exists()).toBe(false)
+      expect(wrapper.find('.history-item.generating').exists()).toBe(false)
+      expect(wrapper.find('.history-tab-generating').exists()).toBe(false)
       const completed = putHistory.mock.calls.map(call => call[0]).filter(work => work.status === 'completed')
       expect(completed).toEqual(expect.arrayContaining([
         expect.objectContaining({ prompt: '第一组图', outputCount: 2, generationDurationMs: 30_000, outputs: ['/first-result.png', 'data:image/png;base64,UE5H'] }),
@@ -2990,6 +3949,68 @@ describe('CreatorStudioView', () => {
     } finally {
       wrapper.unmount()
       now.mockRestore()
+    }
+  })
+
+  it('opens and downloads finished images while the rest of the batch is still drawing', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    let finishSecond!: (result: unknown) => void
+    generateImage.mockResolvedValueOnce({ data: [{ url: 'data:image/png;base64,Rmlyc3Q=' }] })
+      .mockImplementationOnce(() => new Promise(resolve => { finishSecond = resolve }))
+    let downloaded: { href: string; filename: string } | undefined
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded = { href: this.href, filename: this.download }
+    })
+    // Like the real store, each save notifies the page with a fresh copy.
+    let notify: ((work: unknown) => void) | undefined
+    subscribeHistory.mockImplementation(listener => { notify = listener; return vi.fn() })
+    putHistory.mockImplementation(async work => { notify?.({ ...work, outputs: [...work.outputs] }); return true })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.get('#creator-prompt').setValue('两张图')
+      await wrapper.get('button[title="增加数量"]').trigger('click')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      expect(wrapper.findAll('.generation-frame').map(frame => frame.classes().find(name => name.startsWith('is-')))).toEqual(['is-done', 'is-current'])
+      // Only the finished frame is interactive.
+      expect(wrapper.findAll('.generation-frame-open')).toHaveLength(1)
+
+      await wrapper.get('.generation-frame-open').trigger('click')
+      expect(wrapper.getComponent('.image-preview-content').props('src')).toBe('data:image/png;base64,Rmlyc3Q=')
+      // Phones hide the frame buttons, so the preview offers save and edit too.
+      const previewActions = wrapper.findAll('.preview-action')
+      expect(previewActions).toHaveLength(2)
+      expect(previewActions[0].text()).toContain('下载')
+      expect(previewActions[1].text()).toContain('编辑')
+      await previewActions[0].trigger('click')
+      await flushPromises()
+      expect(downloaded?.href).toBe('data:image/png;base64,Rmlyc3Q=')
+      downloaded = undefined
+      await wrapper.get('.preview-close').trigger('click')
+
+      await wrapper.get('.generation-frame-download').trigger('click')
+      await flushPromises()
+      expect(downloaded?.href).toBe('data:image/png;base64,Rmlyc3Q=')
+      expect(downloaded?.filename).toMatch(/^creator-\d+-1\.png$/)
+      expect(wrapper.find('.generation-state').exists()).toBe(true)
+
+      await wrapper.get('.generation-frame-action.is-preview').trigger('click')
+      expect(wrapper.getComponent('.image-preview-content').props('src')).toBe('data:image/png;base64,Rmlyc3Q=')
+      await wrapper.get('.preview-close').trigger('click')
+
+      // Editing hands the finished image to the form while the rest keep drawing.
+      await wrapper.get('.generation-frame-edit').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('.generation-state').exists()).toBe(false)
+      expect(wrapper.findAll('.reference-item')).toHaveLength(1)
+      finishSecond({ data: [{ url: 'data:image/png;base64,U2Vjb25k' }] })
+      await flushPromises()
+    } finally {
+      wrapper.unmount()
+      anchorClick.mockRestore()
     }
   })
 
@@ -3017,13 +4038,13 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     expect(wrapper.get('.result-media img').attributes('src')).toBe('/old.png')
     expect(wrapper.find('.generation-state').exists()).toBe(false)
-    expect(wrapper.findAll('.generation-task')).toHaveLength(2)
+    expect(wrapper.findAll('.history-item.generating')).toHaveLength(2)
     if (outcome === 'failed') failFirst(new Error('No available compatible accounts'))
     else finishFirst({ data: [{ url: '/a.png' }] })
     await flushPromises()
     expect(wrapper.get('.result-media img').attributes('src')).toBe('/old.png')
-    expect(wrapper.findAll('.generation-task')).toHaveLength(1)
-    await wrapper.get('.generation-task').trigger('click')
+    expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
+    await wrapper.get('.history-item.generating .history-item-hitbox').trigger('click')
     await flushPromises()
     expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
     await wrapper.get('.generation-state .new-creation-link').trigger('click')
@@ -3032,7 +4053,7 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('尚未提交的新草稿')
     expect(wrapper.find('.result-workspace').exists()).toBe(false)
-    expect(wrapper.find('.generation-tasks').exists()).toBe(false)
+    expect(wrapper.find('.history-item.generating').exists()).toBe(false)
     expect(wrapper.get('.generate-button').attributes('disabled')).toBeUndefined()
     expect(generateImage).toHaveBeenCalledTimes(2)
     expect(putHistory.mock.calls.map(call => call[0])).toEqual(expect.arrayContaining([
@@ -3074,7 +4095,7 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     await wrapper.findAll('.capability-switch button')[1].trigger('click')
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get('#creator-prompt').setValue('后台视频')
     await wrapper.get('.generate-button').trigger('click')
@@ -3085,18 +4106,21 @@ describe('CreatorStudioView', () => {
     await wrapper.get('#creator-prompt').setValue('前台图片')
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
-    expect(wrapper.findAll('.generation-task')).toHaveLength(2)
-    await wrapper.findAll('.generation-task')[0].trigger('click')
+    // Each history tab badges its own running work.
+    expect(wrapper.findAll('.history-tab-generating').map(badge => badge.text())).toEqual(['1', '1'])
+    await wrapper.findAll('.history-tabs button')[1].trigger('click')
+    await wrapper.get('[aria-label="打开作品：后台视频"]').trigger('click')
     await flushPromises()
     expect(wrapper.get('.generation-state').text()).toContain('正在制作你的视频')
     expect(getVideoStatus).toHaveBeenCalledTimes(1)
-    await wrapper.findAll('.generation-task')[1].trigger('click')
+    await wrapper.findAll('.history-tabs button')[0].trigger('click')
+    await wrapper.get('[aria-label="打开作品：前台图片"]').trigger('click')
     await flushPromises()
     finishVideo({ id: 'video-task-1', status: 'completed' })
     await flushPromises()
     expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('前台图片')
-    expect(wrapper.findAll('.generation-task')).toHaveLength(1)
+    expect(wrapper.findAll('.history-tab-generating').map(badge => badge.text())).toEqual(['1'])
     finishImage({ data: [{ url: '/foreground.png' }] })
     await flushPromises()
     expect(wrapper.get('.result-media img').attributes('src')).toBe('/foreground.png')
@@ -3150,6 +4174,67 @@ describe('CreatorStudioView', () => {
     expect(generateImage).not.toHaveBeenCalled()
     wrapper.unmount()
     expect(unsubscribe).toHaveBeenCalledOnce()
+  })
+
+  it('shows result actions for a pending work that already has saved images', async () => {
+    const pending = {
+      id: 'pending-with-images', type: 'image', status: 'pending', prompt: '已保存的花朵',
+      model: 'gemini-nano-banana-2.1', provider: 'Banner 生图', groupName: group.name,
+      createdAt: 1, updatedAt: 1, outputCount: 2, outputs: ['/flower-1.png', '/flower-2.png'],
+    }
+    listHistory.mockResolvedValue([pending])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+    const heading = wrapper.get('.result-heading')
+    expect(heading.text()).toContain('生成结果')
+    expect(heading.text()).not.toContain('等待生成结果')
+    expect(heading.get('.result-count-pill').text()).toBe('2 张')
+    expect(heading.text()).toContain('重新生成')
+    expect(heading.text()).toContain('新建创作')
+    expect(wrapper.text()).not.toContain('当前请求使用你的 Sub2API Key')
+    const parameters = wrapper.get('.result-parameters')
+    expect(parameters.text()).toContain('gemini-nano-banana-2.1')
+    expect(parameters.text()).toContain('提交时间')
+    expect(parameters.text()).not.toContain('完成耗时')
+    expect(parameters.text()).toContain('已保存的花朵')
+    wrapper.unmount()
+  })
+
+  it('shows work parameters for failed and unfinished image works', async () => {
+    const failed = {
+      id: 'failed-image', type: 'image', status: 'failed', prompt: '失败的雪山日出',
+      model: 'gpt-image-2.5-sunburst', provider: 'Image2 生图', groupName: group.name,
+      createdAt: 1, updatedAt: 5_000, outputCount: 2, outputs: [], error: '上游超时',
+    }
+    const pending = {
+      id: 'pending-image', type: 'image', status: 'pending', prompt: '仍在生成的草原',
+      model: 'gpt-image-2.5-sunburst', provider: 'Image2 生图', groupName: group.name,
+      createdAt: 2, updatedAt: 2, outputCount: 1, outputs: [],
+    }
+    listHistory.mockResolvedValue([pending, failed])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    const items = wrapper.findAll('.history-item-hitbox')
+    await items[1].trigger('click')
+    await flushPromises()
+    expect(wrapper.get('.result-error').text()).toContain('上游超时')
+    let parameters = wrapper.get('.result-parameters')
+    expect(parameters.text()).toContain('gpt-image-2.5-sunburst')
+    expect(parameters.text()).toContain('2 张')
+    expect(parameters.text()).toContain('完成耗时')
+    expect(parameters.text()).toContain('失败的雪山日出')
+
+    await items[0].trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('正在等待图片结果')
+    parameters = wrapper.get('.result-parameters')
+    expect(parameters.text()).toContain('提交时间')
+    expect(parameters.text()).not.toContain('完成耗时')
+    expect(parameters.text()).toContain('仍在生成的草原')
+    wrapper.unmount()
   })
 
   it('refreshes the selected work from storage without generating or changing the prompt', async () => {
@@ -3220,7 +4305,7 @@ describe('CreatorStudioView', () => {
     })
     await flushPromises()
 
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('一只小猫奔跑')
     await wrapper.get('.generate-button').trigger('click')
@@ -3258,7 +4343,7 @@ describe('CreatorStudioView', () => {
     await wrapper.get('.generate-button').trigger('click')
     expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
 
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     expect(wrapper.find('.generation-state').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('正在制作你的视频')
@@ -3285,7 +4370,7 @@ describe('CreatorStudioView', () => {
     listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     const total = () => wrapper.get('.video-cost-preview .image-cost-total strong').text()
     expect(getVideoPricing).toHaveBeenLastCalledWith(createdKey.key, 'grok-imagine-video', expect.any(AbortSignal))
@@ -3318,7 +4403,7 @@ describe('CreatorStudioView', () => {
     getVideoPricing.mockRejectedValue(new Error('offline'))
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     await flushPromises()
-    await wrapper.findAll('.mode-option')[1].trigger('click')
+    await openGrokVideo(wrapper)
     await flushPromises()
     expect(wrapper.get('.video-cost-preview strong').text()).toBe('暂无法预估')
     getVideoPricing.mockResolvedValue({ currency: 'USD', prices: { '720p': Array(15).fill(0) } })
@@ -3368,7 +4453,7 @@ describe('CreatorStudioView', () => {
     expect(wrapper.findAll('.sequence-shot')[0].text()).toContain('8 秒')
     expect(wrapper.get('.video-duration-estimate .video-duration-value').text()).toBe('16 秒')
     await wrapper.findAll('.sequence-shot')[1].trigger('click')
-    expect(wrapper.get('.field-block .stepper strong').text()).toBe('8 秒')
+    expect(wrapper.get<HTMLInputElement>('#creator-video-duration').element.value).toBe('8')
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二个镜头的右侧编辑文案')
   })
   it('downloads a URL-only generated image and saves self-contained bytes instead of its expiring URL', async () => {
@@ -3386,7 +4471,6 @@ describe('CreatorStudioView', () => {
     })))
     expect(downloadImage).toHaveBeenCalledWith(image2Key.key, 'https://temporary.example/new.png')
     expect(wrapper.get('.result-media img').attributes('src')).toBe('data:image/png;base64,b3JpZ2luYWw=')
-    expect(wrapper.text()).toContain('最多保留 50 张图片')
     wrapper.unmount()
   })
 

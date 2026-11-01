@@ -35,7 +35,7 @@ func TestCreatorVideoPricingMatchesRecordedCost(t *testing.T) {
 						APIKey: key, User: &User{ID: 3}, Account: &Account{ID: 4, Platform: PlatformGrok},
 					})
 					require.NoError(t, err)
-					require.InDelta(t, quote.Prices[resolution][duration-1], repo.lastLog.ActualCost, 1e-12)
+					require.InDelta(t, *quote.Prices[resolution][duration-1], repo.lastLog.ActualCost, 1e-12)
 				}
 			}
 		})
@@ -49,6 +49,6 @@ func TestCreatorVideoPricingPreservesChannelPerRequestPricing(t *testing.T) {
 	quote, err := svc.CreatorVideoPricing(context.Background(), key, 3, "grok-imagine-video")
 	require.NoError(t, err)
 	for _, duration := range []int{1, 8, 15} {
-		require.InDelta(t, 0.2, quote.Prices["720p"][duration-1], 1e-12)
+		require.InDelta(t, 0.2, *quote.Prices["720p"][duration-1], 1e-12)
 	}
 }

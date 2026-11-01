@@ -71,7 +71,7 @@ func (h *SettingHandler) SaveIPRisk(c *gin.Context) {
 		return
 	}
 	middleware.SetAuditAction(c, "admin.ip_risk.config.update")
-	middleware.SetAuditExtra(c, map[string]any{"enabled": cfg.Enabled, "blocking_enabled": !cfg.ObserveOnly, "anonymous_api_enabled": cfg.AnonymousAPI.Enabled})
+	middleware.SetAuditExtra(c, map[string]any{"enabled": cfg.Enabled, "blocking_enabled": !cfg.ObserveOnly, "anonymous_api_enabled": cfg.AnonymousAPI.Enabled, "multi_account_enabled": cfg.MultiAccount.Enabled, "multi_account_blocking": !cfg.MultiAccount.ObserveOnly})
 	response.Success(c, cfg)
 }
 

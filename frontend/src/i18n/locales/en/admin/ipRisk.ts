@@ -10,6 +10,18 @@ export default {
   anonymousUnbanHint: "Only invalid credential attempts are limited. Release clears this exact IP’s anonymous counter and ban; manual deny rules and login bans require their own controls. New failures can trigger another ban.",
   anonymousUnban: "Release anonymous ban",
 
+  multiAccountTitle: 'Multiple accounts from one IP',
+  multiAccountHint: 'Independent switch, off by default. Counts distinct accounts that pass password verification from one IP and one IPv4 /24 (IPv6 /48) within the window, and acts only at the threshold, so ordinary users notice nothing. Requires "Enable IP risk control" above; observation mode above takes precedence. Whitelisted IPs are exempt.',
+  multiAccountEnabled: 'Enable multi-account detection',
+  multiAccountObserve: 'Observe only (record events, do not block)',
+  multiAccountIPLimit: 'Distinct accounts per IP (0 disables)',
+  multiAccountSubnetLimit: 'Distinct accounts per subnet (0 disables)',
+  multiAccountRevoke: 'On trigger, revoke sessions of accounts that logged in from this IP / subnet within the window',
+  multiAccountPolicy: 'When enforcing: the triggering login is rejected, the IP is banned for the ban duration above, and refresh tokens of the involved accounts are revoked at once (issued access tokens expire naturally). Accounts are not frozen. Shared egress (offices, schools, CGNAT) may cause false positives; observe first. Unbanning also clears the multi-account history for the IP and its subnet. If Redis is unavailable, detection is skipped and login proceeds.',
+  multiAccountNotify: 'Email administrators on trigger',
+  multiAccountNotifyHint: 'Sent to the email configured in Smart Ops → Account Ops → Notification channels; SMTP must be configured. Observation mode also notifies. One email per IP per ban period, at most 10 per hour site-wide. Delivery is asynchronous and never affects login.',
+  userIDs: 'Accounts involved',
+
   title: 'IP risk control and access records',
   description: 'Manage site-wide IP / country blocks, inspect authentication requests, and automatically ban excessive login, signup and verification traffic. Start in observation mode.',
   load: 'Load / reload configuration',
@@ -104,6 +116,7 @@ export default {
     allowed: 'Risk allowed', whitelisted: 'Whitelisted', blocked: 'Blocked', would_block: 'Observe: would block',
     auto_banned: 'Automatic ban triggered', would_ban: 'Observe: would ban', disabled: 'Risk control inactive', unavailable: 'Risk service unavailable',
     login_attempts: 'Excessive login attempts', login_failures: 'Repeated credential failures', register_attempts: 'Excessive signup attempts', register_failures: 'Repeated signup failures', verification_attempts: 'Excessive verification / recovery attempts',
+    multi_account_ip: 'Many accounts from one IP', multi_account_subnet: 'Many accounts from one subnet',
     ip_blacklist: 'IP blacklist match', country_blocked: 'Country rule match', country_not_allowed: 'Country outside allowlist', country_unknown: 'Unknown country', user_agent_blocked: 'UA rule match', empty_user_agent: 'Empty UA', invalid_client_ip: 'Invalid client IP', risk_store_unavailable: 'Risk storage unavailable',
     trusted_proxy_chain: 'Trusted proxy chain', verified_serverless: 'Verified forwarded node IP', direct_peer: 'Direct connection peer'
   }

@@ -18,6 +18,10 @@ type AccountOpsHandler struct {
 func NewAccountOpsHandler(svc *service.AccountOpsService, email *service.EmailService) *AccountOpsHandler {
 	return &AccountOpsHandler{svc: svc, email: email}
 }
+
+// Service exposes the notification channel to other alert sources.
+func (h *AccountOpsHandler) Service() *service.AccountOpsService { return h.svc }
+
 func (h *AccountOpsHandler) GetConfig(c *gin.Context) {
 	cfg, err := h.svc.GetConfig(c.Request.Context())
 	if err != nil {

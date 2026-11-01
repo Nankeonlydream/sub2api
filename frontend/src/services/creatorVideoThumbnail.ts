@@ -9,6 +9,10 @@ export function getCreatorVideoThumbnail(key: string, source: Blob | string, sig
     if (signal.aborted) return ''
     const cached = thumbnails.get(key)
     if (cached) return cached
+    // Background tabs do not decode detached media; a long video job often
+    // finishes while the user is elsewhere, so wait until the page is shown.
+    await whenVisible(signal)
+    if (signal.aborted) return ''
     const thumbnail = await captureFrame(source, signal)
     if (thumbnail && !signal.aborted) {
       thumbnails.set(key, thumbnail)
@@ -18,6 +22,41 @@ export function getCreatorVideoThumbnail(key: string, source: Blob | string, sig
   })
   queue = task.catch(() => undefined)
   return task
+}
+
+// Covers saved before blank-frame detection may be fully transparent and
+// render as an empty tile; callers recapture those instead of showing them.
+export function isBlankCreatorVideoThumbnail(image: HTMLImageElement): boolean {
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = 16
+    const context = canvas.getContext('2d')
+    if (!context) return false
+    context.drawImage(image, 0, 0, 16, 16)
+    return isTransparent(context, 16)
+  } catch { return false }
+}
+
+// Video frames are always opaque. A canvas left fully transparent means the
+// decoder had not presented the frame yet when it was drawn.
+function isTransparent(context: CanvasRenderingContext2D, size: number): boolean {
+  const pixels = context.getImageData(0, 0, size, size).data
+  for (let index = 3; index < pixels.length; index += 4) if (pixels[index]) return false
+  return true
+}
+
+function whenVisible(signal: AbortSignal): Promise<void> {
+  if (typeof document === 'undefined' || document.visibilityState !== 'hidden') return Promise.resolve()
+  return new Promise(resolve => {
+    const check = () => {
+      if (document.visibilityState === 'hidden' && !signal.aborted) return
+      document.removeEventListener('visibilitychange', check)
+      signal.removeEventListener('abort', check)
+      resolve()
+    }
+    document.addEventListener('visibilitychange', check)
+    signal.addEventListener('abort', check, { once: true })
+  })
 }
 
 function captureFrame(source: Blob | string, signal: AbortSignal): Promise<string> {
@@ -56,6 +95,8 @@ function captureFrame(source: Blob | string, signal: AbortSignal): Promise<strin
         const context = canvas.getContext('2d')
         if (!context) return finish('')
         context.drawImage(video, (video.videoWidth - size) / 2, (video.videoHeight - size) / 2, size, size, 0, 0, 128, 128)
+        // Retry until the frame is presented; the overall timeout still applies.
+        if (isTransparent(context, 128)) { setTimeout(capture, 200); return }
         finish(canvas.toDataURL('image/webp', 0.8))
       } catch { finish('') }
     }
