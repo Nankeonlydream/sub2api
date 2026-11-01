@@ -24,6 +24,12 @@ func RegisterUserRoutes(
 	authenticated.Use(panelRateLimiter.Global())
 	// 用户管理面变更类操作入审计（含 TOTP 启用/禁用、step-up 验证、密码修改等安全事件）
 	authenticated.Use(gin.HandlerFunc(auditLog))
+	if h.Lottery != nil {
+		lottery := authenticated.Group("/lottery")
+		lottery.GET("/pools", h.Lottery.Pools)
+		lottery.POST("/pools/:id/draw", h.Lottery.Draw)
+		lottery.GET("/records", h.Lottery.Records)
+	}
 	{
 		// 用户接口
 		user := authenticated.Group("/user")
@@ -107,6 +113,8 @@ func RegisterUserRoutes(
 		usage.Use(panelRateLimiter.Heavy())
 		{
 			usage.GET("", h.Usage.List)
+			usage.GET("/traffic", h.Usage.Traffic)
+			usage.GET("/traffic/keys", h.Usage.TrafficKeys)
 			usage.GET("/errors", h.Usage.ListErrors)
 			usage.GET("/errors/:id", h.Usage.GetErrorDetail)
 			usage.GET("/:id", h.Usage.GetByID)

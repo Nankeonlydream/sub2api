@@ -11,6 +11,8 @@ import (
 type CustomMenuItem struct {
 	ID             string `json:"id"`
 	Label          string `json:"label"`
+	LabelZh        string `json:"label_zh,omitempty"`
+	LabelEn        string `json:"label_en,omitempty"`
 	IconSVG        string `json:"icon_svg"`
 	URL            string `json:"url"`
 	PageSlug       string `json:"page_slug,omitempty"`
@@ -501,6 +503,7 @@ type PublicSettings struct {
 	PluginManagementEnabled bool `json:"plugin_management_enabled"`
 
 	SupportTicketEnabled bool `json:"support_ticket_enabled"`
+	LotteryEnabled       bool `json:"lottery_enabled"`
 
 	AffiliateEnabled bool `json:"affiliate_enabled"`
 
