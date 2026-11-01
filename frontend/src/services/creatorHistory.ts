@@ -1,3 +1,5 @@
+import { cachedCreatorImageOutputs, creatorDataUrlToBlob, forgetCreatorImageOutputs, rememberCreatorImageOutputs } from './creatorImageBlobs'
+
 export type CreatorWorkType = 'image' | 'video'
 export type CreatorWorkStatus = 'pending' | 'completed' | 'failed'
 export type CreatorVideoGenerationMethod = 'text' | 'image' | 'reference'
@@ -31,6 +33,8 @@ export interface CreatorHistoryItem {
   /** Image-to-video only: false when the source was cropped to the chosen ratio. */
   shotFollowSourceAspects?: boolean[]
   shotActualOutputSizes?: string[]
+  /** Multi-shot video: original shot index of each output; failed shots have no output. */
+  shotOutputIndexes?: number[]
   mergeError?: string
   groupId?: number
   apiKeyId?: number
@@ -58,8 +62,6 @@ export interface CreatorHistoryItem {
   requestId?: string
   error?: string
 }
-
-export const CREATOR_IMAGE_HISTORY_LIMIT = 50
 
 const DATABASE_NAME = 'sub2api-creator-history'
 const DATABASE_VERSION = 1
@@ -118,7 +120,9 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
     shotResolutions: item.shotResolutions ? [...item.shotResolutions] : undefined,
     shotGenerationMethods: item.shotGenerationMethods ? [...item.shotGenerationMethods] : undefined,
     shotReferenceCounts: item.shotReferenceCounts ? [...item.shotReferenceCounts] : undefined,
+    shotFollowSourceAspects: item.shotFollowSourceAspects ? [...item.shotFollowSourceAspects] : undefined,
     shotActualOutputSizes: item.shotActualOutputSizes ? [...item.shotActualOutputSizes] : undefined,
+    shotOutputIndexes: item.shotOutputIndexes ? [...item.shotOutputIndexes] : undefined,
   }
 }
 
@@ -128,12 +132,13 @@ function imageStorageItem(item: CreatorHistoryItem): CreatorHistoryItem {
   const stored = cloneItem(item)
   if (stored.type !== 'image') return stored
   stored.imageBlobs = stored.outputs.map((output, index) => {
-    const match = /^data:(image\/[^;,]+);base64,(.*)$/s.exec(output)
-    if (!match) return stored.imageBlobs?.[index]
+    if (!output.startsWith('data:image/')) return stored.imageBlobs?.[index]
     try {
-      const bytes = Uint8Array.from(atob(match[2]), char => char.charCodeAt(0))
+      // Reuses the Blob this data URL was read from; decodes Base64 only for new images.
+      const blob = creatorDataUrlToBlob(output)
+      if (!blob) return stored.imageBlobs?.[index]
       stored.outputs[index] = ''
-      return new Blob([bytes], { type: match[1] })
+      return blob
     } catch { return stored.imageBlobs?.[index] }
   })
   return stored
@@ -142,8 +147,13 @@ function imageStorageItem(item: CreatorHistoryItem): CreatorHistoryItem {
 async function readableItem(item: CreatorHistoryItem): Promise<CreatorHistoryItem> {
   const readable = cloneItem(item)
   if (readable.type !== 'image' || !readable.imageBlobs?.some(Boolean)) return readable
-  readable.outputs = await Promise.all(readable.outputs.map((output, index) => {
-    const blob = readable.imageBlobs?.[index]
+  const blobs = readable.imageBlobs
+  // Every focus refresh lists the whole history. Re-encoding unchanged 4K
+  // originals to Base64 each time stalls the page, so reuse this revision.
+  const revision = `${readable.updatedAt}:${blobs.map(blob => blob ? `${blob.size}/${blob.type}` : '').join(',')}:${readable.outputs.map(output => output.length).join(',')}`
+  const cached = cachedCreatorImageOutputs(readable.id, revision)
+  readable.outputs = cached ? [...cached] : await Promise.all(readable.outputs.map((output, index) => {
+    const blob = blobs[index]
     if (output || !blob) return output
     return new Promise<string>((resolve, reject) => {
       const reader = new FileReader()
@@ -152,91 +162,34 @@ async function readableItem(item: CreatorHistoryItem): Promise<CreatorHistoryIte
       reader.readAsDataURL(blob)
     })
   }))
+  if (!cached) rememberCreatorImageOutputs(readable.id, revision, [...readable.outputs], blobs.map((blob, index) => item.outputs[index] ? undefined : blob) as Blob[])
   // Callers work with self-contained URLs, never expiring blob URLs.
   delete readable.imageBlobs
   return readable
 }
 
-type RetentionChanges = { removed: string[]; updated: CreatorHistoryItem[] }
-function imageRetention(items: CreatorHistoryItem[]): RetentionChanges {
-  let remaining = CREATOR_IMAGE_HISTORY_LIMIT
-  const changes: RetentionChanges = { removed: [], updated: [] }
-  for (const item of sortCreatorHistory(items)) {
-    // Never evict a running task, videos, or failure records with no output.
-    if (item.type !== 'image' || item.status === 'pending' || !item.outputs.length) continue
-    if (remaining === 0) changes.removed.push(item.id)
-    else if (item.outputs.length > remaining) {
-      changes.updated.push({
-        ...cloneItem(item),
-        outputs: item.outputs.slice(-remaining),
-        imageBlobs: item.imageBlobs?.slice(-remaining),
-        upstreamImageSizes: item.upstreamImageSizes?.slice(-remaining),
-        outputCount: remaining,
-        updatedAt: Math.max(Date.now(), item.updatedAt + 1),
-      })
-    }
-    remaining = Math.max(0, remaining - item.outputs.length)
-  }
-  return changes
-}
-
-function notifyRetention(changes: RetentionChanges): void {
-  const changesToPublish: CreatorHistoryChange[] = [
-    ...changes.removed.map(id => ({ type: 'remove' as const, id })),
-    ...changes.updated.map(item => ({ type: 'put' as const, id: item.id })),
-  ]
-  changesToPublish.forEach(change => {
-    publishHistoryChange(change)
-    // Also refresh the current window after pruning; storage events only reach
-    // other windows. Reuse the same serialized change-consumer contract.
-    externalListeners.forEach(listener => listener(change))
-  })
-}
-
-function retainMemoryImages(): void {
-  const changes = imageRetention([...memoryItems.values()])
-  changes.removed.forEach(id => memoryItems.delete(id))
-  changes.updated.forEach(item => memoryItems.set(item.id, item))
-  notifyRetention(changes)
-}
-
-// Prune in the same read/write transaction as insertion. Multiple tabs cannot
-// each read an old count and independently push the total beyond the limit.
-async function writeWithImageRetention(
+// The revision check and the write share one transaction, so a delayed
+// recovery cannot overwrite a newer result committed by another window.
+async function writeItem(
   database: IDBDatabase,
-  item?: CreatorHistoryItem,
+  item: CreatorHistoryItem,
   expectedUpdatedAt?: number,
 ): Promise<boolean> {
-  const encoded = item ? imageStorageItem(item) : undefined
-  let applied = !item
-  let changes: RetentionChanges = { removed: [], updated: [] }
+  const encoded = imageStorageItem(item)
+  let applied = false
   await runWrite(database, store => {
-    const prune = () => {
-      const request = store.getAll()
-      request.onsuccess = () => {
-        changes = imageRetention(request.result)
-        changes.removed.forEach(id => store.delete(id))
-        changes.updated.forEach(work => store.put(work))
-      }
+    if (expectedUpdatedAt === undefined) {
+      store.put(encoded)
+      applied = true
+      return
     }
-    if (encoded && expectedUpdatedAt !== undefined) {
-      const request = store.get(encoded.id)
-      request.onsuccess = () => {
-        if (request.result?.updatedAt === expectedUpdatedAt) {
-          store.put(encoded)
-          applied = true
-        }
-        prune()
-      }
-    } else {
-      if (encoded) { store.put(encoded); applied = true }
-      prune()
+    const request = store.get(encoded.id)
+    request.onsuccess = () => {
+      if (request.result?.updatedAt !== expectedUpdatedAt) return
+      store.put(encoded)
+      applied = true
     }
   })
-  // Publish only committed changes: a quota failure rolls back eviction too.
-  changes.removed.forEach(id => memoryItems.delete(id))
-  changes.updated.forEach(work => memoryItems.delete(work.id))
-  notifyRetention(changes)
   return applied
 }
 
@@ -364,14 +317,9 @@ async function runWrite(
 
 export async function listCreatorHistory(): Promise<CreatorHistoryItem[]> {
   const database = await openDatabase()
-  if (!database) {
-    retainMemoryImages()
-    return listMemoryItems()
-  }
+  if (!database) return listMemoryItems()
 
   try {
-    // Even when cleanup is blocked, reading existing originals remains safe.
-    try { await writeWithImageRetention(database) } catch { /* Retry on the next write. */ }
     const databaseItems = await listDatabaseItems(database)
     const mergedItems = new Map(databaseItems.map((item) => [item.id, item]))
     memoryItems.forEach((item, id) => mergedItems.set(id, cloneItem(item)))
@@ -392,7 +340,9 @@ export async function getCreatorHistory(id: string): Promise<CreatorHistoryItem 
         request.onerror = () => reject(request.error)
       })
       const pending = memoryItems.get(id)
-      const latest = pending && (!stored || pending.updatedAt > stored.updatedAt) ? pending : stored
+      // A memory copy exists only for an unsaved write, so it wins a tie: an
+      // unsaved metadata patch keeps the revision of the stored work.
+      const latest = pending && (!stored || pending.updatedAt >= stored.updatedAt) ? pending : stored
       return latest ? await readableItem(latest) : undefined
     } catch {
       switchToMemory()
@@ -412,7 +362,7 @@ export async function putCreatorHistory(item: CreatorHistoryItem, expectedUpdate
   let saved = false
   try {
     if (database) {
-      const applied = await writeWithImageRetention(database, storedItem, expectedUpdatedAt)
+      const applied = await writeItem(database, storedItem, expectedUpdatedAt)
       if (!applied) return undefined
       saved = true
       // Keep only unsaved items in memory, so stale local copies cannot hide a
@@ -429,10 +379,9 @@ export async function putCreatorHistory(item: CreatorHistoryItem, expectedUpdate
       if (!latest || latest.updatedAt !== expectedUpdatedAt) return undefined
       memoryItems.set(storedItem.id, storedItem)
     }
-    retainMemoryImages()
   }
-  const retained = await getCreatorHistory(storedItem.id)
-  if (retained) listeners.forEach(listener => listener(cloneItem(retained)))
+  const latest = await getCreatorHistory(storedItem.id)
+  if (latest) listeners.forEach(listener => listener(cloneItem(latest)))
   if (saved) publishHistoryChange({ type: 'put', id: storedItem.id })
   return saved
 }
@@ -460,6 +409,7 @@ export async function saveCreatorVideoThumbnail(id: string, updatedAt: number, t
 
 export async function removeCreatorHistory(id: string): Promise<void> {
   memoryItems.delete(id)
+  forgetCreatorImageOutputs(id)
 
   const database = await openDatabase()
   if (!database) return
@@ -474,6 +424,7 @@ export async function removeCreatorHistory(id: string): Promise<void> {
 
 export async function clearCreatorHistory(): Promise<void> {
   memoryItems.clear()
+  forgetCreatorImageOutputs()
 
   const database = await openDatabase()
   if (!database) return

@@ -1,3 +1,5 @@
+import { creatorDataUrlToBlob } from './creatorImageBlobs'
+
 // Keep full-size images out of the history list. Decode only one thumbnail at a
 // time, and skip queued work when its row has scrolled out of the virtual window.
 const thumbnails = new Map<string, string>()
@@ -13,7 +15,7 @@ export function getCreatorThumbnail(key: string, source: string, signal: AbortSi
     if (signal.aborted) return ''
     const cached = readCachedThumbnail(key)
     if (cached) return cached
-    const thumbnail = await resizeThumbnail(source, signal)
+    const thumbnail = await resizeThumbnailFromBlob(source, signal) ?? await resizeThumbnail(source, signal)
     if (thumbnail && !signal.aborted) {
       // Index by work revision, not the (potentially multi-megabyte) data URL.
       thumbnails.set(key, thumbnail)
@@ -32,6 +34,37 @@ function readCachedThumbnail(key: string): string | undefined {
     thumbnails.set(key, cached)
   }
   return cached
+}
+
+// Decoding a 4K <img> and drawing it to a canvas runs on the main thread and
+// stalls the page for hundreds of milliseconds. For history originals, decode
+// the Blob off-thread at a small size instead. Returns undefined to fall back.
+async function resizeThumbnailFromBlob(source: string, signal: AbortSignal): Promise<string | undefined> {
+  if (typeof createImageBitmap !== 'function' || !source.startsWith('data:image/')) return undefined
+  let bitmap: ImageBitmap | undefined
+  try {
+    const blob = creatorDataUrlToBlob(source)
+    if (!blob || signal.aborted) return blob ? '' : undefined
+    // The short edge must be 128 px to fill the square crop. Assume landscape;
+    // a portrait result comes back narrower than 128 px, so decode by width.
+    bitmap = await createImageBitmap(blob, { resizeHeight: THUMBNAIL_SIZE, resizeQuality: 'medium' })
+    if (bitmap.width < THUMBNAIL_SIZE) {
+      bitmap.close()
+      bitmap = await createImageBitmap(blob, { resizeWidth: THUMBNAIL_SIZE, resizeQuality: 'medium' })
+    }
+    if (signal.aborted) return ''
+    const size = Math.min(bitmap.width, bitmap.height)
+    const canvas = document.createElement('canvas')
+    canvas.width = canvas.height = THUMBNAIL_SIZE
+    const context = canvas.getContext('2d')
+    if (!context || !size) return undefined
+    context.drawImage(bitmap, (bitmap.width - size) / 2, (bitmap.height - size) / 2, size, size, 0, 0, THUMBNAIL_SIZE, THUMBNAIL_SIZE)
+    return canvas.toDataURL('image/webp', 0.8)
+  } catch {
+    return undefined
+  } finally {
+    bitmap?.close()
+  }
 }
 
 function resizeThumbnail(source: string, signal: AbortSignal): Promise<string> {

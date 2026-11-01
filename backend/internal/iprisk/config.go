@@ -38,8 +38,25 @@ func defaultAnonymousAPIConfig() AnonymousAPIConfig {
 	return AnonymousAPIConfig{Threshold: 30, WindowSeconds: 60, BanSeconds: 300, MaxTrackedIPs: 10000}
 }
 
+// MultiAccountConfig counts distinct accounts that pass password verification
+// from one IP / subnet. Normal users never see it; it acts only past a threshold.
+type MultiAccountConfig struct {
+	Enabled        bool `json:"enabled"`
+	ObserveOnly    bool `json:"observe_only"`
+	IPLimit        int  `json:"ip_limit"`     // Distinct accounts per exact IP; zero disables.
+	SubnetLimit    int  `json:"subnet_limit"` // Distinct accounts per IPv4 /24 or IPv6 /48; zero disables.
+	WindowSeconds  int  `json:"window_seconds"`
+	RevokeSessions bool `json:"revoke_sessions"`
+	NotifyAdmin    bool `json:"notify_admin"` // Email the account-ops notification channel on a fresh trigger.
+}
+
+func defaultMultiAccountConfig() MultiAccountConfig {
+	return MultiAccountConfig{ObserveOnly: true, IPLimit: 3, SubnetLimit: 6, WindowSeconds: 86400, RevokeSessions: true, NotifyAdmin: true}
+}
+
 type Config struct {
 	AnonymousAPI         AnonymousAPIConfig `json:"anonymous_api"`
+	MultiAccount         MultiAccountConfig `json:"multi_account"`
 	Enabled              bool               `json:"enabled"`
 	ObserveOnly          bool               `json:"observe_only"`
 	Whitelist            []string           `json:"whitelist"`
@@ -61,8 +78,8 @@ type Config struct {
 
 func DefaultConfig() Config {
 	return Config{
-		AnonymousAPI: defaultAnonymousAPIConfig(),
-		ObserveOnly:  true, Whitelist: []string{}, Blacklist: []Rule{}, BlockedCountries: []string{}, AllowedCountries: []string{},
+		AnonymousAPI: defaultAnonymousAPIConfig(), MultiAccount: defaultMultiAccountConfig(),
+		ObserveOnly: true, Whitelist: []string{}, Blacklist: []Rule{}, BlockedCountries: []string{}, AllowedCountries: []string{},
 		DenyUserAgents: []string{"python-requests", "python-urllib", "aiohttp", "httpx", "curl/", "wget/"},
 		IPv6Prefix:     64, BanSeconds: 3600, LoginAttempts: Threshold{60, 60}, LoginFailures: Threshold{10, 900},
 		RegisterAttempts: Threshold{10, 600}, RegisterFailures: Threshold{5, 600},
@@ -79,6 +96,15 @@ func NormalizeConfig(c Config) (Config, error) {
 	a := c.AnonymousAPI
 	if a.Threshold < 2 || a.Threshold > 1000 || a.WindowSeconds < 1 || a.WindowSeconds > 3600 || a.BanSeconds < 1 || a.BanSeconds > 86400 || a.MaxTrackedIPs < 100 || a.MaxTrackedIPs > 50000 {
 		return c, fmt.Errorf("anonymous API threshold must be 2–1000, window 1–3600 seconds, ban 1–86400 seconds, capacity 100–50000")
+	}
+	// Old saved policies have no multi_account object; preserve disabled defaults.
+	if c.MultiAccount == (MultiAccountConfig{}) {
+		c.MultiAccount = defaultMultiAccountConfig()
+	}
+	ma := c.MultiAccount
+	validLimit := func(n int) bool { return n == 0 || (n >= 2 && n <= 1000) }
+	if !validLimit(ma.IPLimit) || !validLimit(ma.SubnetLimit) || ma.WindowSeconds < 60 || ma.WindowSeconds > 604800 {
+		return c, fmt.Errorf("multi-account limits must be 0 or 2–1000, window 60–604800 seconds")
 	}
 
 	if c.IPv6Prefix < 64 || c.IPv6Prefix > 128 || c.BanSeconds < 60 || c.BanSeconds > 604800 || c.EventRetentionHours < 1 || c.EventRetentionHours > 720 {

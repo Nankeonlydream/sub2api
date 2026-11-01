@@ -8,6 +8,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/handler/dto"
+	"github.com/Wei-Shaw/sub2api/internal/iprisk"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ip"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/response"
@@ -255,6 +256,17 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		return
 	}
 	_ = token // token 由 authService.Login 返回但此处由 respondWithTokenPair 重新生成
+
+	// 无感多账户风控：密码校验通过后统计同 IP / 网段的不同账户数，未超阈值时无任何影响。
+	if admission := iprisk.AdmitLogin(c, user.ID); admission.Blocked {
+		for _, userID := range admission.Revoke {
+			if err := h.authService.RevokeAllUserSessions(c.Request.Context(), userID); err != nil {
+				slog.Warn("ip_risk_multi_account_revoke_failed", "user_id", userID)
+			}
+		}
+		iprisk.RejectLogin(c)
+		return
+	}
 
 	if err := h.ensureBackendModeAllowsUser(c.Request.Context(), user); err != nil {
 		response.ErrorFrom(c, err)

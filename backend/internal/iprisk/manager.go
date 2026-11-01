@@ -40,6 +40,7 @@ type Manager struct {
 	expires           time.Time
 	lastLoadError     string
 	redisRetryAfter   time.Time
+	multiAccountAlert func(context.Context, MultiAccountAlert) // Guarded by mu.
 	ctx               context.Context
 	cancel            context.CancelFunc
 	startOnce         sync.Once
@@ -373,6 +374,7 @@ func (m *Manager) Unban(ctx context.Context, raw string) error {
 	}
 	normalized := network.String()
 	hash := hashNetwork(normalized)
+	subnetHash := hashNetwork(subnetNetwork(network.Addr()))
 	_, err = m.redis.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		legacyPrefix := "auth_abuse:{" + authguard.IPKey(network.Addr().String()) + "}:"
 		pipe.Del(ctx, legacyPrefix+"banned", legacyPrefix+"failures")
@@ -382,6 +384,9 @@ func (m *Manager) Unban(ctx context.Context, raw string) error {
 			for _, reason := range []string{"login_attempts", "login_failures", "register_attempts", "register_failures", "verification_attempts"} {
 				keys = append(keys, prefix+hash+":"+reason)
 			}
+			// An unban means a false positive; forget the multi-account history too
+			// so the next login from the same network does not retrigger at once.
+			keys = append(keys, prefix+hash+":multi_account_ip", prefix+subnetHash+":multi_account_subnet")
 			pipe.Del(ctx, keys...)
 			pipe.ZRem(ctx, prefix+"bans", normalized)
 		}
@@ -391,21 +396,22 @@ func (m *Manager) Unban(ctx context.Context, raw string) error {
 }
 
 type Event struct {
-	ID          string `json:"id"`
-	At          int64  `json:"at"`
-	IP          string `json:"ip"`
-	Network     string `json:"network"`
-	Peer        string `json:"peer"`
-	IPSource    string `json:"ip_source"`
-	Country     string `json:"country"`
-	Method      string `json:"method"`
-	Category    string `json:"category"`
-	Path        string `json:"path"`
-	UserAgent   string `json:"user_agent"`
-	Status      int    `json:"status"`
-	Reason      string `json:"reason"`
-	ErrorReason string `json:"error_reason"`
-	Decision    string `json:"decision"`
+	ID          string  `json:"id"`
+	At          int64   `json:"at"`
+	IP          string  `json:"ip"`
+	Network     string  `json:"network"`
+	Peer        string  `json:"peer"`
+	IPSource    string  `json:"ip_source"`
+	Country     string  `json:"country"`
+	Method      string  `json:"method"`
+	Category    string  `json:"category"`
+	Path        string  `json:"path"`
+	UserAgent   string  `json:"user_agent"`
+	Status      int     `json:"status"`
+	Reason      string  `json:"reason"`
+	ErrorReason string  `json:"error_reason"`
+	Decision    string  `json:"decision"`
+	UserIDs     []int64 `json:"user_ids,omitempty"` // Accounts involved in a multi-account trigger only.
 }
 
 func (m *Manager) record(ctx context.Context, c Config, event Event) {

@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { IDBFactory, IDBObjectStore } from 'fake-indexeddb'
+import { reactive } from 'vue'
 import type { CreatorHistoryItem } from '../creatorHistory'
 
 function work(id: string, createdAt: number, outputs = ['data:image/png;base64,UE5H']): CreatorHistoryItem {
@@ -58,17 +59,14 @@ describe('Creator image persistence in IndexedDB', () => {
     expect((await reloaded.listCreatorHistory())[0].outputs).toEqual(['data:image/png;base64,UE5H'])
   })
 
-  it('atomically limits concurrent writes to 50 images, including individual outputs in a batch', async () => {
+  it('keeps every image from concurrent multi-output writes', async () => {
     const history = await import('../creatorHistory')
     await Promise.all(Array.from({ length: 18 }, (_, index) => history.putCreatorHistory(
       work(`batch-${index}`, index, ['data:image/png;base64,QQ==', 'data:image/png;base64,Qg==', 'data:image/png;base64,Qw==']),
     )))
     const raw = await rawWorks()
-    expect(raw.reduce((sum, item) => sum + item.outputs.length, 0)).toBe(50)
-    expect(raw.some(item => item.id === 'batch-0')).toBe(false)
-    const oldest = (await history.listCreatorHistory()).at(-1)!
-    expect(oldest.id).toBe('batch-1')
-    expect(oldest.outputs).toEqual(['data:image/png;base64,Qg==', 'data:image/png;base64,Qw=='])
+    expect(raw).toHaveLength(18)
+    expect(raw.reduce((sum, item) => sum + item.outputs.length, 0)).toBe(54)
   })
 
   it('keeps existing originals readable after a failed write and retries once space is available', async () => {
@@ -85,7 +83,7 @@ describe('Creator image persistence in IndexedDB', () => {
     expect((await rawWorks()).map(item => item.id)).toEqual(['safe', 'unsaved'])
   })
 
-  it('enforces the limit on existing history when the updated app first opens', async () => {
+  it('keeps all existing history when the updated app first opens', async () => {
     const history = await import('../creatorHistory')
     await history.putCreatorHistory(work('initial', 0))
     const db = await openRaw()
@@ -96,8 +94,8 @@ describe('Creator image persistence in IndexedDB', () => {
       transaction.onabort = () => reject(transaction.error)
     })
     db.close()
-    expect(await history.listCreatorHistory()).toHaveLength(50)
-    expect(await rawWorks()).toHaveLength(50)
+    expect(await history.listCreatorHistory()).toHaveLength(56)
+    expect(await rawWorks()).toHaveLength(56)
   })
   it('does not recreate a deleted original or overwrite a newer revision during delayed link recovery', async () => {
     const history = await import('../creatorHistory')
@@ -112,6 +110,28 @@ describe('Creator image persistence in IndexedDB', () => {
     await history.putCreatorHistory({ ...work('edited', 1, ['data:image/png;base64,TkVX']), updatedAt: 3 })
     expect(await history.putCreatorHistory({ ...work('edited', 1), updatedAt: 2 }, 1)).toBeUndefined()
     expect((await history.getCreatorHistory('edited'))?.outputs).toEqual(['data:image/png;base64,TkVX'])
+  })
+
+  it('saves a video work read through the page reactivity proxy', async () => {
+    const history = await import('../creatorHistory')
+    const video = reactive({
+      ...work('video', 1, []),
+      type: 'video',
+      videoBlobs: [new Blob(['mp4'], { type: 'video/mp4' })],
+      shotFollowSourceAspects: [true],
+    }) as CreatorHistoryItem
+    expect(await history.putCreatorHistory({ ...video, actualOutputSize: '2560x1440' })).toBe(true)
+    expect((await rawWorks())[0]).toMatchObject({ actualOutputSize: '2560x1440', shotFollowSourceAspects: [true] })
+  })
+
+  it('returns an unsaved metadata patch that keeps the stored revision', async () => {
+    const history = await import('../creatorHistory')
+    await history.putCreatorHistory(work('patched', 1))
+    vi.spyOn(IDBObjectStore.prototype, 'put').mockImplementationOnce(() => {
+      throw new DOMException('Quota exceeded', 'QuotaExceededError')
+    })
+    expect(await history.putCreatorHistory({ ...work('patched', 1), actualOutputSize: '1024x1024' })).toBe(false)
+    expect((await history.getCreatorHistory('patched'))?.actualOutputSize).toBe('1024x1024')
   })
 
 })

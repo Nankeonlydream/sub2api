@@ -177,7 +177,18 @@ func (m *Manager) Middleware() gin.HandlerFunc {
 			}
 			event.Decision = "would_block"
 		}
+		if category == "login" {
+			c.Set(loginContextKey, &loginContext{manager: m, config: cfg, address: address, network: event.Network})
+		}
 		c.Next()
+		if result := multiAccountLoginResult(c); result != nil {
+			event.Reason = result.reason
+			event.UserIDs = result.userIDs
+			event.Decision = "auto_banned"
+			if result.observed {
+				event.Decision = "would_ban"
+			}
+		}
 		// Never count capacity failures or service errors as bad credentials.
 		failureReason := ""
 		var threshold Threshold

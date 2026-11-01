@@ -17,6 +17,7 @@ function snapshot(): IPRiskSnapshot {
     health: { redis_available: true, emergency_disabled: false, config_error: '' },
     config: {
       anonymous_api: { enabled: false, threshold: 30, window_seconds: 60, ban_seconds: 300, max_tracked_ips: 10000, reset_on_success: false },
+      multi_account: { enabled: false, observe_only: true, ip_limit: 3, subnet_limit: 6, window_seconds: 86400, revoke_sessions: true, notify_admin: true },
       enabled: false, observe_only: true, whitelist: [], blacklist: [], allowed_countries: [], blocked_countries: [],
       block_unknown_country: false, deny_user_agents: ['python-requests'], block_empty_ua: false,
       ipv6_prefix: 64, ban_seconds: 3600, event_retention_hours: 168,
@@ -67,6 +68,24 @@ describe('IP risk settings', () => {
     expect(payload.enabled).toBe(false)
     expect(payload.anonymous_api.enabled).toBe(true)
     expect(payload.anonymous_api.threshold).toBe(40)
+    wrapper.unmount()
+  })
+
+  it('edits the multi-account switch independently and shows involved accounts', async () => {
+    vi.mocked(ipRiskAPI.events).mockResolvedValue({ items: [{ id: 'e1', at: 1, ip: '8.8.8.8', network: '8.8.8.8/32', peer: '8.8.8.8', ip_source: 'direct_peer', country: 'US', method: 'POST', category: 'login', path: '/api/v1/auth/login', user_agent: 'UA', status: 200, reason: 'multi_account_ip', error_reason: '', decision: 'would_ban', user_ids: [1, 2, 3] }], total: 1, page: 1, page_size: 20, pages: 1 })
+    const wrapper = await opened()
+    expect((wrapper.get('[data-testid="multi-account-enabled"]').element as HTMLInputElement).checked).toBe(false)
+    expect((wrapper.get('[data-testid="multi-account-observe"]').element as HTMLInputElement).checked).toBe(true)
+    expect(wrapper.get('[data-testid="risk-event-users"]').text()).toContain('1, 2, 3')
+    expect(wrapper.text()).toContain(zh.labels.multi_account_ip)
+    await wrapper.get('[data-testid="multi-account-enabled"]').setValue(true)
+    await wrapper.get('[data-testid="multi-account-ip-limit"]').setValue('4')
+    expect((wrapper.get('[data-testid="multi-account-notify"]').element as HTMLInputElement).checked).toBe(true)
+    await wrapper.get('[data-testid="multi-account-notify"]').setValue(false)
+    await wrapper.get('form').trigger('submit'); await flushPromises()
+    const payload = vi.mocked(ipRiskAPI.save).mock.calls[0]![0]
+    expect(payload.enabled).toBe(false)
+    expect(payload.multi_account).toEqual({ enabled: true, observe_only: true, ip_limit: 4, subnet_limit: 6, window_seconds: 86400, revoke_sessions: true, notify_admin: false })
     wrapper.unmount()
   })
 

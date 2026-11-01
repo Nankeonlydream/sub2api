@@ -548,9 +548,10 @@ func (m *Manager) ReleaseAuditEntry(ctx context.Context, source, id, network, ve
 			} else {
 				root := modePrefix(source == "ip_risk_observe") + hashNetwork(network)
 				keys = []string{key}
-				for _, reason := range []string{"login_attempts", "login_failures", "register_attempts", "register_failures", "verification_attempts"} {
+				for _, reason := range []string{"login_attempts", "login_failures", "register_attempts", "register_failures", "verification_attempts", "multi_account_ip"} {
 					keys = append(keys, root+":"+reason)
 				}
+				keys = append(keys, modePrefix(source == "ip_risk_observe")+hashNetwork(subnetNetwork(prefix.Addr()))+":multi_account_subnet")
 				deleteCount = len(keys)
 				keys = append(keys, modePrefix(source == "ip_risk_observe")+"bans")
 			}

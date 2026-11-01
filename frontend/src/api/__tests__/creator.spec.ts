@@ -131,6 +131,16 @@ describe('creator gateway API', () => {
     })
   })
 
+  it('turns an unparseable 200 body into a readable gateway error', async () => {
+    const response = jsonResponse(null)
+    vi.mocked(response.json).mockRejectedValueOnce(new SyntaxError('The string did not match the expected pattern.'))
+    vi.mocked(fetch).mockResolvedValueOnce(response)
+    const { generateCreatorImage } = await import('@/api/creator')
+
+    await expect(generateCreatorImage('sk-image', { model: 'gemini-3-pro-image-preview', prompt: 'cat', protocol: 'gemini' }))
+      .rejects.toMatchObject({ message: expect.stringContaining('无法解析的响应'), status: 200 })
+  })
+
   it.each(['1024x1024', '2048x1152', '3840x2160'])(
     'prefers included image bytes over an inaccessible relay URL at %s', async size => {
       vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{
@@ -346,8 +356,165 @@ describe('creator gateway API', () => {
       model: 'grok-imagine-video',
       prompt: 'legacy model with references',
       referenceImageDataUrls: ['data:image/png;base64,REF'],
-    })).rejects.toThrow('仅支持 Grok Imagine Video 1.5 模型')
+    })).rejects.toThrow('仅支持 Grok Imagine Video 1.5 或 MiniMax H3 模型')
     expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('creates MiniMax H3 jobs with tier-specific duration and reference images', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ id: 'task_768', task_id: 'task_768', status: 'queued' }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'task_1440', status: 'queued' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    const references = Array.from({ length: 9 }, (_, index) => `data:image/png;base64,REF${index}`)
+
+    const fixed = await createCreatorVideo('sk-h3', {
+      model: 'Minimax-H3-768p-933-10s',
+      prompt: 'lake at dawn',
+      duration: 10,
+      aspectRatio: '16:9',
+      resolution: '768p',
+      referenceImageDataUrls: references,
+    })
+    expect(fixed.id).toBe('task_768')
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
+      model: 'Minimax-H3-768p-933-10s',
+      prompt: 'lake at dawn',
+      aspect_ratio: '16:9',
+      images: references,
+    })
+
+    // Prompt-only H3 is allowed; the variable tier sends integer seconds.
+    await createCreatorVideo('sk-h3', {
+      model: 'MiniMax-H3-933-1440p-10-15s',
+      prompt: 'boardwalk',
+      duration: 12,
+      aspectRatio: '5:2',
+      resolution: '1440p',
+    })
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body))).toEqual({
+      model: 'MiniMax-H3-933-1440p-10-15s',
+      prompt: 'boardwalk',
+      seconds: 12,
+    })
+  })
+
+  it('rejects MiniMax H3 inputs outside the selected tier', async () => {
+    const { createCreatorVideo } = await import('@/api/creator')
+    await expect(createCreatorVideo('sk-h3', { model: 'Minimax-H3-768p-933-10s-15s', prompt: 'x', duration: 9 }))
+      .rejects.toThrow('10–15 秒')
+    await expect(createCreatorVideo('sk-h3', { model: 'MiniMax-H3-933-1440p-15s', prompt: 'x', duration: 10 }))
+      .rejects.toThrow('固定生成 15 秒')
+    await expect(createCreatorVideo('sk-h3', { model: 'MiniMax-H3-933-1440p-10-15s', prompt: 'x', duration: 16 }))
+      .rejects.toThrow('10–15 秒')
+    await expect(createCreatorVideo('sk-h3', {
+      model: 'MiniMax-H3-933-1440p-15s',
+      prompt: 'x',
+      duration: 15,
+      referenceImageDataUrls: Array.from({ length: 10 }, (_, index) => `data:image/png;base64,REF${index}`),
+    })).rejects.toThrow('最多支持 9 张参考图')
+    await expect(createCreatorVideo('sk-h3', {
+      model: 'MiniMax-H3-933-1440p-15s',
+      prompt: 'x',
+      duration: 15,
+      imageDataUrl: 'data:image/png;base64,SOURCE',
+    })).rejects.toThrow('不支持首帧图生视频')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('sends Seedance tiers with integer seconds', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ id: 'sf_1', task_id: 'task_1', status: 'queued' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    const created = await createCreatorVideo('sk-sd', {
+      model: 'TTsedanco2.0-720',
+      prompt: 'paper plane',
+      duration: 12,
+      aspectRatio: '9:16',
+      resolution: '720p',
+    })
+    expect(created.id).toBe('sf_1')
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
+      model: 'TTsedanco2.0-720',
+      prompt: 'paper plane',
+      seconds: 12,
+      aspect_ratio: '9:16',
+    })
+    await expect(createCreatorVideo('sk-sd', { model: 'TTsedanco2.0-480', prompt: 'x', duration: 4 }))
+      .rejects.toThrow('Seedance 模型时长需为 5–15 秒')
+    await expect(createCreatorVideo('sk-sd', { model: 'TTsedanco2.0-720', prompt: 'x', imageDataUrl: 'data:image/png;base64,S' }))
+      .rejects.toThrow('Seedance 不支持首帧图生视频')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends Zhongheng Seedance tiers with uploaded references and only their sold lengths', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ task_id: 'vid_1', status: 'processing' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    const created = await createCreatorVideo('sk-zh', {
+      model: 'A-SD2.0',
+      prompt: '@图片1 海边奔跑',
+      duration: 10,
+      aspectRatio: '9:16',
+      referenceImageDataUrls: ['data:image/png;base64,REF1'],
+    })
+    expect(created.id).toBe('vid_1')
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
+      model: 'A-SD2.0',
+      prompt: '@图片1 海边奔跑',
+      seconds: 10,
+      aspect_ratio: '9:16',
+      images: ['data:image/png;base64,REF1'],
+    })
+    await expect(createCreatorVideo('sk-zh', { model: 'A-SD2.0', prompt: 'x', duration: 7 }))
+      .rejects.toThrow('该 Seedance 模型时长只能是 5 或 10 或 15 秒')
+    await expect(createCreatorVideo('sk-zh', { model: 'Tseadanco2.5-720YT', prompt: 'x', duration: 12 }))
+      .rejects.toThrow('只能是')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends Zhongheng MiniMax H3 and Grok relay tiers with their own lengths and ratios', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ task_id: 'vid_h3', status: 'processing' }))
+      .mockResolvedValueOnce(jsonResponse({ task_id: 'vid_grok', status: 'processing' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    await createCreatorVideo('sk-zh', {
+      model: 'Xminimex-h3',
+      prompt: 'harbor',
+      duration: 6,
+      aspectRatio: '21:9',
+      referenceImageDataUrls: ['data:image/png;base64,REF1'],
+    })
+    // 21:9 is not a Zhongheng ratio, so the relay default applies.
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
+      model: 'Xminimex-h3',
+      prompt: 'harbor',
+      seconds: 6,
+      images: ['data:image/png;base64,REF1'],
+    })
+    await expect(createCreatorVideo('sk-zh', { model: 'MinimaxH3-768', prompt: 'x', duration: 8 }))
+      .rejects.toThrow('该 MiniMax H3 模型时长只能是')
+    await expect(createCreatorVideo('sk-zh', { model: 'MinimaxH3-768', prompt: 'x', duration: 10 }))
+      .rejects.toThrow('该 MiniMax H3 模型需要至少 1 张参考图')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('downloads relay videos through the content endpoint instead of a relative URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      id: 'sf_1', status: 'completed', progress: 100, metadata: { url: '/v1/videos/sf_1/content' },
+    }))
+    const { getCreatorVideoStatus, isCreatorVideoComplete } = await import('@/api/creator')
+    const status = await getCreatorVideoStatus('sk-sd', 'sf_1')
+    expect(status.url).toBeUndefined()
+    expect(isCreatorVideoComplete(status.status)).toBe(true)
+  })
+
+  it('reads the MiniMax H3 result URL from metadata', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
+      id: 'task_1', status: 'completed', progress: 100,
+      metadata: { url: 'https://videos.example/task_1.mp4' },
+    }))
+    const { getCreatorVideoStatus, isCreatorVideoComplete } = await import('@/api/creator')
+    const status = await getCreatorVideoStatus('sk-h3', 'task_1')
+    expect(status.url).toBe('https://videos.example/task_1.mp4')
+    expect(isCreatorVideoComplete(status.status)).toBe(true)
   })
 
   it('gets video status and binary content', async () => {

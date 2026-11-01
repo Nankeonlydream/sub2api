@@ -104,6 +104,9 @@ func ProvideRouter(
 	settingService.Serverless = manager
 	settingService.IPRisk = iprisk.New(settingService.IPRiskStore(), redisClient, serverless.NewGeoJSResolver(redisClient), strings.EqualFold(os.Getenv("IP_RISK_DISABLED"), "true"))
 	settingService.IPRisk.Start()
+	if handlers.Admin != nil && handlers.Admin.AccountOps != nil {
+		settingService.IPRisk.SetMultiAccountNotifier(service.NewIPRiskAlertNotifier(handlers.Admin.AccountOps.Service(), apiKeyService, settingService))
+	}
 	if handlers.Admin != nil && handlers.Admin.Setting != nil {
 		if handlers.Admin.PromptAudit != nil {
 			handlers.Admin.Setting.ConfigureIPAudit(handlers.Admin.AuditLog, handlers.Admin.PromptAudit.IPAuditPenaltySummary, handlers.Admin.PromptAudit.ReleaseIPAuditPenalty)

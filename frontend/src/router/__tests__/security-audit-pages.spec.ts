@@ -43,6 +43,7 @@ function riskSnapshot(): IPRiskSnapshot {
       allowed_countries: ['CN'], blocked_countries: ['US'], block_unknown_country: true,
       deny_user_agents: ['fixture-agent'], block_empty_ua: true, ipv6_prefix: 96, ban_seconds: 7200, event_retention_hours: 48,
       anonymous_api: { enabled: true, threshold: 43, window_seconds: 120, ban_seconds: 600, max_tracked_ips: 500, reset_on_success: true },
+      multi_account: { enabled: false, observe_only: true, ip_limit: 3, subnet_limit: 6, window_seconds: 86400, revoke_sessions: true, notify_admin: true },
       login_attempts: { limit: 14, window_seconds: 90 }, login_failures: { limit: 6, window_seconds: 600 },
       register_attempts: { limit: 9, window_seconds: 300 }, register_failures: { limit: 4, window_seconds: 300 },
       verification_attempts: { limit: 8, window_seconds: 450 },

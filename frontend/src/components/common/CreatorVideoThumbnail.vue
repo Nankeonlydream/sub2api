@@ -3,7 +3,7 @@
     <span v-if="state !== 'ready'" class="video-thumbnail-placeholder" :class="{ 'is-loading': state === 'loading' }" role="img" :aria-label="state === 'loading' ? '视频封面加载中' : '视频封面暂不可用'">
       <Icon name="play" size="sm" />
     </span>
-    <img v-if="cover" :src="cover" alt="" decoding="async" :style="{ visibility: state === 'ready' ? 'visible' : 'hidden' }" @load="state = 'ready'" @error="state = 'error'" />
+    <img v-if="cover" :src="cover" alt="" decoding="async" :style="{ visibility: state === 'ready' ? 'visible' : 'hidden' }" @load="onLoad" @error="state = 'error'" />
     <span v-if="state === 'ready'" class="video-thumbnail-play"><Icon name="play" size="xs" /></span>
   </span>
 </template>
@@ -11,7 +11,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import Icon from '@/components/icons/Icon.vue'
-import { getCreatorVideoThumbnail } from '@/services/creatorVideoThumbnail'
+import { getCreatorVideoThumbnail, isBlankCreatorVideoThumbnail } from '@/services/creatorVideoThumbnail'
 
 const props = defineProps<{ src?: string; videoBlob?: Blob; thumbnail?: string; cacheKey: string }>()
 const emit = defineEmits<{ ready: [thumbnail: string] }>()
@@ -19,11 +19,28 @@ const element = ref<HTMLElement>()
 const cover = ref('')
 const state = ref<'loading' | 'ready' | 'error'>('loading')
 const visible = ref(false)
+// A saved cover that turned out blank, and a counter that re-runs extraction
+// after it failed because the tab was hidden while the video finished.
+const rejectedThumbnail = ref('')
+const retry = ref(0)
 let observer: IntersectionObserver | undefined
 
-watch([() => props.src, () => props.videoBlob, () => props.thumbnail, () => props.cacheKey, visible], async (_, __, onCleanup) => {
-  if (props.thumbnail && props.thumbnail === cover.value && state.value === 'ready') return
-  cover.value = props.thumbnail || ''
+function onLoad(event: Event) {
+  if (cover.value && cover.value === props.thumbnail && isBlankCreatorVideoThumbnail(event.target as HTMLImageElement)) {
+    rejectedThumbnail.value = cover.value
+    return
+  }
+  state.value = 'ready'
+}
+
+function retryAfterHidden() {
+  if (document.visibilityState === 'visible' && state.value === 'error') retry.value++
+}
+
+watch([() => props.src, () => props.videoBlob, () => props.thumbnail, () => props.cacheKey, visible, rejectedThumbnail, retry], async (_, __, onCleanup) => {
+  const saved = props.thumbnail && props.thumbnail !== rejectedThumbnail.value ? props.thumbnail : ''
+  if (saved && saved === cover.value && state.value === 'ready') return
+  cover.value = saved
   state.value = 'loading'
   if (cover.value || !visible.value) return
   const source = props.videoBlob?.size ? props.videoBlob : props.src
@@ -38,13 +55,17 @@ watch([() => props.src, () => props.videoBlob, () => props.thumbnail, () => prop
 }, { immediate: true })
 
 onMounted(() => {
+  document.addEventListener('visibilitychange', retryAfterHidden)
   if (typeof IntersectionObserver === 'undefined') { visible.value = true; return }
   observer = new IntersectionObserver(entries => {
     visible.value = entries.some(entry => entry.isIntersecting)
   }, { root: element.value?.closest('.history-list'), rootMargin: '80px' })
   if (element.value) observer.observe(element.value)
 })
-onBeforeUnmount(() => observer?.disconnect())
+onBeforeUnmount(() => {
+  observer?.disconnect()
+  document.removeEventListener('visibilitychange', retryAfterHidden)
+})
 </script>
 
 <style scoped>

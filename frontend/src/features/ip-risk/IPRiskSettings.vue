@@ -67,6 +67,22 @@
                 <label class="text-sm">{{ tr('retention') }}<input v-model.number="draft.event_retention_hours" type="number" min="1" max="720" step="1" required class="input mt-1 w-full" /></label>
               </div>
             </RiskSettingsSection>
+            <RiskSettingsSection :title="tr('multiAccountTitle')" :status="draft.multi_account.enabled ? tr('protectionEnabled') : tr('protectionDisabled')" data-testid="multi-account-settings">
+              <p class="text-xs text-gray-500">{{ tr('multiAccountHint') }}</p>
+              <div class="flex flex-wrap gap-5">
+                <label class="flex items-center gap-2 text-sm"><input v-model="draft.multi_account.enabled" type="checkbox" data-testid="multi-account-enabled" />{{ tr('multiAccountEnabled') }}</label>
+                <label class="flex items-center gap-2 text-sm"><input v-model="draft.multi_account.observe_only" type="checkbox" data-testid="multi-account-observe" />{{ tr('multiAccountObserve') }}</label>
+              </div>
+              <div class="grid gap-3 sm:grid-cols-3">
+                <label class="text-sm">{{ tr('multiAccountIPLimit') }}<input v-model.number="draft.multi_account.ip_limit" type="number" min="0" max="1000" step="1" required class="input mt-1 w-full" data-testid="multi-account-ip-limit" /></label>
+                <label class="text-sm">{{ tr('multiAccountSubnetLimit') }}<input v-model.number="draft.multi_account.subnet_limit" type="number" min="0" max="1000" step="1" required class="input mt-1 w-full" data-testid="multi-account-subnet-limit" /></label>
+                <label class="text-sm">{{ tr('window') }}<input v-model.number="draft.multi_account.window_seconds" type="number" min="60" max="604800" step="1" required class="input mt-1 w-full" /></label>
+              </div>
+              <label class="flex items-center gap-2 text-sm"><input v-model="draft.multi_account.revoke_sessions" type="checkbox" data-testid="multi-account-revoke" />{{ tr('multiAccountRevoke') }}</label>
+              <label class="flex items-center gap-2 text-sm"><input v-model="draft.multi_account.notify_admin" type="checkbox" data-testid="multi-account-notify" />{{ tr('multiAccountNotify') }}</label>
+              <p class="text-xs text-gray-500">{{ tr('multiAccountNotifyHint') }}</p>
+              <p class="text-xs text-gray-500">{{ tr('multiAccountPolicy') }}</p>
+            </RiskSettingsSection>
             <RiskSettingsSection :title="tr('anonymousTitle')" :status="draft.anonymous_api.enabled ? tr('protectionEnabled') : tr('protectionDisabled')" data-testid="anonymous-settings">
               <p class="text-xs text-gray-500">{{ tr('anonymousHint') }}</p>
               <label class="flex items-center gap-2 text-sm"><input v-model="draft.anonymous_api.enabled" type="checkbox" data-testid="anonymous-enabled" />{{ tr('anonymousEnabled') }}</label>
@@ -132,7 +148,7 @@
               <td class="whitespace-nowrap p-2">{{ date(event.at) }}</td>
               <td class="p-2"><code>{{ event.ip }}</code><p>{{ event.country || '—' }} · {{ label(event.ip_source) }}</p><p class="text-gray-500">{{ tr('peer') }}: {{ event.peer }}</p></td>
               <td class="p-2">{{ event.method }} {{ event.path }}<p>{{ label(event.category) }} · {{ event.status }}</p></td>
-              <td class="p-2">{{ label(event.decision) }}<p>{{ label(event.reason) }}</p><p class="text-gray-500">{{ event.error_reason }}</p></td>
+              <td class="p-2">{{ label(event.decision) }}<p>{{ label(event.reason) }}</p><p class="text-gray-500">{{ event.error_reason }}</p><p v-if="event.user_ids?.length" class="text-gray-500" data-testid="risk-event-users">{{ tr('userIDs') }}: {{ event.user_ids.join(', ') }}</p></td>
               <td class="max-w-xs break-all p-2">{{ event.user_agent || '—' }}</td>
             </tr></tbody>
           </table></div>
@@ -179,7 +195,7 @@ const anonymousReleaseIP = ref('')
 const showBlacklist = ref(false)
 onDeactivated(() => { showBlacklist.value = false })
 const counterKeys = ['login_attempts', 'login_failures', 'register_attempts', 'register_failures', 'verification_attempts'] as const
-const reasons = [...counterKeys, 'ip_blacklist', 'country_blocked', 'country_not_allowed', 'country_unknown', 'user_agent_blocked', 'empty_user_agent', 'invalid_client_ip', 'risk_store_unavailable']
+const reasons = [...counterKeys, 'multi_account_ip', 'multi_account_subnet', 'ip_blacklist', 'country_blocked', 'country_not_allowed', 'country_unknown', 'user_agent_blocked', 'empty_user_agent', 'invalid_client_ip', 'risk_store_unavailable']
 let disposed = false
 onBeforeUnmount(() => { disposed = true })
 onMounted(() => { if (initiallyOpen) void load() })

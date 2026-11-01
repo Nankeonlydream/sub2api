@@ -218,6 +218,10 @@ func newGrokMediaSlotHandler(t *testing.T, oauth, mismatch bool, platforms ...st
 			accounts[i].Platform = platforms[0]
 			accounts[i].Credentials["base_url"] = "https://ark.cn-beijing.volces.com/api/v3"
 			accounts[i].Credentials["openai_capabilities"] = []string{"seedance"}
+			if platforms[0] == service.PlatformDeepseek {
+				// Unmapped DeepSeek accounts only serve deepseek-* text models.
+				accounts[i].Credentials["model_mapping"] = map[string]any{"ttsedanco2.0-480": "ttsedanco2.0-480"}
+			}
 		}
 		if oauth {
 			accounts[i].Type = service.AccountTypeOAuth

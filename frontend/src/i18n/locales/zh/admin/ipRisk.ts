@@ -10,6 +10,18 @@ export default {
   anonymousUnbanHint: "只限制无效凭据。解除仅清理该精确 IP 的匿名计数和 ban，不删除永久黑名单或登录封禁；继续失败可再次触发。",
   anonymousUnban: "解除匿名封禁",
 
+  multiAccountTitle: '同 IP 多账户登录检测',
+  multiAccountHint: '独立开关，默认关闭。统计同一 IP、同一 IPv4 /24（IPv6 /48）网段在窗口内通过密码校验的不同账户数，达到阈值才动作，正常用户无感知。需同时开启上方「启用 IP 风控」；上方观察模式优先。白名单豁免。',
+  multiAccountEnabled: '启用多账户检测',
+  multiAccountObserve: '仅观察（只记录事件，不拦截）',
+  multiAccountIPLimit: '单 IP 不同账户数（0 关闭）',
+  multiAccountSubnetLimit: '同网段不同账户数（0 关闭）',
+  multiAccountRevoke: '触发时撤销该 IP / 网段窗口内登录过的账户会话',
+  multiAccountPolicy: '实际拦截时：触发的登录被拒绝，该 IP 按上方封禁时长封禁，涉及账户的刷新令牌立即失效（已签发的访问令牌到期后失效），不冻结账户。共享出口（公司、学校、CGNAT）可能误判，建议先观察。解封会同时清空该 IP 及其网段的多账户记录。Redis 不可用时跳过检测、放行登录。',
+  multiAccountNotify: '触发时邮件通知管理员',
+  multiAccountNotifyHint: '发送到「智能运维 → 账号运维 → 通知通道」中配置的邮箱，需先配置 SMTP。观察模式也会通知。同一 IP 在一个封禁周期内只通知一次，全站每小时最多 10 封；邮件异步发送，失败不影响登录。',
+  userIDs: '涉及账户',
+
   title: 'IP 风控与访问记录',
   description: '配置全站 IP / 国家拦截，查看认证请求，并对高频登录、注册和验证码请求自动封禁。建议先开启观察模式。',
   load: '加载 / 重新加载配置',
@@ -122,6 +134,7 @@ export default {
     allowed: '风控放行', whitelisted: '白名单豁免', blocked: '已拦截', would_block: '观察：应拦截',
     auto_banned: '已触发自动封禁', would_ban: '观察：应自动封禁', disabled: '风控未执行', unavailable: '风控服务不可用',
     login_attempts: '登录请求频繁', login_failures: '凭证验证频繁失败', register_attempts: '注册请求频繁', register_failures: '注册频繁失败', verification_attempts: '验证码 / 恢复请求频繁',
+    multi_account_ip: '同 IP 登录多个账户', multi_account_subnet: '同网段登录多个账户',
     ip_blacklist: 'IP 黑名单命中', country_blocked: '国家规则命中', country_not_allowed: '不在允许地区', country_unknown: '国家归属未知', user_agent_blocked: 'UA 规则命中', empty_user_agent: 'UA 为空', invalid_client_ip: '客户端 IP 无效', risk_store_unavailable: '风控存储不可用',
     trusted_proxy_chain: '可信代理链', verified_serverless: '已验证节点转发', direct_peer: '直接连接对端'
   }

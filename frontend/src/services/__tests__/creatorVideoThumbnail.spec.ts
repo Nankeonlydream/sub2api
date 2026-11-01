@@ -5,9 +5,12 @@ import { getCreatorVideoThumbnail } from '../creatorVideoThumbnail'
 describe('creatorVideoThumbnail', () => {
   let videos: HTMLVideoElement[]
   let drawImage: ReturnType<typeof vi.fn>
+  let getImageData: ReturnType<typeof vi.fn>
+  const pixels = (alpha: number) => ({ data: new Uint8ClampedArray(128 * 128 * 4).fill(alpha) })
   beforeEach(() => {
     videos = []
     drawImage = vi.fn()
+    getImageData = vi.fn(() => pixels(255))
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(function () {
       if (this.hasAttribute('src') && !videos.includes(this as HTMLVideoElement)) {
         Object.defineProperties(this, {
@@ -18,7 +21,7 @@ describe('creatorVideoThumbnail', () => {
       }
     })
     vi.stubGlobal('URL', { createObjectURL: vi.fn(() => 'blob:local-video-cover'), revokeObjectURL: vi.fn() })
-    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
+    vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage, getImageData } as unknown as CanvasRenderingContext2D)
     vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue('data:image/webp;base64,video-cover')
   })
   afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
@@ -57,6 +60,34 @@ describe('creatorVideoThumbnail', () => {
     expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:local-video-cover')
     videos[1].dispatchEvent(new Event('error'))
     expect(await third).toBe('')
+  })
+
+  it('redraws instead of saving a transparent frame the decoder has not presented yet', async () => {
+    vi.useFakeTimers()
+    getImageData.mockReturnValueOnce(pixels(0))
+    const cover = getCreatorVideoThumbnail('blank-frame-cover', new Blob(['video']), new AbortController().signal)
+    await vi.advanceTimersByTimeAsync(0)
+    // No further media events arrive once a paused, seeked video settles.
+    videos[0].dispatchEvent(new Event('loadedmetadata'))
+    expect(drawImage).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(200)
+    expect(drawImage).toHaveBeenCalledTimes(2)
+    expect(await cover).toBe('data:image/webp;base64,video-cover')
+  })
+
+  it('waits for a hidden tab to become visible before decoding', async () => {
+    let visibility: DocumentVisibilityState = 'hidden'
+    vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+    const cover = getCreatorVideoThumbnail('hidden-tab-cover', new Blob(['video']), new AbortController().signal)
+    await flushPromises()
+    expect(videos).toHaveLength(0)
+    visibility = 'visible'
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(videos).toHaveLength(1)
+    videos[0].dispatchEvent(new Event('loadedmetadata'))
+    videos[0].dispatchEvent(new Event('seeked'))
+    expect(await cover).toBe('data:image/webp;base64,video-cover')
   })
 
   it('releases a stalled decoder and continues processing the next row', async () => {

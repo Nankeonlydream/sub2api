@@ -1296,8 +1296,9 @@ func TestForwardGrokMediaAppliesAccountModelMappingAfterEndpointNormalization(t 
 			modelMapping:     map[string]any{"grok-imagine-image-quality": "vendor-image-model"},
 			wantRequestModel: "grok-imagine-image-quality",
 			wantUpstream:     "vendor-image-model",
-			wantBody:         `{"model":"vendor-image-model","prompt":"draw","resolution":"1k","aspect_ratio":"1:1"}`,
-			responseBody:     `{"data":[{"url":"https://images.test/mapped.png"}]}`,
+			// Compatible relays keep size so they bill the requested tier.
+			wantBody:     `{"model":"vendor-image-model","prompt":"draw","size":"1024x1024","resolution":"1k","aspect_ratio":"1:1"}`,
+			responseBody: `{"data":[{"url":"https://images.test/mapped.png"}]}`,
 		},
 		{
 			name:             "whitespace mapping target safely preserves normalized model",

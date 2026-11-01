@@ -2046,6 +2046,10 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 		return a.Platform == PlatformMiniMax && a.Type == AccountTypeAPIKey && !a.IsCodingPlan() &&
 			strings.TrimSpace(a.GetCredential("base_url")) != ""
 	}
+	if capability == OpenAIEndpointCapabilitySeedanceVideo {
+		return a.Platform == PlatformDeepseek &&
+			a.Type == AccountTypeAPIKey && strings.TrimSpace(a.GetCredential("base_url")) != ""
+	}
 	if capability == OpenAIEndpointCapabilitySeedance {
 		configured, _ := a.openAIEndpointCapabilitySet()
 		return configured["seedance"] && a.Platform == PlatformOpenAI && a.Type == AccountTypeAPIKey &&

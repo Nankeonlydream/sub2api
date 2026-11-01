@@ -32,6 +32,24 @@ describe('CreatorImage', () => {
     wrapper.unmount()
   })
 
+  it('keeps the preview open for clicks on the picture but not on its letterbox', () => {
+    const wrapper = mount(CreatorImage, { props: { src: '/wide.png', alt: '作品', preview: true } })
+    const image = wrapper.get('img').element as HTMLImageElement
+    // A 2:1 image contained in a 1000x1000 box paints 1000x500, centered.
+    Object.defineProperty(image, 'naturalWidth', { value: 2048 })
+    Object.defineProperty(image, 'naturalHeight', { value: 1024 })
+    image.getBoundingClientRect = () => ({ left: 0, top: 0, width: 1000, height: 1000 }) as DOMRect
+    const click = (clientY: number) => {
+      const event = new MouseEvent('click', { bubbles: true, clientX: 500, clientY })
+      const stop = vi.spyOn(event, 'stopPropagation')
+      image.dispatchEvent(event)
+      return stop.mock.calls.length > 0
+    }
+    expect(click(500)).toBe(true)
+    expect(click(100)).toBe(false)
+    wrapper.unmount()
+  })
+
   it('ignores decoding a previous selection and supports retry after an error', async () => {
     const wrapper = mount(CreatorImage, { props: { src: '/first.png', alt: '作品' } })
     let finishDecode!: () => void
@@ -75,9 +93,9 @@ describe('CreatorImage', () => {
     await flushPromises()
     first.unmount()
 
-    vi.useFakeTimers()
     const second = mount(CreatorImage, { props: { ...props, preview: true } })
-    expect(second.find('[role="status"]').exists()).toBe(false)
+    // Cache hits keep the feedback hidden behind a CSS delay instead of flashing it.
+    expect(second.get('[role="status"]').classes()).toContain('is-delayed')
     expect(second.get('img').classes()).toContain('was-displayed')
     expect(second.get('img').classes()).not.toContain('is-ready')
     const decode = vi.fn().mockResolvedValue(undefined)
@@ -85,7 +103,6 @@ describe('CreatorImage', () => {
     await second.get('img').trigger('load')
     expect(decode).toHaveBeenCalledOnce()
     await flushPromises()
-    await vi.advanceTimersByTimeAsync(200)
     expect(second.find('[role="status"]').exists()).toBe(false)
     expect(second.get('img').classes()).toContain('is-ready')
     second.unmount()
@@ -95,14 +112,14 @@ describe('CreatorImage', () => {
     const wrapper = mount(CreatorImage, { props: { src: '/switch-a.png', alt: '作品' } })
     await wrapper.get('img').trigger('load')
     await wrapper.setProps({ src: '/switch-b.png' })
-    expect(wrapper.find('[role="status"]').exists()).toBe(true)
+    expect(wrapper.get('[role="status"]').classes()).not.toContain('is-delayed')
     await wrapper.setProps({ src: '/switch-a.png' })
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.get('[role="status"]').classes()).toContain('is-delayed')
     expect(wrapper.get('img').classes()).toContain('was-displayed')
     wrapper.unmount()
   })
 
-  it.each([false, true])('shows feedback for a previously displayed large image until it finishes decoding (preview=%s)', async preview => {
+  it.each([false, true])('keeps feedback for a previously displayed large image until it finishes decoding (preview=%s)', async preview => {
     vi.useFakeTimers()
     const props = { src: `/slow-cached-${preview}.png`, alt: '作品', preview }
     const first = mount(CreatorImage, { props })
@@ -113,10 +130,10 @@ describe('CreatorImage', () => {
     Object.defineProperty(wrapper.get('img').element, 'decode', {
       value: () => new Promise<void>(resolve => { finishDecode = resolve }),
     })
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    // Rendered from the start (revealed by CSS), so a blocked main thread
+    // cannot leave one card without feedback.
+    expect(wrapper.get('[role="status"]').classes()).toContain('is-delayed')
     expect(wrapper.get('img').classes()).not.toContain('is-ready')
-    await vi.advanceTimersByTimeAsync(150)
-    expect(wrapper.find('[role="status"]').exists()).toBe(true)
     await wrapper.get('img').trigger('load')
     expect(wrapper.find('[role="status"]').exists()).toBe(true)
     expect(wrapper.get('img').classes()).not.toContain('is-ready')
@@ -129,19 +146,26 @@ describe('CreatorImage', () => {
     expect(vi.getTimerCount()).toBe(0)
   })
 
-  it('clears delayed feedback on selection changes and unmount', async () => {
+  it('shows a downscaled blob for large data URLs and falls back to the original', async () => {
+    const props = { src: 'data:image/png;base64,iVBORw0KGgo=', alt: '作品', cacheKey: 'downscale-fallback:1:0', downscale: true }
+    const wrapper = mount(CreatorImage, { props })
+    // jsdom has no createImageBitmap, so the original is used once resolution settles.
+    expect(wrapper.find('img').exists()).toBe(false)
+    expect(wrapper.find('[role="status"]').exists()).toBe(true)
+    await flushPromises()
+    expect(wrapper.get('img').attributes('src')).toBe(props.src)
+    wrapper.unmount()
+  })
+
+  it('does not schedule timers for loading feedback', async () => {
     vi.useFakeTimers()
     const wrapper = mount(CreatorImage, { props: { src: '/timer-a.png', alt: '作品' } })
     await wrapper.get('img').trigger('load')
     await wrapper.setProps({ src: '/timer-b.png' })
     await wrapper.get('img').trigger('load')
     await wrapper.setProps({ src: '/timer-a.png' })
-    await vi.advanceTimersByTimeAsync(100)
-    await wrapper.setProps({ src: '/timer-b.png' })
-    await vi.advanceTimersByTimeAsync(50)
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
-    wrapper.unmount()
     expect(vi.getTimerCount()).toBe(0)
+    wrapper.unmount()
   })
 
   it('does not let a late decode hide a load error', async () => {
@@ -165,11 +189,11 @@ describe('CreatorImage', () => {
     await first.get('img').trigger('load')
     first.unmount()
     const wrapper = mount(CreatorImage, { props })
-    expect(wrapper.find('[role="status"]').exists()).toBe(false)
+    expect(wrapper.get('[role="status"]').classes()).toContain('is-delayed')
     await wrapper.get('img').trigger('error')
     expect(wrapper.find('[role="alert"]').exists()).toBe(true)
     await wrapper.get('.creator-image-retry').trigger('click')
-    expect(wrapper.find('[role="status"]').exists()).toBe(true)
+    expect(wrapper.get('[role="status"]').classes()).not.toContain('is-delayed')
     expect(wrapper.get('img').classes()).not.toContain('was-displayed')
     wrapper.unmount()
   })
@@ -186,7 +210,7 @@ describe('CreatorImage', () => {
     resolveDecode()
     await flushPromises()
     const second = mount(CreatorImage, { props })
-    expect(second.find('[role="status"]').exists()).toBe(true)
+    expect(second.get('[role="status"]').classes()).not.toContain('is-delayed')
     second.unmount()
   })
 })

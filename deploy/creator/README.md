@@ -1,5 +1,7 @@
 # 创作中心日常升级入口
 
+> 2026-10-22 晚：用户明确要求将左侧 `catbee.online` 从 Wei-Shaw 官方 v0.2.17 切回本地 Creator 最新版本，已部署 `2.16.0-creator.1`。下述 Creator 流程再次适用于两侧，仍只更新用户指定节点。详见 `DEPLOYMENT-2026-10-22-left-creator-v2.16.0.md`；此前官方切换记录保留于 `DEPLOYMENT-2026-10-22-left-official.md`。
+
 下次给 Codex 发送：
 
 > 按 `/Users/haojie/Documents/CatBee/sub2api-ranxi-creator/deploy/creator/README.md` 升级右侧到上游最新稳定版，保留创作中心，不备份数据库。

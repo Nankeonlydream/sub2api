@@ -1,4 +1,11 @@
 import { buildGatewayUrl } from './client'
+import {
+  MINIMAX_H3_ASPECT_RATIOS,
+  MINIMAX_H3_MAX_REFERENCE_IMAGES,
+  miniMaxH3Tier,
+  type MiniMaxH3Tier,
+} from '@/utils/miniMaxH3'
+import { seedanceVideoTier, type SeedanceVideoTier } from '@/utils/seedanceVideo'
 
 export interface CreatorImagePricing {
   currency: 'USD'
@@ -15,8 +22,9 @@ export async function getCreatorImagePricing(apiKey: string, model: string, sign
 
 export interface CreatorVideoPricing {
   currency: 'USD'
-  // Each resolution lists costs for durations 1–15 seconds.
-  prices: Record<string, number[]>
+  // Each resolution lists costs for durations 1–15 seconds; null marks a
+  // duration the model cannot produce.
+  prices: Record<string, Array<number | null>>
 }
 
 export async function getCreatorVideoPricing(apiKey: string, model: string, signal?: AbortSignal): Promise<CreatorVideoPricing> {
@@ -160,7 +168,18 @@ function creatorErrorFromBody(response: Response, body: any): CreatorError {
 async function fetchJSON<T>(url: string, init: RequestInit): Promise<T> {
   const response = await fetch(url, init)
   if (!response.ok) throw await parseCreatorError(response)
-  const body = await response.json()
+  let body: any
+  try {
+    body = await response.json()
+  } catch {
+    // Safari reports a non-JSON body (proxy timeout page, truncated payload)
+    // as "The string did not match the expected pattern."
+    const error = new Error('上游返回了无法解析的响应，可能是网关超时或连接中断') as CreatorError
+    error.status = response.status
+    error.code = response.status
+    error.requestId = response.headers.get('X-Request-Id') || ''
+    throw error
+  }
   // A non-streaming image heartbeat commits HTTP 200 before a late upstream
   // error is known. Treat the final OpenAI error envelope as a failed request.
   if (body?.error) throw creatorErrorFromBody(response, body)
@@ -379,6 +398,41 @@ export function generateCreatorImage(
     : generateOpenAIImage(apiKey, input)
 }
 
+// Relay tiers (MiniMax H3, Seedance) share one request shape: the model fixes
+// resolution and the allowed lengths; the gateway adapts it per relay.
+function createRelayVideoPayload(input: VideoGenerationInput, tier: MiniMaxH3Tier | SeedanceVideoTier, images: string[], provider: string) {
+  const seedance = 'supportsUploadedReferences' in tier ? tier : null
+  const ratios = tier.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
+  const maxImages = seedance?.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES
+  // Resolution comes from the model; fixed tiers take no duration field.
+  const seconds = Math.round(Number(input.duration ?? tier.minSeconds))
+  if (seconds < tier.minSeconds || seconds > tier.maxSeconds) {
+    throw new Error(tier.minSeconds === tier.maxSeconds
+      ? `该 ${provider} 模型固定生成 ${tier.minSeconds} 秒视频`
+      : `该 ${provider} 模型时长需为 ${tier.minSeconds}–${tier.maxSeconds} 秒`)
+  }
+  if (tier.allowedSeconds && !tier.allowedSeconds.includes(seconds)) {
+    throw new Error(`该 ${provider} 模型时长只能是 ${tier.allowedSeconds.join(' 或 ')} 秒`)
+  }
+  if (images.length && seedance && !seedance.supportsUploadedReferences) {
+    throw new Error('该 Seedance 模型只支持文生视频，不能使用参考图')
+  }
+  if (!images.length && 'requiresReference' in tier && tier.requiresReference) {
+    throw new Error(`该 ${provider} 模型需要至少 1 张参考图，请改用参考图生视频`)
+  }
+  if (images.length > maxImages) {
+    throw new Error(`${provider} 最多支持 ${maxImages} 张参考图`)
+  }
+  return {
+    ...input.extra,
+    model: input.model,
+    prompt: input.prompt,
+    ...(tier.minSeconds !== tier.maxSeconds ? { seconds } : {}),
+    ...(input.aspectRatio && ratios.includes(input.aspectRatio) ? { aspect_ratio: input.aspectRatio } : {}),
+    ...(images.length ? { images } : {}),
+  }
+}
+
 export async function createCreatorVideo(
   apiKey: string,
   input: VideoGenerationInput,
@@ -387,14 +441,21 @@ export async function createCreatorVideo(
   if (input.imageDataUrl && referenceImageDataUrls.length) {
     throw new Error('首帧图与参考图不能同时用于同一个视频请求')
   }
-  if (referenceImageDataUrls.length > 7) {
+  const h3Tier = miniMaxH3Tier(input.model)
+  const seedanceTier = seedanceVideoTier(input.model)
+  const relayTier = h3Tier || seedanceTier
+  const relayProvider = h3Tier ? 'MiniMax H3' : 'Seedance'
+  if (relayTier && input.imageDataUrl) {
+    throw new Error(`${relayProvider} 不支持首帧图生视频，请改用参考图生视频`)
+  }
+  if (!relayTier && referenceImageDataUrls.length > 7) {
     throw new Error('参考图生视频最多支持 7 张参考图')
   }
   const normalizedModel = input.model.trim().replace(/^models\//i, '')
-  if (referenceImageDataUrls.length && !/^grok-imagine-video-1\.5(?:$|-)/i.test(normalizedModel)) {
-    throw new Error('参考图生视频仅支持 Grok Imagine Video 1.5 模型')
+  if (!relayTier && referenceImageDataUrls.length && !/^grok-imagine-video-1\.5(?:$|-)/i.test(normalizedModel)) {
+    throw new Error('参考图生视频仅支持 Grok Imagine Video 1.5 或 MiniMax H3 模型')
   }
-  const payload = {
+  const payload = relayTier ? createRelayVideoPayload(input, relayTier, referenceImageDataUrls, relayProvider) : {
     ...input.extra,
     model: input.model,
     prompt: input.prompt,
@@ -433,7 +494,13 @@ export async function getCreatorVideoStatus(
   )
   const nested = body?.video || body?.data || {}
   const nestedVideo = nested?.video || {}
+  // Relays (MiniMax H3, Seedance) report the video in metadata.url / result_url.
+  // A relay may report a relative /v1/videos/{id}/content path; content download
+  // already covers it with the key, so never fetch it as a playback URL.
+  const metadataUrl = /^https?:\/\//i.test(String(body?.metadata?.url || '')) ? body.metadata.url : undefined
   const url =
+    metadataUrl ||
+    body?.result_url ||
     body?.url ||
     body?.video_url ||
     body?.download_url ||

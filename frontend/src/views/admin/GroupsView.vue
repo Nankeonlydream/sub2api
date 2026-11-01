@@ -1116,6 +1116,11 @@
           v-model="createForm.video_model_prices"
           :multiplier="createForm.rate_multiplier"
         />
+        <SeedanceVideoPricing
+          v-if="createForm.platform === 'deepseek'"
+          v-model="createForm.video_model_prices"
+          :multiplier="createForm.rate_multiplier"
+        />
         <!-- 视频生成计费配置（仅 Grok 平台） -->
         <div
           v-if="supportsVideoPricingPlatform(createForm.platform)"
@@ -2808,6 +2813,11 @@
           v-model="editForm.video_model_prices"
           :multiplier="editForm.rate_multiplier"
         />
+        <SeedanceVideoPricing
+          v-if="editForm.platform === 'deepseek'"
+          v-model="editForm.video_model_prices"
+          :multiplier="editForm.rate_multiplier"
+        />
         <!-- 视频生成计费配置（仅 Grok 平台） -->
         <div
           v-if="supportsVideoPricingPlatform(editForm.platform)"
@@ -4425,6 +4435,7 @@ import {
 import type { Column } from "@/components/common/types";
 import AppLayout from "@/components/layout/AppLayout.vue";
 import MiniMaxH3VideoPricing from "./MiniMaxH3VideoPricing.vue";
+import SeedanceVideoPricing from "./SeedanceVideoPricing.vue";
 import TablePageLayout from "@/components/layout/TablePageLayout.vue";
 import DataTable from "@/components/common/DataTable.vue";
 import Pagination from "@/components/common/Pagination.vue";

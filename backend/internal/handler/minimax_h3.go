@@ -14,17 +14,27 @@ import (
 
 // MiniMaxH3Videos exposes the custom relay's JSON OpenAI Videos API.
 func (h *OpenAIGatewayHandler) MiniMaxH3Videos(c *gin.Context) {
-	endpoint, taskID := service.MiniMaxH3EndpointCreate, ""
+	h.relayVideos(c, "MiniMax-H3", service.MiniMaxH3EndpointCreate, service.MiniMaxH3EndpointStatus, service.MiniMaxH3EndpointContent, service.MiniMaxH3TaskKey)
+}
+
+// SeedanceVideos exposes the Seedance relays, which speak the same JSON
+// OpenAI Videos API as H3 (not Ark's native task API; see SeedanceTasks).
+func (h *OpenAIGatewayHandler) SeedanceVideos(c *gin.Context) {
+	h.relayVideos(c, "Seedance", service.SeedanceVideoEndpointCreate, service.SeedanceVideoEndpointStatus, service.SeedanceVideoEndpointContent, service.SeedanceVideoTaskKey)
+}
+
+func (h *OpenAIGatewayHandler) relayVideos(c *gin.Context, name string, create, status, content service.GrokMediaEndpoint, taskKey func(string) string) {
+	endpoint, taskID := create, ""
 	if c.Request.Method != http.MethodPost {
-		endpoint = service.MiniMaxH3EndpointStatus
-		taskID = service.MiniMaxH3TaskKey(c.Param("request_id"))
+		endpoint = status
+		taskID = taskKey(c.Param("request_id"))
 		if strings.HasSuffix(c.Request.URL.Path, "/content") {
-			endpoint = service.MiniMaxH3EndpointContent
+			endpoint = content
 		}
 	} else {
 		mediaType, _, err := mime.ParseMediaType(c.GetHeader("Content-Type"))
 		if err != nil || mediaType != "application/json" {
-			h.errorResponse(c, http.StatusUnsupportedMediaType, "invalid_request_error", "MiniMax-H3 requires application/json")
+			h.errorResponse(c, http.StatusUnsupportedMediaType, "invalid_request_error", name+" requires application/json")
 			return
 		}
 	}
@@ -35,7 +45,8 @@ func (h *OpenAIGatewayHandler) MiniMaxH3Videos(c *gin.Context) {
 // Successful status and content requests share one claim and durable billing ID.
 // Failed/queued/unknown jobs never charge. Always bill requested seconds, even
 // when the completed MP4 duration differs or the upstream omits billing fields.
-func prepareMiniMaxH3CompletionBilling(ctx context.Context, h *OpenAIGatewayHandler, key *service.APIKey, subject middleware.AuthSubject, taskID string, result *service.OpenAIForwardResult) *service.OpenAIForwardResult {
+// Shared by the MiniMax-H3 and Seedance relays.
+func prepareRelayVideoCompletionBilling(ctx context.Context, h *OpenAIGatewayHandler, key *service.APIKey, subject middleware.AuthSubject, taskID string, result *service.OpenAIForwardResult) *service.OpenAIForwardResult {
 	if result == nil || result.VideoCount != 1 {
 		return nil
 	}

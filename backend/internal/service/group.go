@@ -61,7 +61,11 @@ type Group struct {
 	// (groups.video_model_prices JSONB). Shape: family → resolution → USD/s.
 	// When set for a model, overrides VideoPrice* for that model only.
 	// MiniMax-H3 instead stores one per_second (USD/s) or request_<1..15>s
-	// (USD/request) tariff; absence disables H3 creation. See QuoteMiniMaxH3Video.
+	// (USD/request) tariff, or 768p/1440p USD/s prices; absence disables H3
+	// creation. Zhongheng H3 model IDs carry their own price beside it. See
+	// QuoteMiniMaxH3Model. Seedance relays store one USD price per
+	// catalog model ID under "seedance" (per second or per request, by model).
+	// See QuoteSeedanceVideo.
 	VideoModelPrices map[string]map[string]float64
 	// Codex alpha/search 网页搜索单次价格（USD/次，仅 openai 平台使用）；
 	// nil 表示使用默认价 defaultWebSearchPricePerCall（官方 $10/1000 次）。
