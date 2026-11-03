@@ -21,9 +21,10 @@ import (
 )
 
 type AsyncImageHandler struct {
-	tasks   *service.ImageTaskService
-	openAI  *OpenAIGatewayHandler
-	execute func(platform string, c *gin.Context)
+	tasks        *service.ImageTaskService
+	openAI       *OpenAIGatewayHandler
+	execute      func(platform string, c *gin.Context)
+	creatorBills creatorImageTaskBills
 }
 
 func NewAsyncImageHandler(tasks *service.ImageTaskService, openAI *OpenAIGatewayHandler) *AsyncImageHandler {
@@ -101,6 +102,9 @@ func (h *AsyncImageHandler) Submit(c *gin.Context) {
 	}
 
 	taskCtx, recorder, cancel := newAsyncImageContext(c, body, h.tasks.ExecutionTimeout())
+	if isCreatorRequest(c, apiKey, "image") {
+		taskCtx.Set(creatorImageTaskBillContextKey, &creatorImageTaskBill{})
+	}
 	task, err := h.tasks.Create(c.Request.Context(), service.ImageTaskOwner{UserID: apiKey.UserID, APIKeyID: apiKey.ID})
 	if err != nil {
 		cancel()
@@ -185,6 +189,21 @@ func (h *AsyncImageHandler) Get(c *gin.Context) {
 		c.Header("Retry-After", "3")
 	}
 	c.JSON(http.StatusOK, task)
+	if task.Status == service.ImageTaskStatusProcessing {
+		return
+	}
+	// The first read that hands a finished Creator result to a still-connected
+	// page pays for it; a failed offload or a vanished page pays nothing.
+	if task.Status != service.ImageTaskStatusCompleted {
+		h.creatorBills.take(task.ID)
+		return
+	}
+	if c.Request.Context().Err() != nil {
+		return
+	}
+	if charge := h.creatorBills.take(task.ID); charge != nil {
+		charge()
+	}
 }
 
 func (h *AsyncImageHandler) validateRequest(c *gin.Context, platform string, body []byte) error {
@@ -243,6 +262,13 @@ func (h *AsyncImageHandler) run(taskID, platform string, taskCtx *gin.Context, r
 		if len(body) == 0 || !json.Valid(body) {
 			h.failTask(taskID, http.StatusBadGateway, imageTaskErrorPayload("api_error", "upstream returned an invalid image response"))
 			return
+		}
+		// Register before the task turns completed so no poll can see the result
+		// without its bill.
+		if value, ok := taskCtx.Get(creatorImageTaskBillContextKey); ok {
+			if bill, _ := value.(*creatorImageTaskBill); bill != nil && bill.charge != nil {
+				h.creatorBills.store(taskID, bill.charge)
+			}
 		}
 		if err := h.tasks.Complete(context.Background(), taskID, statusCode, json.RawMessage(body)); err != nil {
 			logger.L().Error("image_task.complete_store_failed", zap.String("task_id", taskID), zap.Error(err))

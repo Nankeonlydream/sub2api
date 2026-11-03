@@ -17,6 +17,8 @@ const {
   putHistory,
   removeHistory,
   generateImage,
+  submitImageTask,
+  getImageTask,
   getImagePricing,
   getVideoPricing,
   createVideo,
@@ -42,6 +44,8 @@ const {
   putHistory: vi.fn(),
   removeHistory: vi.fn(),
   generateImage: vi.fn(),
+  submitImageTask: vi.fn(),
+  getImageTask: vi.fn(),
   getImagePricing: vi.fn(),
   getVideoPricing: vi.fn(),
   createVideo: vi.fn(),
@@ -76,6 +80,8 @@ vi.mock('@/api/groups', () => ({
 vi.mock('@/api/creator', () => ({
   listCreatorModels: listModels,
   generateCreatorImage: generateImage,
+  submitCreatorImageTask: submitImageTask,
+  getCreatorImageTask: getImageTask,
   getCreatorImagePricing: getImagePricing,
   getCreatorVideoPricing: getVideoPricing,
   createCreatorVideo: createVideo,
@@ -237,6 +243,8 @@ describe('CreatorStudioView', () => {
     composeVideoSegments.mockReset().mockResolvedValue(new Blob(['complete'], { type: 'video/mp4' }))
     removeHistory.mockResolvedValue(undefined)
     generateImage.mockResolvedValue({ data: [{ url: 'data:image/png;base64,UE5H' }] })
+    // Async image tasks need object storage; most tests cover the synchronous fallback.
+    submitImageTask.mockResolvedValue(null)
     createVideo.mockResolvedValue({ id: 'video-task-1' })
     getVideoStatus.mockResolvedValue({
       id: 'video-task-1',
@@ -719,6 +727,170 @@ describe('CreatorStudioView', () => {
     expect(generateImage).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({ model }))
     expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ model }))
     wrapper.unmount()
+  })
+
+  it('keeps an Image2 server task in history until its image is saved', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    submitImageTask.mockResolvedValue('imgtask_1')
+    getImageTask.mockResolvedValue({ status: 'completed', result: { data: [{ url: 'data:image/png;base64,UE5H' }] } })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.findAll('.capability-switch button')[0].trigger('click')
+    await flushPromises()
+    await wrapper.get('#creator-prompt').setValue('画一只猫')
+    await wrapper.get('.generate-button').trigger('click')
+    await flushPromises()
+
+    expect(submitImageTask).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({ model: 'gpt-image-2' }))
+    expect(generateImage).not.toHaveBeenCalled()
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({ imageTaskIds: ['imgtask_1'], status: 'pending' }))
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({
+      status: 'completed',
+      imageTaskIds: [],
+      outputs: ['data:image/png;base64,UE5H'],
+    }))
+    wrapper.unmount()
+  })
+
+  it('loads a refreshed image work from its saved server task', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const work = {
+      id: 'refreshed-image',
+      type: 'image',
+      status: 'pending',
+      prompt: '年轻人坐在公寓窗边阅读',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      groupId: image2Group.id,
+      apiKeyId: image2Key.id,
+      imageCapability: 'image2',
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now() - 50_000,
+      outputs: [],
+      outputCount: 2,
+      imageTaskIds: ['imgtask_a'],
+    } as const
+    listGroups.mockResolvedValue([image2Group])
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    submitImageTask.mockResolvedValue('imgtask_next')
+    getImageTask
+      .mockResolvedValueOnce({ status: 'processing' })
+      .mockResolvedValueOnce({ status: 'completed', result: { data: [{ url: 'data:image/png;base64,QQ==' }] } })
+      .mockResolvedValueOnce({ status: 'completed', result: { data: [{ url: 'data:image/png;base64,Qg==' }] } })
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      // Polling starts on page load, before the work is opened.
+      expect(getImageTask).toHaveBeenCalledWith(image2Key.key, 'imgtask_a', expect.anything())
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      expect(getImageTask).toHaveBeenCalledTimes(1)
+      expect(wrapper.find('.generation-state').exists()).toBe(true)
+
+      await vi.advanceTimersByTimeAsync(3000)
+      await flushPromises()
+      expect(wrapper.find('.generation-state').exists()).toBe(false)
+      // The image that was never submitted before the refresh is submitted now.
+      expect(submitImageTask).toHaveBeenCalledTimes(1)
+      expect(submitImageTask).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({ model: 'gpt-image-2', prompt: work.prompt, n: 1 }))
+      expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({
+        id: work.id,
+        status: 'completed',
+        imageTaskIds: [],
+        outputs: ['data:image/png;base64,QQ==', 'data:image/png;base64,Qg=='],
+      }))
+      expect(putHistory).not.toHaveBeenLastCalledWith(expect.objectContaining({ error: expect.anything() }))
+      expect(generateImage).not.toHaveBeenCalled()
+      expect(showSuccess).toHaveBeenCalledWith('图片已同步到本地')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not resubmit the rest of a refreshed image work that used reference images', async () => {
+    const work = {
+      id: 'refreshed-image-reference',
+      type: 'image',
+      status: 'pending',
+      prompt: '把这张照片变成水彩画',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      groupId: image2Group.id,
+      apiKeyId: image2Key.id,
+      imageCapability: 'image2',
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now() - 50_000,
+      outputs: [],
+      outputCount: 2,
+      referenceCount: 1,
+      imageTaskIds: ['imgtask_r'],
+    } as const
+    listGroups.mockResolvedValue([image2Group])
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    getImageTask.mockResolvedValue({ status: 'completed', result: { data: [{ url: 'data:image/png;base64,QQ==' }] } })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    expect(submitImageTask).not.toHaveBeenCalled()
+    expect(generateImage).not.toHaveBeenCalled()
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({
+      id: work.id,
+      status: 'completed',
+      outputs: ['data:image/png;base64,QQ=='],
+      error: expect.stringContaining('已同步 1 / 2 张'),
+    }))
+    wrapper.unmount()
+  })
+
+  it('keeps a refreshed image pending when its task status cannot be read yet', async () => {
+    const work = {
+      id: 'refreshed-image-offline',
+      type: 'image',
+      status: 'pending',
+      prompt: '雨后的城市街角',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      groupId: image2Group.id,
+      apiKeyId: image2Key.id,
+      imageCapability: 'image2',
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now() - 50_000,
+      outputs: [],
+      outputCount: 1,
+      imageTaskIds: ['imgtask_b'],
+    } as const
+    listGroups.mockResolvedValue([image2Group])
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    getImageTask.mockRejectedValue(Object.assign(new Error('Unauthorized'), { status: 401 }))
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await vi.runAllTimersAsync()
+      await flushPromises()
+
+      expect(wrapper.find('.generation-state').exists()).toBe(false)
+      expect(wrapper.get('.image-refresh-command').text()).toBe('刷新生成结果')
+      expect(wrapper.text()).toContain('图片任务已保存在服务器')
+      expect(putHistory).not.toHaveBeenCalledWith(expect.objectContaining({ id: work.id, status: 'failed' }))
+      expect(showError).toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('expands, collapses, and pages through inline prompt templates', async () => {
@@ -2217,7 +2389,61 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
-  it('shows the latest pending state inline after checking a historical video task', async () => {
+  it('resumes live progress when a historical video task is checked after a refresh', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout'] })
+    const work = {
+      id: 'resumed-video-history',
+      type: 'video',
+      status: 'pending',
+      prompt: '现代化工厂车间，镜头沿自动化装配线平稳横移',
+      model: 'grok-imagine-video',
+      provider: 'Grok 视频',
+      groupName: group.name,
+      groupId: group.id,
+      createdAt: Date.now() - 200_000,
+      updatedAt: Date.now() - 20_000,
+      outputs: [],
+      aspectRatio: '16:9',
+      resolution: '720p',
+      requestId: 'resumed-video-task',
+    } as const
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    getVideoStatus
+      .mockResolvedValueOnce({ id: work.requestId, status: 'processing', progress: 40 })
+      .mockResolvedValueOnce({ id: work.requestId, status: 'processing', progress: 47 })
+      .mockResolvedValueOnce({ id: work.requestId, status: 'processing', progress: 47 })
+      .mockResolvedValueOnce({ id: work.requestId, status: 'completed', url: '/video' })
+    try {
+      const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      await flushPromises()
+      await wrapper.findAll('.history-tabs button')[1].trigger('click')
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.video-status-feedback').text()).toContain('上游进度 40%')
+
+      await wrapper.get('.status-check-command').trigger('click')
+      await flushPromises()
+      expect(getVideoStatus).toHaveBeenCalledTimes(3)
+      expect(wrapper.find('.generation-state').exists()).toBe(true)
+      expect(wrapper.get('.generation-percent').text()).toBe('47%')
+
+      await vi.advanceTimersByTimeAsync(4000)
+      await flushPromises()
+      expect(getVideoContent).toHaveBeenCalledWith(createdKey.key, work.requestId)
+      expect(wrapper.find('.generation-state').exists()).toBe(false)
+      expect(wrapper.get<HTMLVideoElement>('.result-media.video').attributes('src')).toBe('blob:creator-video')
+      expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ id: work.id, status: 'completed' }))
+      expect(showSuccess).toHaveBeenCalledWith('视频已生成并加载')
+      expect(showError).not.toHaveBeenCalled()
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('shows the latest pending state inline when opening a historical video task', async () => {
     const work = {
       id: 'pending-video-history',
       type: 'video',
@@ -2250,13 +2476,8 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     expect(getVideoStatus).toHaveBeenCalledTimes(1)
     expect(wrapper.get('.video-status-feedback').text()).toContain('任务仍在生成中，请稍后再试')
-
-    await wrapper.get('.status-check-command').trigger('click')
-    await flushPromises()
-
-    expect(getVideoStatus).toHaveBeenCalledTimes(2)
     expect(wrapper.get('.video-status-feedback').text()).toMatch(/最近检查 \d{2}:\d{2}:\d{2}/)
-    expect(showInfo).toHaveBeenCalledWith('任务仍在生成中，请稍后再试')
+    expect(wrapper.find('.generation-state').exists()).toBe(false)
     expect(showError).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -3182,6 +3403,69 @@ describe('CreatorStudioView', () => {
       wrapper.unmount()
       vi.useRealTimers()
       createVideo.mockReset()
+    }
+  })
+
+  it('retries a broken video download and keeps the finished task reloadable instead of failed', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    getVideoContent.mockReset().mockRejectedValue(new TypeError('Failed to fetch'))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    vi.useFakeTimers()
+    try {
+      await flushPromises()
+      await openGrokVideo(wrapper)
+      await flushPromises()
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('晨光卧室')
+      const generation = wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      await vi.advanceTimersByTimeAsync(12_000)
+      await generation
+      await flushPromises()
+
+      expect(getVideoContent).toHaveBeenCalledTimes(3)
+      expect(showError).not.toHaveBeenCalled()
+      expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('视频未扣费'))
+      expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'completed', requestId: 'video-task-1' }))
+      expect(wrapper.get('.result-error').text()).toContain('重新加载视频')
+
+      getVideoContent.mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
+      await wrapper.get('.status-check-command').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('video').exists()).toBe(true)
+      expect(createVideo).toHaveBeenCalledTimes(1)
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+    }
+  })
+
+  it('reloads a video previously marked failed by a broken download', async () => {
+    const work = {
+      id: 'download-failed', type: 'video', status: 'failed', prompt: '情侣', error: 'Failed to fetch',
+      model: 'grok-imagine-video', provider: 'Grok 视频', groupName: group.name, groupId: group.id,
+      apiKeyId: createdKey.id, createdAt: 1000, updatedAt: 2000, outputs: [],
+      aspectRatio: '16:9', resolution: '720p', requestId: 'video-task-1',
+    }
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    getVideoContent.mockReset().mockRejectedValueOnce(new TypeError('Failed to fetch'))
+      .mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('.history-tabs button')[1].trigger('click')
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.result-error').text()).toContain('生成失败')
+
+      await wrapper.get('.status-check-command').trigger('click')
+      await flushPromises()
+      expect(wrapper.find('video').exists()).toBe(true)
+      expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ id: work.id, status: 'completed', error: undefined }))
+    } finally {
+      wrapper.unmount()
     }
   })
 

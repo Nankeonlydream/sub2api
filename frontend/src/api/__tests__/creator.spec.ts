@@ -177,7 +177,7 @@ describe('creator gateway API', () => {
     expect(result.data[0].url).toBe('https://cdn.example/edited.png')
     const [url, init] = vi.mocked(fetch).mock.calls[0]
     expect(String(url)).toMatch(/\/v1\/images\/edits$/)
-    expect(init?.headers).toEqual({ Authorization: 'Bearer sk-edit' })
+    expect(init?.headers).toEqual({ Authorization: 'Bearer sk-edit', 'X-Sub2API-Creator': 'image' })
     expect(init?.body).toBeInstanceOf(FormData)
     const form = init?.body as FormData
     expect(form.get('model')).toBe('gpt-image-2')

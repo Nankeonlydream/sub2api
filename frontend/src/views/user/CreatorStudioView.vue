@@ -323,6 +323,16 @@
             <Icon name="exclamationTriangle" size="lg" />
             <strong>生成失败</strong>
             <p>{{ selectedWork.error || '请检查模型与参数后重试。' }}</p>
+            <button
+              v-if="isVideoDownloadFailure(selectedWork)"
+              type="button"
+              class="secondary-command primary-soft status-check-command"
+              :disabled="checkingVideoHistory"
+              @click="refreshVideoWork(selectedWork)"
+            >
+              <Icon name="refresh" size="xs" />
+              {{ checkingVideoHistory ? '正在重试...' : '重新加载视频' }}
+            </button>
             <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
           </div>
 
@@ -524,9 +534,9 @@
           <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
             <Icon :name="checkingVideoHistory ? 'refresh' : 'clock'" size="lg" :class="{ 'status-check-icon': checkingVideoHistory }" />
             <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在检查任务状态' : '任务仍在处理中' }}</strong>
-            <p>{{ selectedWork.type === 'image' ? '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
+            <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
             <div v-if="selectedWork.type === 'image'" class="pending-image-actions">
-              <button type="button" class="secondary-command primary-soft" @click="syncHistory">刷新生成结果</button>
+              <button type="button" class="secondary-command primary-soft image-refresh-command" @click="refreshImageWork(selectedWork)">刷新生成结果</button>
               <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数</button>
             </div>
             <button
@@ -1240,6 +1250,9 @@ import {
   downloadCreatorImage,
   downloadCreatorVideo,
   generateCreatorImage,
+  getCreatorImageTask,
+  submitCreatorImageTask,
+  type ImageGenerationResult,
   getCreatorImagePricing,
   getCreatorVideoPricing,
   type CreatorVideoPricing,
@@ -1287,6 +1300,12 @@ const VIDEO_SUBMISSION_RETRY_DELAYS_MS = [2000, 5000] as const
 // A submitted task keeps rendering upstream, so a few failed status checks
 // must not discard it (H3 renders for minutes and one 502 is common).
 const VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES = 5
+// A finished video is only charged once fully delivered, so a broken download
+// is retried against the same task and never needs a new submission.
+const VIDEO_CONTENT_RETRY_DELAYS_MS = [3000, 8000] as const
+const VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE = '视频已生成，但下载时连接中断。视频未扣费，点击“重新加载视频”即可继续获取，无需重新生成。'
+
+class VideoContentDownloadError extends Error {}
 
 interface PromptTemplate {
   title: string
@@ -1339,8 +1358,18 @@ interface VideoGenerationSnapshot {
     aspectRatio: string
     followSourceAspect: boolean
     generationMethod: VideoGenerationMethod
-    referenceFiles: File[]
+    referenceFiles: Blob[]
   }>
+}
+
+// Progress of a multi-shot work that a refreshed page picks up again.
+interface ResumedVideoShots {
+  requestIds: string[]
+  shotIndexes: number[]
+  outputBlobs: Blob[]
+  failedShots: number[]
+  lastError?: unknown
+  nextIndex: number
 }
 
 const imageTemplates: PromptTemplate[] = [
@@ -2444,6 +2473,13 @@ async function refreshStudio() {
     syncSelectedGroup()
     await loadModels()
     void preserveHistoricalImages()
+    // Image tasks keep running on the server across a refresh; reattach to
+    // them without waiting for the user to open the work.
+    for (const work of historyItems.value) {
+      if (work.type === 'image' && work.status === 'pending' && work.imageTaskIds?.length) void resumeImageWork(work)
+      if (work.type === 'video' && work.status === 'pending' && work.shotQueue
+        && work.shotQueue.nextIndex < (work.shotCount || 0)) void resumeVideoShotQueue(work)
+    }
   } catch (error) {
     appStore.showError(errorMessage(error, '创作中心加载失败'))
   } finally {
@@ -3066,6 +3102,10 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     shotGenerationMethods: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.generationMethod) : undefined,
     shotReferenceCounts: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.referenceFiles.length) : undefined,
     shotFollowSourceAspects: taskMode === 'video' ? videoSnapshot?.shots.map(shot => shot.followSourceAspect) : undefined,
+    // Saved with the work so a refreshed page can submit the remaining shots.
+    shotQueue: videoSnapshot && videoSnapshot.shots.length > 1
+      ? { nextIndex: 0, failedIndexes: [], referenceBlobs: videoSnapshot.shots.map(shot => [...shot.referenceFiles]) }
+      : undefined,
     version: 'v1',
     source,
   }
@@ -3090,7 +3130,9 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
   historyFilter.value = taskMode
   restoreSettingsScroll()
   revealCanvasOnMobile(revealPageTop)
+  let releaseShotLock: (() => void) | null = null
   try {
+    if (work.shotQueue) releaseShotLock = await acquireVideoShotLock(work.id)
     await persistWork(work)
     if (taskMode === 'image' && imageSnapshot) await generateImageWork(work, imageSnapshot, task)
     else if (videoSnapshot) await generateVideoWork(work, videoSnapshot, task)
@@ -3105,6 +3147,33 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     if (missingOutputCount(work)) appStore.showWarning(work.error || `已生成 ${work.outputs.length} ${work.type === 'image' ? '张，部分图片' : '段，部分镜头'}生成失败`)
     else appStore.showSuccess('作品生成完成')
   } catch (error) {
+    if (error instanceof VideoContentDownloadError && work.requestId && !work.outputs.length) {
+      // The task finished upstream; the existing reload view fetches it again.
+      work.status = 'completed'
+      work.completedAt = Date.now()
+      work.updatedAt = work.completedAt
+      work.generationDurationMs = work.completedAt - task.startedAt
+      applyHistoryUpdate(cloneWork(work))
+      await persistWork(work)
+      videoHistoryFeedback.value = { workId: work.id, tone: 'error', message: error.message }
+      appStore.showWarning(error.message)
+      return
+    }
+    if (work.imageTaskIds?.length) {
+      // Server-side image tasks outlive the page and failed status checks; keep
+      // the work pending so "刷新生成结果" can load them later.
+      work.updatedAt = Date.now()
+      await persistWork(work)
+      applyHistoryUpdate(cloneWork(work))
+      if (!disposed) appStore.showWarning('图片仍在服务器生成，可稍后点击“刷新生成结果”同步')
+      return
+    }
+    if (disposed && work.shotQueue) {
+      // The remaining shots continue when the studio is opened again.
+      work.updatedAt = Date.now()
+      await persistWork(work)
+      return
+    }
     work.status = 'failed'
     work.updatedAt = Date.now()
     work.error = creatorGenerationErrorMessage(error, taskMode, imageSnapshot?.capability, videoSnapshot?.model)
@@ -3112,6 +3181,7 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     await persistWork(work)
     appStore.showError(work.error)
   } finally {
+    releaseShotLock?.()
     activeGenerations.delete(work.id)
     if (!activeGenerations.size && generationTimer !== undefined) {
       window.clearInterval(generationTimer)
@@ -3189,11 +3259,13 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   task.phase = 'generating'
   task.hasExactProgress = false
   const requestCount = Math.max(1, input.outputCount || 1)
+  // A resumed work already holds the images synced from its earlier tasks.
+  const initialOutputCount = Math.min(work.outputs.length, requestCount)
   const isGeminiProtocol = input.platform === 'gemini' || input.platform === 'antigravity'
   // Gemini generateContent returns one image per call and some upstreams
   // ignore n, so keep requesting until the batch is full (one call per image
   // at most). Image2 always asks for a single image per request.
-  const requestAttempts = requestCount
+  const requestAttempts = requestCount - initialOutputCount
   const requestsSingleImage = input.capability === 'image2' || isGeminiProtocol
   const usesOpenAIImageSize = input.capability === 'image2'
   const usesGptImageModel = /^gpt-image-/i.test(input.model.trim())
@@ -3201,8 +3273,8 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   // Grok still needs the explicit response format so its temporary URLs are
   // converted into self-contained data URLs by the gateway.
   const usesBase64Response = !isGeminiProtocol && !usesGptImageModel && input.capability === 'grok'
-  const outputs: string[] = []
-  const generate = () => generateCreatorImage(input.apiKey, {
+  const outputs: string[] = work.outputs.slice(0, initialOutputCount)
+  const imageRequest = () => ({
     model: input.model,
     prompt: input.prompt,
     n: requestsSingleImage ? 1 : requestCount - outputs.length,
@@ -3214,21 +3286,45 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     // through the download attribute. Base64 keeps the result self-contained.
     ...(usesBase64Response ? { responseFormat: 'b64_json' } : {}),
     referenceImages: input.referenceFiles,
-    protocol: isGeminiProtocol ? 'gemini' : 'openai',
+    protocol: (isGeminiProtocol ? 'gemini' : 'openai') as 'gemini' | 'openai',
     ...(!usesOpenAIImageSize ? {
       aspectRatio: input.aspectRatio,
       imageSize: input.resolution,
     } : {}),
   })
+  // A server-side task keeps the result through a refresh; gateways without
+  // async image tasks fall back to one synchronous request.
+  const generate = async (): Promise<{ result: ImageGenerationResult; taskId?: string }> => {
+    const request = imageRequest()
+    const taskId = asyncImageUnavailableKeys.has(input.apiKey) ? null : await submitCreatorImageTask(input.apiKey, request)
+    if (!taskId) {
+      asyncImageUnavailableKeys.add(input.apiKey)
+      return { result: await generateCreatorImage(input.apiKey, request) }
+    }
+    work.imageTaskIds = [...(work.imageTaskIds || []), taskId]
+    work.updatedAt = Date.now()
+    await persistWork(work)
+    try {
+      return { result: await waitForImageTask(input.apiKey, taskId, input.outputFormat), taskId }
+    } catch (error) {
+      if (error instanceof ImageTaskFailedError) {
+        work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+        await persistWork(work)
+        throw error.cause
+      }
+      // The task may still finish; never resubmit it.
+      throw new ImageTaskPendingError(error)
+    }
+  }
   const generateWithRetry = async (index: number) => {
     try {
       return await generate()
     } catch (error) {
-      if (input.capability !== 'grok' || !isRetryableGrokTransientError(error)) throw error
+      if (error instanceof ImageTaskPendingError || input.capability !== 'grok' || !isRetryableGrokTransientError(error)) throw error
       task.progress = 'Grok 上游暂时不可用，2 秒后自动重试（1/1）'
       await delay(2000)
       task.progress = requestCount > 1
-        ? `正在重试第 ${index + 1} / ${requestCount} 张图片`
+        ? `正在重试第 ${initialOutputCount + index + 1} / ${requestCount} 张图片`
         : '正在重新调用 Grok 图片模型'
       return await generate()
     }
@@ -3239,12 +3335,13 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
     const failedNote = task.failedCount ? `（${task.failedCount} 张失败）` : ''
     task.progress = requestCount > 1
-      ? `正在生成第 ${index + 1} / ${requestCount} 张图片${failedNote}`
+      ? `正在生成第 ${initialOutputCount + index + 1} / ${requestCount} 张图片${failedNote}`
       : '正在调用图片模型，请稍候'
-    let result
+    let generated
     try {
-      result = await generateWithRetry(index)
+      generated = await generateWithRetry(index)
     } catch (error) {
+      if (error instanceof ImageTaskPendingError) throw error
       lastError = error
       task.failedCount = requestsSingleImage ? task.failedCount + 1 : requestCount - outputs.length
       // A batch request already asked for every remaining image.
@@ -3252,31 +3349,8 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
       continue
     }
     task.progress = '图片已生成，正在保存原图到当前浏览器'
-    const batchOutputs: string[] = []
-    for (const item of result.data) {
-      if (!item.url) continue
-      try {
-        batchOutputs.push(await localImageOutput(input.apiKey, item.url))
-      } catch {
-        batchOutputs.push(item.url)
-        work.imagePersistenceError = '原图尚未保存到本地，上游链接可能失效。请重试保存或立即下载原图。'
-        localSaveWarning.value = work.imagePersistenceError
-      }
-    }
-    if (input.capability !== 'image2') {
-      const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
-      work.upstreamImageSizes = [...(work.upstreamImageSizes || []), ...sourceSizes.slice(0, requestCount - outputs.length)]
-    }
-    const normalizedOutputs = input.sizeMode !== 'auto'
-      ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageOutput(output, input.aspectRatio, input.size)))
-      : batchOutputs
-    outputs.push(...normalizedOutputs.slice(0, requestCount - outputs.length))
-    if (input.sizeMode !== 'auto' && /^\d+x\d+$/.test(input.size)) {
-      work.actualOutputSize = input.capability === 'image2' ? input.size : await readCreatorImageSize(normalizedOutputs[0] || '') || undefined
-    }
-    work.outputs = [...outputs]
-    work.updatedAt = Date.now()
-    await persistWork(work)
+    await saveImageBatch(work, generated.result, generated.taskId, input)
+    outputs.splice(0, outputs.length, ...work.outputs)
   }
   work.outputs = outputs
   if (!work.outputs.length) throw lastError ?? new Error('模型没有返回可用图片')
@@ -3284,6 +3358,197 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     const reason = creatorGenerationErrorMessage(lastError, 'image', input.capability)
     work.error = `已生成 ${outputs.length} / ${requestCount} 张，其余 ${requestCount - outputs.length} 张生成失败：${reason}`
   }
+}
+
+type ImageBatchSettings = Pick<ImageGenerationSnapshot, 'apiKey' | 'capability' | 'outputCount' | 'sizeMode' | 'aspectRatio' | 'size'>
+
+// Saves one finished request into the work, and forgets its server task in the
+// same write so a refresh never loads the same image twice.
+async function saveImageBatch(work: CreatorHistoryItem, result: ImageGenerationResult, taskId: string | undefined, input: ImageBatchSettings) {
+  const requestCount = Math.max(1, input.outputCount || 1)
+  const outputs = [...work.outputs]
+  const batchOutputs: string[] = []
+  for (const item of result.data) {
+    if (!item.url) continue
+    try {
+      batchOutputs.push(await localImageOutput(input.apiKey, item.url))
+    } catch {
+      batchOutputs.push(item.url)
+      work.imagePersistenceError = '原图尚未保存到本地，上游链接可能失效。请重试保存或立即下载原图。'
+      localSaveWarning.value = work.imagePersistenceError
+    }
+  }
+  if (input.capability !== 'image2') {
+    const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
+    work.upstreamImageSizes = [...(work.upstreamImageSizes || []), ...sourceSizes.slice(0, requestCount - outputs.length)]
+  }
+  const normalizedOutputs = input.sizeMode !== 'auto'
+    ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageOutput(output, input.aspectRatio, input.size)))
+    : batchOutputs
+  outputs.push(...normalizedOutputs.slice(0, requestCount - outputs.length))
+  if (input.sizeMode !== 'auto' && /^\d+x\d+$/.test(input.size)) {
+    work.actualOutputSize = input.capability === 'image2' ? input.size : await readCreatorImageSize(normalizedOutputs[0] || '') || undefined
+  }
+  work.outputs = outputs
+  if (taskId) work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+  work.updatedAt = Date.now()
+  await persistWork(work)
+}
+
+// Keys whose gateway answered without async image tasks (no object storage).
+const asyncImageUnavailableKeys = new Set<string>()
+const IMAGE_TASK_POLL_INTERVAL_MS = 3000
+// Matches the gateway's 30 minute task execution limit.
+const IMAGE_TASK_MAX_POLLS = 620
+
+class ImageTaskFailedError extends Error {
+  constructor(readonly cause: unknown) {
+    super(errorMessage(cause, '图片生成失败'))
+  }
+}
+
+class ImageTaskPendingError extends Error {
+  constructor(readonly cause: unknown) {
+    super(errorMessage(cause, '图片任务状态暂时无法查询'))
+  }
+}
+
+async function waitForImageTask(apiKey: string, taskId: string, outputFormat: string) {
+  let consecutiveFailures = 0
+  for (let attempt = 0; attempt < IMAGE_TASK_MAX_POLLS; attempt++) {
+    if (disposed) throw new Error('页面已关闭，任务可稍后从历史记录继续查看')
+    if (attempt > 0) await delay(IMAGE_TASK_POLL_INTERVAL_MS)
+    let status: Awaited<ReturnType<typeof getCreatorImageTask>>
+    try {
+      status = await getCreatorImageTask(apiKey, taskId, { outputFormat })
+      consecutiveFailures = 0
+    } catch (error) {
+      if (isMissingVideoRequest(error)) throw new ImageTaskFailedError(new Error('图片任务已过期或不存在，请带回参数重新生成。'))
+      if (++consecutiveFailures >= VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES) throw error
+      continue
+    }
+    if (status.status === 'completed' && status.result) return status.result
+    if (status.status === 'failed') throw new ImageTaskFailedError(status.error)
+  }
+  throw new Error('图片生成等待超时，请稍后点击“刷新生成结果”')
+}
+
+// Picks up the server tasks of an image work whose page was refreshed or closed.
+async function resumeImageWork(work: CreatorHistoryItem) {
+  const taskIds = [...(work.imageTaskIds || [])]
+  if (!taskIds.length || activeGenerations.has(work.id)) return
+  const key = findKeyForWork(work)
+  if (!key) {
+    appStore.showError('未找到该作品分组对应的可用 Key，暂时无法同步图片结果。')
+    return
+  }
+  const requestCount = Math.max(1, work.outputCount || 1)
+  const settings: ImageBatchSettings = {
+    apiKey: key.key,
+    capability: work.imageCapability || 'image2',
+    outputCount: requestCount,
+    sizeMode: work.imageSizeMode || 'auto',
+    aspectRatio: work.aspectRatio || '',
+    size: work.outputSize || '',
+  }
+  const task = reactive<GenerationTask>({
+    id: work.id,
+    mode: 'image',
+    prompt: work.prompt,
+    phase: 'generating',
+    hasExactProgress: false,
+    percent: 0,
+    progress: '正在同步图片生成结果',
+    startedAt: work.createdAt,
+  })
+  activeGenerations.set(work.id, task)
+  generationClock.value = Date.now()
+  if (generationTimer === undefined) {
+    generationTimer = window.setInterval(() => { generationClock.value = Date.now() }, 1000)
+  }
+  let lastError: unknown
+  let interrupted = false
+  try {
+    for (const taskId of taskIds) {
+      try {
+        const result = await waitForImageTask(key.key, taskId, work.outputFormat || 'png')
+        task.progress = '图片已生成，正在保存原图到当前浏览器'
+        await saveImageBatch(work, result, taskId, settings)
+      } catch (error) {
+        if (disposed) return
+        if (!(error instanceof ImageTaskFailedError)) {
+          interrupted = true
+          lastError = error
+          continue
+        }
+        lastError = error.cause
+        work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+        await persistWork(work)
+      }
+    }
+    // Image2 and Grok submit one task per image, so a refresh loses the
+    // images that were not submitted yet. Submit them now from the saved
+    // settings; reference uploads are not kept, so those works stop here.
+    let continued = false
+    if (!interrupted && work.outputs.length < requestCount && !work.referenceCount && work.model) {
+      continued = true
+      const platform = groups.value.find(group => group.id === key.group_id)?.platform || key.group?.platform || ''
+      try {
+        await generateImageWork(work, {
+          ...settings,
+          platform,
+          model: work.model,
+          prompt: work.prompt,
+          quality: work.quality || 'auto',
+          outputFormat: work.outputFormat || 'png',
+          background: work.background || 'auto',
+          referenceFiles: [],
+          resolution: work.resolution || '',
+        }, task)
+      } catch (error) {
+        if (disposed) return
+        if (error instanceof ImageTaskPendingError) {
+          interrupted = true
+          lastError = error.cause
+        } else {
+          lastError = error
+        }
+      }
+    }
+    if (interrupted) {
+      // Unfinished tasks stay saved; the next refresh continues from here.
+      applyHistoryUpdate(cloneWork(work))
+      appStore.showError(creatorGenerationErrorMessage(lastError, 'image', settings.capability))
+      return
+    }
+    if (work.outputs.length) {
+      work.status = 'completed'
+      if (work.outputs.length < requestCount && !continued) {
+        work.error = `已同步 ${work.outputs.length} / ${requestCount} 张；其余图片在页面刷新前未提交，且参考图未保存，请带回参数继续生成。`
+      }
+    } else {
+      work.status = 'failed'
+      work.error = creatorGenerationErrorMessage(lastError ?? new Error('图片生成失败'), 'image', settings.capability)
+    }
+    work.completedAt = Date.now()
+    work.updatedAt = work.completedAt
+    work.generationDurationMs = Math.max(0, work.completedAt - work.createdAt)
+    await persistWork(work)
+    applyHistoryUpdate(cloneWork(work))
+    if (work.status === 'completed') appStore.showSuccess('图片已同步到本地')
+    else appStore.showError(work.error || '图片生成失败')
+  } finally {
+    activeGenerations.delete(work.id)
+    if (!activeGenerations.size && generationTimer !== undefined) {
+      window.clearInterval(generationTimer)
+      generationTimer = undefined
+    }
+  }
+}
+
+async function refreshImageWork(work: CreatorHistoryItem) {
+  if (work.imageTaskIds?.length) await resumeImageWork(work)
+  else await syncHistory()
 }
 
 function isSingleOutputImageModel(model: string, _resolution: string, capability: ImageCapability) {
@@ -3506,23 +3771,59 @@ function isNoAvailableAccountError(error: unknown) {
   return status === 503 && /^service temporarily unavailable\.?$/i.test(text.trim())
 }
 
-async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot, task: GenerationTask) {
+async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot, task: GenerationTask, resumed?: ResumedVideoShots) {
   const key = input.apiKey
   const shots = input.shots
-  const outputs: string[] = []
-  const outputBlobs: Blob[] = []
+  const outputBlobs: Blob[] = resumed ? [...resumed.outputBlobs] : []
+  const outputs: string[] = outputBlobs.map(createTrackedObjectUrl)
   // Request IDs and their original shot positions stay aligned with outputs;
   // a failed shot is dropped so the finished shots remain usable.
-  const requestIds: string[] = []
-  const shotIndexes: number[] = []
-  const failedShots: number[] = []
-  let lastError: unknown
-  const syncShotState = () => {
+  const requestIds: string[] = resumed ? [...resumed.requestIds] : []
+  const shotIndexes: number[] = resumed ? [...resumed.shotIndexes] : []
+  const failedShots: number[] = resumed ? [...resumed.failedShots] : []
+  let lastError: unknown = resumed?.lastError
+  const relayVideo = isMiniMaxH3Model(input.model) || isSeedanceVideoModel(input.model)
+  const syncShotState = (nextIndex: number) => {
     work.requestId = requestIds.join(',') || undefined
     work.shotOutputIndexes = [...shotIndexes]
+    // Replace rather than mutate: history copies share this object.
+    if (work.shotQueue) {
+      work.shotQueue = {
+        nextIndex,
+        failedIndexes: [...failedShots],
+        failureReason: lastError === undefined ? undefined : errorMessage(lastError, '视频生成失败'),
+        // Submitted shots no longer need their reference images.
+        referenceBlobs: work.shotQueue.referenceBlobs.map((blobs, index) => index < nextIndex ? [] : blobs),
+      }
+    }
     work.updatedAt = Date.now()
   }
-  for (let index = 0; index < shots.length; index++) {
+  const markShotFailed = (shotIndex: number, error: unknown) => {
+    lastError = error
+    failedShots.push(shotIndex)
+    failedShots.sort((left, right) => left - right)
+  }
+  // After a refresh, first collect the shots submitted by the previous page.
+  for (let position = outputBlobs.length; position < requestIds.length;) {
+    const shotIndex = shotIndexes[position]
+    try {
+      const videoBlob = await waitForVideo(key, requestIds[position], shotIndex, shots.length, task, relayVideo ? 450 : 150)
+      outputBlobs.push(videoBlob)
+      outputs.push(createTrackedObjectUrl(videoBlob))
+      work.outputs = [...outputs]
+      work.videoBlobs = [...outputBlobs]
+      work.updatedAt = Date.now()
+      position++
+    } catch (error) {
+      if (disposed) throw error
+      markShotFailed(shotIndex, error)
+      requestIds.splice(position, 1)
+      shotIndexes.splice(position, 1)
+      syncShotState(resumed?.nextIndex ?? 0)
+    }
+    await persistWork(work)
+  }
+  for (let index = resumed?.nextIndex ?? 0; index < shots.length; index++) {
     const shot = shots[index]
     const failedNote = failedShots.length ? `（${failedShots.length} 个镜头失败）` : ''
     let created: Awaited<ReturnType<typeof createCreatorVideo>> | undefined
@@ -3575,10 +3876,9 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
         : '任务已提交，正在等待生成'
       requestIds.push(created.id)
       shotIndexes.push(index)
-      syncShotState()
+      syncShotState(index + 1)
       await persistWork(work)
       // Relay videos can take up to 30 minutes; keep polling longer than for Grok.
-      const relayVideo = isMiniMaxH3Model(input.model) || isSeedanceVideoModel(input.model)
       const videoBlob = await waitForVideo(key, created.id, index, shots.length, task, relayVideo ? 450 : 150)
       outputBlobs.push(videoBlob)
       outputs.push(createTrackedObjectUrl(videoBlob))
@@ -3589,13 +3889,12 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
     } catch (error) {
       // A single-shot video, or a closed page, still fails as a whole.
       if (shots.length === 1 || disposed) throw error
-      lastError = error
-      failedShots.push(index)
+      markShotFailed(index, error)
       if (created?.id && requestIds[requestIds.length - 1] === created.id) {
         requestIds.pop()
         shotIndexes.pop()
       }
-      syncShotState()
+      syncShotState(index + 1)
       await persistWork(work)
       task.progress = index < shots.length - 1
         ? `镜头 ${index + 1} 生成失败，继续生成下一个镜头`
@@ -3603,6 +3902,8 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
     }
   }
   work.outputs = outputs
+  // Every shot is settled; nothing is left to resume.
+  work.shotQueue = undefined
   if (!outputs.length) throw lastError ?? new Error('视频生成失败')
   if (failedShots.length) {
     const reason = creatorGenerationErrorMessage(lastError, 'video', undefined, input.model)
@@ -3655,7 +3956,7 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
       task.hasExactProgress = true
       updateProgress(Math.round((shotIndex + 1) / shotCount * 100))
       task.progress = shotCount > 1 ? `镜头 ${shotIndex + 1} 已完成，正在加载视频` : '视频已生成，正在加载结果'
-      return getCreatorVideoContent(apiKey, requestId)
+      return downloadFinishedVideo(apiKey, requestId, task)
     }
     const isQueued = ['queued', 'pending', 'submitted', 'created', 'waiting'].includes(normalized)
     const isGeneratingStatus = ['processing', 'running', 'in_progress', 'generating', 'rendering'].includes(normalized)
@@ -3696,6 +3997,19 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
   throw new Error('视频生成等待超时，请稍后刷新历史记录')
 }
 
+async function downloadFinishedVideo(apiKey: string, requestId: string, task: GenerationTask) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await getCreatorVideoContent(apiKey, requestId)
+    } catch (error) {
+      if (disposed || isMissingVideoRequest(error)) throw error
+      if (attempt >= VIDEO_CONTENT_RETRY_DELAYS_MS.length) throw new VideoContentDownloadError(VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE)
+      task.progress = `视频下载中断，正在自动重试（${attempt + 1}/${VIDEO_CONTENT_RETRY_DELAYS_MS.length}）`
+      await delay(VIDEO_CONTENT_RETRY_DELAYS_MS[attempt])
+    }
+  }
+}
+
 async function persistWork(work: CreatorHistoryItem, expectedUpdatedAt?: number) {
   if (work.type === 'video') await captureVideoBlobsForPersistence(work)
   const storedWork = {
@@ -3727,6 +4041,7 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
     shotFollowSourceAspects: work.shotFollowSourceAspects ? [...work.shotFollowSourceAspects] : undefined,
     shotActualOutputSizes: work.shotActualOutputSizes ? [...work.shotActualOutputSizes] : undefined,
     shotOutputIndexes: work.shotOutputIndexes ? [...work.shotOutputIndexes] : undefined,
+    imageTaskIds: work.imageTaskIds ? [...work.imageTaskIds] : undefined,
   }
 }
 
@@ -3881,12 +4196,22 @@ async function selectWork(work: CreatorHistoryItem) {
     await preserveHistoricalImage(work)
     if (work.imagePersistenceError) localSaveWarning.value = work.imagePersistenceError
     await normalizeHistoricalImageWork(work)
+    // A refreshed page reattaches to the server-side image tasks right away.
+    if (work.status === 'pending' && work.imageTaskIds?.length) void resumeImageWork(work)
+  }
+  // A refreshed page resumes submitting a multi-shot video's remaining shots.
+  if (!activeGenerations.has(work.id) && work.type === 'video'
+    && work.status === 'pending' && work.shotQueue && work.shotQueue.nextIndex < (work.shotCount || 0)) {
+    void resumeVideoShotQueue(work)
+    return
   }
   if (shouldRefreshVideo) await refreshVideoWork(work, true)
 }
 
-async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
-  if (checkingVideoHistory.value || !work.requestId) {
+// A manual check of a still-rendering task resumes live polling, so progress
+// lost to a page refresh is shown again until the video loads.
+async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume = !quiet) {
+  if (checkingVideoHistory.value || activeGenerations.has(work.id) || !work.requestId) {
     if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
     return
   }
@@ -3908,12 +4233,15 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
   if (matchedGroup?.name) work.groupName = matchedGroup.name
   checkingVideoHistory.value = true
   videoHistoryFeedback.value = null
+  let resumeWork: CreatorHistoryItem | undefined
+  const loadedBlobs = new Map<string, Blob>()
   try {
     const outputs: string[] = []
     const outputBlobs: Blob[] = []
     const keptRequestIds: string[] = []
     const keptShotIndexes: number[] = []
     let pending = false
+    let pendingProgress: number | undefined
     let failedError = ''
     const requestIds = work.requestId.split(',').map(id => id.trim()).filter(Boolean)
     // Only works that track per-shot outputs may keep finished shots when a
@@ -3932,9 +4260,11 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
       if (tracksShots) keptShotIndexes.push(work.shotOutputIndexes![requestIndex])
       if (['completed', 'succeeded', 'success', 'done'].includes(normalized) || status.url) {
         const blob = await getCreatorVideoContent(key.key, requestId)
+        loadedBlobs.set(requestId, blob)
         outputBlobs.push(blob)
         outputs.push(createTrackedObjectUrl(blob))
       } else {
+        if (!pending && Number(status.progress) >= 1 && Number(status.progress) < 100) pendingProgress = Math.round(Number(status.progress))
         pending = true
       }
     }
@@ -3951,7 +4281,10 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
       work.outputs = outputs
       work.videoBlobs = outputBlobs
     }
-    if (work.status !== 'failed') work.status = pending ? 'pending' : 'completed'
+    // A work failed only by an interrupted download recovers once every task loads.
+    const recovered = work.status === 'failed' && !failedError && outputs.length > 0 && outputs.length === requestIds.length
+    if (recovered) work.error = undefined
+    if (work.status !== 'failed' || recovered) work.status = pending ? 'pending' : 'completed'
     if (work.status === 'completed' && outputBlobs.length > 1) {
       await composeWorkVideo(work, outputBlobs, !quiet)
     }
@@ -3966,8 +4299,11 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
     if (work.status === 'failed') {
       videoHistoryFeedback.value = null
       if (!quiet) appStore.showError(work.error || '视频生成失败，请带回原参数重试。')
+    } else if (pending && resume) {
+      resumeWork = historyItems.value.find(item => item.id === work.id) || work
     } else if (pending) {
-      const message = `最近检查 ${formatVideoStatusCheckTime(work.updatedAt)}：任务仍在生成中，请稍后再试。`
+      const progressNote = pendingProgress === undefined ? '' : `（上游进度 ${pendingProgress}%）`
+      const message = `最近检查 ${formatVideoStatusCheckTime(work.updatedAt)}：任务仍在生成中${progressNote}，请稍后再试。`
       videoHistoryFeedback.value = { workId: work.id, tone: 'pending', message }
       if (!quiet) appStore.showInfo('任务仍在生成中，请稍后再试')
     } else {
@@ -3992,6 +4328,170 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false) {
     checkingVideoHistory.value = false
     if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
   }
+  if (resumeWork) await resumeVideoTracking(resumeWork, key.key, loadedBlobs)
+}
+
+async function resumeVideoTracking(work: CreatorHistoryItem, apiKey: string, loadedBlobs: Map<string, Blob>) {
+  const requestIds = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+  const task = reactive<GenerationTask>({
+    id: work.id,
+    mode: 'video',
+    prompt: work.prompt,
+    phase: 'generating',
+    hasExactProgress: false,
+    percent: 0,
+    progress: '正在同步视频任务进度',
+    startedAt: work.createdAt,
+  })
+  activeGenerations.set(work.id, task)
+  generationClock.value = Date.now()
+  if (generationTimer === undefined) {
+    generationTimer = window.setInterval(() => { generationClock.value = Date.now() }, 1000)
+  }
+  const relayVideo = isMiniMaxH3Model(work.model) || isSeedanceVideoModel(work.model)
+  let failed = false
+  try {
+    const blobs: Blob[] = []
+    for (const [index, requestId] of requestIds.entries()) {
+      blobs.push(loadedBlobs.get(requestId)
+        ?? await waitForVideo(apiKey, requestId, index, requestIds.length, task, relayVideo ? 450 : 150))
+    }
+    work.videoBlobs = blobs
+    work.outputs = blobs.map(createTrackedObjectUrl)
+    if (blobs.length > 1) {
+      task.progress = '所有镜头已完成，正在合成完整视频'
+      await composeWorkVideo(work, blobs, true)
+    }
+    work.status = 'completed'
+    work.completedAt = Date.now()
+    work.updatedAt = work.completedAt
+    work.generationDurationMs = Math.max(0, work.completedAt - work.createdAt)
+    task.percent = 100
+    task.progress = '作品已完成'
+    await persistWork(work)
+    applyHistoryUpdate(cloneWork(work))
+    appStore.showSuccess('视频已生成并加载')
+  } catch {
+    failed = !disposed
+  } finally {
+    activeGenerations.delete(work.id)
+    if (!activeGenerations.size && generationTimer !== undefined) {
+      window.clearInterval(generationTimer)
+      generationTimer = undefined
+    }
+  }
+  // Let the one-off check classify upstream failures, expiry and timeouts.
+  if (failed) await refreshVideoWork(work, false, false)
+}
+
+// Holds a cross-tab lock while a multi-shot work submits shots, so two windows
+// never submit (and bill) the same shot twice. The lock of a refreshed or
+// closed page is released by the browser.
+function acquireVideoShotLock(workId: string): Promise<() => void> {
+  const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+  if (!locks) return Promise.resolve(() => undefined)
+  return new Promise(resolve => {
+    locks.request(`creator-video-shots:${workId}`, () => new Promise<void>(release => resolve(release)))
+      .catch(() => resolve(() => undefined))
+  })
+}
+
+const resumingVideoShotQueues = new Set<string>()
+
+// A page refresh stops a multi-shot work between shots. Collect the shots the
+// previous page submitted, then submit the ones it did not reach.
+async function resumeVideoShotQueue(work: CreatorHistoryItem) {
+  if (resumingVideoShotQueues.has(work.id) || activeGenerations.has(work.id) || disposed) return
+  const key = findKeyForWork(work)
+  if (!key) {
+    videoHistoryFeedback.value = { workId: work.id, tone: 'error', message: '未找到该作品分组对应的可用 Key，暂时无法继续生成剩余镜头。' }
+    return
+  }
+  resumingVideoShotQueues.add(work.id)
+  const releaseLock = await acquireVideoShotLock(work.id)
+  let task: GenerationTask | undefined
+  let target = work
+  try {
+    // Another window may have finished the work while this one waited.
+    const latest = await creatorHistory.get(work.id)
+    const queue = latest?.shotQueue
+    if (disposed || !latest || latest.status !== 'pending' || !queue || activeGenerations.has(work.id)) return
+    applyHistoryUpdate(latest)
+    target = historyItems.value.find(item => item.id === work.id) || latest
+    const shotCount = target.shotCount || target.shotPrompts?.length || 0
+    const shots: VideoGenerationSnapshot['shots'] = Array.from({ length: shotCount }, (_, index) => ({
+      prompt: target.shotPrompts?.[index] || '',
+      duration: target.shotDurations?.[index] || 0,
+      resolution: target.shotResolutions?.[index] || target.resolution || '720p',
+      aspectRatio: target.shotAspectRatios?.[index] || target.aspectRatio || '16:9',
+      followSourceAspect: target.shotFollowSourceAspects?.[index] ?? true,
+      generationMethod: target.shotGenerationMethods?.[index] || 'text',
+      referenceFiles: queue.referenceBlobs[index] || [],
+    }))
+    if (!shots.length || shots.some(shot => !shot.prompt)) return
+    const requestIds = (target.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+    const shotIndexes = target.shotOutputIndexes || []
+    if (shotIndexes.length !== requestIds.length) return
+    const outputBlobs = (target.videoBlobs || []).slice(0, requestIds.length)
+    task = reactive<GenerationTask>({
+      id: target.id,
+      mode: 'video',
+      prompt: target.prompt,
+      phase: 'generating',
+      hasExactProgress: false,
+      percent: Math.round(outputBlobs.length / shots.length * 100),
+      progress: '正在继续生成剩余镜头',
+      startedAt: target.createdAt,
+    })
+    activeGenerations.set(target.id, task)
+    generationClock.value = Date.now()
+    if (generationTimer === undefined) {
+      generationTimer = window.setInterval(() => { generationClock.value = Date.now() }, 1000)
+    }
+    if (videoHistoryFeedback.value?.workId === target.id) videoHistoryFeedback.value = null
+    await generateVideoWork(target, { apiKey: key.key, model: target.model, shots }, task, {
+      requestIds,
+      shotIndexes,
+      outputBlobs,
+      failedShots: [...queue.failedIndexes],
+      lastError: queue.failureReason ? new Error(queue.failureReason) : undefined,
+      nextIndex: queue.nextIndex,
+    })
+    target.status = 'completed'
+    target.completedAt = Date.now()
+    target.updatedAt = target.completedAt
+    target.generationDurationMs = Math.max(0, target.completedAt - target.createdAt)
+    task.percent = 100
+    task.progress = '作品已完成'
+    await persistWork(target)
+    applyHistoryUpdate(cloneWork(target))
+    if (missingOutputCount(target)) appStore.showWarning(target.error || `已生成 ${target.outputs.length} 段，部分镜头生成失败`)
+    else appStore.showSuccess('作品生成完成')
+  } catch (error) {
+    target.updatedAt = Date.now()
+    if (!disposed) {
+      target.status = 'failed'
+      target.error = creatorGenerationErrorMessage(error, 'video', undefined, target.model)
+    }
+    await persistWork(target)
+    applyHistoryUpdate(cloneWork(target))
+    if (!disposed) appStore.showError(target.error || '视频生成失败')
+  } finally {
+    releaseLock()
+    resumingVideoShotQueues.delete(work.id)
+    if (task && activeGenerations.get(target.id) === task) activeGenerations.delete(target.id)
+    if (!activeGenerations.size && generationTimer !== undefined) {
+      window.clearInterval(generationTimer)
+      generationTimer = undefined
+    }
+  }
+}
+
+// Works saved as failed by a broken connection (before downloads were retried)
+// may still have a finished, unbilled video upstream.
+function isVideoDownloadFailure(work: CreatorHistoryItem) {
+  return work.type === 'video' && Boolean(work.requestId) && !work.outputs.length
+    && /failed to fetch|load failed|networkerror|network error|连接中断|视频内容不完整|视频内容为空/i.test(work.error || '')
 }
 
 function isMissingVideoRequest(error: unknown) {
@@ -5383,7 +5883,9 @@ onBeforeUnmount(() => {
 .generation-frame-open:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: -3px; }
 .generation-frame-actions { position: absolute; z-index: 2; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity 150ms ease; }
 .generation-frame:hover .generation-frame-actions, .generation-frame-actions:focus-within { opacity: 1; }
-.generation-frame-action { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgb(255 255 255 / 80%); border-radius: 50%; color: var(--creator-accent-strong); background: rgb(255 255 255 / 94%); box-shadow: 0 3px 10px rgb(15 32 29 / 28%); }
+/* Neutral glass, so the buttons read on any image without tinting it. */
+.generation-frame-action { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 50%; color: #fff; background: rgb(15 23 42 / 52%); box-shadow: 0 2px 8px rgb(0 0 0 / 22%); backdrop-filter: blur(6px); transition: background 150ms ease; }
+.generation-frame-action:not(:disabled):hover { background: rgb(15 23 42 / 76%); }
 .generation-frame-action > svg { width: 16px; height: 16px; }
 .generation-frame-action:disabled { cursor: wait; opacity: .5; }
 /* Touch screens have no hover, so finished frames always show their actions. */
@@ -5528,7 +6030,7 @@ onBeforeUnmount(() => {
 .status-check-icon { animation: creatorSpin .85s linear infinite; }
 .status-check-command { display: inline-flex; align-items: center; gap: 7px; border-color: #8eddd0; color: var(--creator-accent-strong); background: #effbf8; }
 .status-check-command:disabled { cursor: wait; opacity: .68; }
-.video-status-feedback { display: flex; align-items: flex-start; gap: 7px; width: min(460px, 100%); margin-top: 13px; padding: 10px 12px; border: 1px solid #cce4df; border-radius: var(--creator-radius); color: #52706b; background: #fff; font-size: 11px; line-height: 1.6; text-align: left; }
+.video-status-feedback { display: flex; align-items: flex-start; gap: 7px; width: fit-content; max-width: min(460px, 100%); margin-top: 13px; padding: 10px 12px; border: 1px solid #cce4df; border-radius: var(--creator-radius); color: #52706b; background: #fff; font-size: 11px; line-height: 1.6; text-align: left; }
 .video-status-feedback svg { flex: 0 0 auto; margin-top: 2px; }
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { container-type: inline-size; margin-top: 14px; }
@@ -5927,7 +6429,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .generation-frame-ring::before { border-color: #2c4a45; border-top-color: #79dfd0; border-right-color: #79dfd0; }
 :global(.dark) .generation-frame.is-failed { border-color: #5a3430; background: rgb(216 75 75 / 8%); }
 :global(.dark) .generation-frame-failed { color: #ff9a90; }
-:global(.dark) .generation-frame-action { border-color: rgb(255 255 255 / 12%); color: #79dfd0; background: rgb(19 31 29 / 92%); }
 :global(.dark) .partial-result-notice { border-color: #5b4724; color: #f0c06a; background: #2a2416; }
 :global(.dark) .partial-result-notice strong { color: #f6d39a; }
 :global(.dark) .partial-result-notice p { color: #c9ad7f; }

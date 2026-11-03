@@ -294,7 +294,7 @@ async function generateOpenAIImage(
   if (references.length === 0) {
     body = await fetchJSON<any>(buildGatewayUrl('/v1/images/generations'), {
       method: 'POST',
-      headers: authHeaders(apiKey, { 'Content-Type': 'application/json' }),
+      headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'image' }),
       body: JSON.stringify(buildOpenAIJSONPayload(input)),
     })
   } else {
@@ -305,7 +305,7 @@ async function generateOpenAIImage(
 
     body = await fetchJSON<any>(buildGatewayUrl('/v1/images/edits'), {
       method: 'POST',
-      headers: authHeaders(apiKey),
+      headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'image' }),
       body: form,
     })
   }
@@ -382,7 +382,7 @@ async function generateGeminiImage(
     buildGatewayUrl(`/v1beta/models/${encodeURIComponent(model)}:generateContent`),
     {
       method: 'POST',
-      headers: authHeaders(apiKey, { 'Content-Type': 'application/json' }),
+      headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'image' }),
       body: JSON.stringify(payload),
     },
   )
@@ -396,6 +396,61 @@ export function generateCreatorImage(
   return input.protocol === 'gemini'
     ? generateGeminiImage(apiKey, input)
     : generateOpenAIImage(apiKey, input)
+}
+
+export interface CreatorImageTaskStatus {
+  status: 'processing' | 'completed' | 'failed'
+  result?: ImageGenerationResult
+  error?: CreatorError
+}
+
+/**
+ * Submits an OpenAI-protocol image as a server-side task so the result survives
+ * a page refresh. Resolves to null when the gateway has no async image tasks
+ * (no object storage, or a platform without them); callers then generate
+ * synchronously.
+ */
+export async function submitCreatorImageTask(apiKey: string, input: ImageGenerationInput): Promise<string | null> {
+  if (input.protocol === 'gemini') return null
+  const references = input.referenceImages || input.references || []
+  let init: RequestInit
+  if (references.length === 0) {
+    init = {
+      method: 'POST',
+      headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'image' }),
+      body: JSON.stringify(buildOpenAIJSONPayload(input)),
+    }
+  } else {
+    const form = new FormData()
+    for (const [name, value] of Object.entries(buildOpenAIJSONPayload(input))) appendFormValue(form, name, value)
+    for (const reference of references) form.append('image', reference, reference.name)
+    init = { method: 'POST', headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'image' }), body: form }
+  }
+  const path = references.length ? '/v1/images/edits/async' : '/v1/images/generations/async'
+  const response = await fetch(buildGatewayUrl(path), init)
+  if (response.status === 404) return null
+  if (!response.ok) throw await parseCreatorError(response)
+  const body = await response.json().catch(() => null)
+  const id = String(body?.task_id || body?.id || '')
+  if (!id) throw new Error('图片任务接口没有返回任务 ID')
+  return id
+}
+
+export async function getCreatorImageTask(apiKey: string, taskId: string, input: Pick<ImageGenerationInput, 'outputFormat'>): Promise<CreatorImageTaskStatus> {
+  const response = await fetch(buildGatewayUrl(`/v1/images/tasks/${encodeURIComponent(taskId)}`), {
+    headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'image' }),
+    cache: 'no-store',
+  })
+  if (!response.ok) throw await parseCreatorError(response)
+  const body = await response.json()
+  if (body?.status === 'completed') {
+    return { status: 'completed', result: normalizeOpenAIImages(body.result, imageMimeType(input as ImageGenerationInput)) }
+  }
+  if (body?.status === 'failed') {
+    const status = Number(body.http_status) || 502
+    return { status: 'failed', error: creatorErrorFromBody({ status, statusText: '', headers: response.headers } as Response, { error: body.error }) }
+  }
+  return { status: 'processing' }
 }
 
 // Relay tiers (MiniMax H3, Seedance) share one request shape: the model fixes

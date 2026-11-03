@@ -547,6 +547,7 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 			return nil, err
 		}
 		result.VideoCount = 1
+		result.VideoContentDelivered = resp.StatusCode == http.StatusOK
 		return result, nil
 	}
 	if endpoint == relay.Content && resp.StatusCode == http.StatusFound {
@@ -554,7 +555,7 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 		if !validMiniMaxH3OutputURL(location) {
 			return nil, fmt.Errorf("%s content response has an invalid output URL", relay.Name)
 		}
-		result.VideoCount = 1
+		result.VideoCount, result.VideoContentDelivered = 1, true
 		c.Header("Location", location)
 		c.Header("Cache-Control", "private, no-store")
 		c.Status(http.StatusFound)
@@ -631,6 +632,7 @@ func (s *OpenAIGatewayService) downloadRelayVideo(ctx context.Context, c *gin.Co
 		if err := writeGrokMediaContentResponse(c, resp); err != nil {
 			return nil, err
 		}
+		result.VideoContentDelivered = resp.StatusCode == http.StatusOK
 	case resp.StatusCode >= 300 && resp.StatusCode < 400:
 		location := resp.Header.Get("Location")
 		if !validMiniMaxH3OutputURL(location) {
@@ -638,6 +640,7 @@ func (s *OpenAIGatewayService) downloadRelayVideo(ctx context.Context, c *gin.Co
 		}
 		c.Header("Location", location)
 		c.Status(http.StatusFound)
+		result.VideoContentDelivered = true
 	default:
 		return nil, fmt.Errorf("%s video download status %d", relay.Name, resp.StatusCode)
 	}

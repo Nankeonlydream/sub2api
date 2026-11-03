@@ -1,5 +1,11 @@
 # 创作中心日常升级入口
 
+> 2026-11-04 当前部署拓扑（已核对实例、主机和运行配置）：右侧 `CatBee应用容器` 实例 `76793ec040834b62a7d76887fe35f964` / 主机 `iZrj97sgqumwizgptmhvzaZ`，公网 `47.77.224.193`、私网 `172.18.29.102`，承载 `catbee.online` 与 `www.catbee.online`；`yapi.asia` 在该机返回 410。左侧 `CatBee数据库` 实例 `69f6334c75944cd5b5436e4f05ecef52` / 主机 `iZrj98y2r2rfswybuc7r9bZ`，公网 `43.110.24.140`、私网 `172.18.29.103`，仅运行 PostgreSQL / Redis。下列 11 月 3 日及更早记录为历史拓扑，不可据此选择旧服务器。应用代码只部署到右侧；数据库迁移由应用连接左侧执行，不在数据库机安装应用镜像。
+
+> 2026-11-03 数据库迁移完成：`yapi.asia` 和 `catbee.online` 的 PostgreSQL、Redis 均改为新私网地址 `172.18.29.103`。旧 `172.18.28.235` 数据库容器已停止，勿直接切回。详见 `DEPLOYMENT-2026-11-03-database-migration.md`。
+
+> 2026-11-03：`yapi.asia` 已迁至新节点 `iZrj97sgqumwizgptmhvzaZ`（公网 `47.77.224.193`，内网 `172.18.29.102`），运行 `2.19.1-creator.2`。后续指定 `yapi.asia` 时操作新节点；旧右侧节点仅保留历史登记，不自动更新。详见 `DEPLOYMENT-2026-11-03-yapi-new.md`。
+
 > 2026-10-22 晚：用户明确要求将左侧 `catbee.online` 从 Wei-Shaw 官方 v0.2.17 切回本地 Creator 最新版本，已部署 `2.16.0-creator.1`。下述 Creator 流程再次适用于两侧，仍只更新用户指定节点。详见 `DEPLOYMENT-2026-10-22-left-creator-v2.16.0.md`；此前官方切换记录保留于 `DEPLOYMENT-2026-10-22-left-official.md`。
 
 下次给 Codex 发送：
@@ -26,8 +32,10 @@ GitHub 对无活动的公开仓库可能暂停定时任务，计划执行也可�
 
 - 集成分支：`feature/creator-on-v2.10.2`（名称不变，内容持续升级）。
 - 定制仓库：`Nankeonlydream/sub2api`，上游：`ranxi2001/sub2api`。
-- 右侧：`iZrj92zzv39jbi7n9fz4fuZ` / `172.18.28.229`，网站 `https://yapi.asia`。
-- 左侧：`iZrj9eby63lh2zp7dbipn8Z` / `172.18.29.45`，网站 `https://catbee.online`。
+- 当前右侧应用节点：`iZrj97sgqumwizgptmhvzaZ` / `172.18.29.102`（公网 `47.77.224.193`），网站 `https://catbee.online`。
+- 当前左侧数据库节点：`iZrj98y2r2rfswybuc7r9bZ` / `172.18.29.103`（公网 `43.110.24.140`），不运行应用镜像。
+- 旧右侧（历史登记）：`iZrj92zzv39jbi7n9fz4fuZ` / `172.18.28.229`；不再作为 `yapi.asia` 的部署目标。
+- 旧左侧（历史登记）：`iZrj9eby63lh2zp7dbipn8Z` / `172.18.29.45`；不再作为 `catbee.online` 的部署目标。
 - 只更新用户指定的左侧、右侧或两侧；不备份数据库；不进行付费生成测试。
 - 左侧 Prism 适配器已按用户要求移除，不自动重装。
 - 保留真实 1K 预设和实际尺寸计费规则。

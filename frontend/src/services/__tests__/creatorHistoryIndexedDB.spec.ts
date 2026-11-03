@@ -124,6 +124,13 @@ describe('Creator image persistence in IndexedDB', () => {
     expect((await rawWorks())[0]).toMatchObject({ actualOutputSize: '2560x1440', shotFollowSourceAspects: [true] })
   })
 
+  it('saves the server image tasks of a work read through the page reactivity proxy', async () => {
+    const history = await import('../creatorHistory')
+    const pending = reactive({ ...work('pending', 1, []), status: 'pending', imageTaskIds: ['imgtask_1'] }) as CreatorHistoryItem
+    expect(await history.putCreatorHistory({ ...pending })).toBe(true)
+    expect((await rawWorks())[0].imageTaskIds).toEqual(['imgtask_1'])
+  })
+
   it('returns an unsaved metadata patch that keeps the stored revision', async () => {
     const history = await import('../creatorHistory')
     await history.putCreatorHistory(work('patched', 1))

@@ -582,7 +582,11 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		// Both paths share the same claim key so the customer is charged once.
 		if endpoint == service.MiniMaxH3EndpointStatus || endpoint == service.MiniMaxH3EndpointContent ||
 			endpoint == service.SeedanceVideoEndpointStatus || endpoint == service.SeedanceVideoEndpointContent {
-			if billResult := prepareRelayVideoCompletionBilling(requestCtx, h, apiKey, subject, requestID, result); billResult != nil {
+			// Content billing runs after the video is streamed; the client may be gone.
+			billingCtx, cancelBilling := context.WithTimeout(context.WithoutCancel(requestCtx), 10*time.Second)
+			billResult := prepareRelayVideoCompletionBilling(billingCtx, h, apiKey, subject, requestID, result)
+			cancelBilling()
+			if billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, requestID)
 			}
 		} else if endpoint == service.SeedanceEndpointStatus {
@@ -605,6 +609,18 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, taskID)
 			}
 		} else if shouldRecordGrokMediaUsage(endpoint, requestModel, result) {
+			if result.ImageCount > 0 && deferCreatorImageTaskBill(c, func() {
+				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result, requestModel, body, requestID)
+			}) {
+				return
+			}
+			if creatorImageUndelivered(c, apiKey, result.ImageCount) {
+				reqLog.Info("grok_media.creator_image_undelivered_not_billed",
+					zap.Int64("account_id", account.ID),
+					zap.Int("image_count", result.ImageCount),
+				)
+				return
+			}
 			recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, result, requestModel, body, requestID)
 		}
 		reqLog.Debug("grok_media.request_completed",
@@ -659,13 +675,17 @@ func grokMediaScheduleModel(account *service.Account, routingModel string, resul
 // may have no BillOnContent flag. Protect those requests using the existing
 // Creator key naming convention, with same-origin Referer for renamed keys.
 func isCreatorVideoRequest(c *gin.Context, apiKey *service.APIKey) bool {
+	return isCreatorRequest(c, apiKey, "video")
+}
+
+func isCreatorRequest(c *gin.Context, apiKey *service.APIKey, kind string) bool {
 	if isCreatorStudioAPIKey(apiKey) {
 		return true
 	}
 	if c == nil || c.Request == nil {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Sub2API-Creator")), "video") {
+	if strings.EqualFold(strings.TrimSpace(c.GetHeader("X-Sub2API-Creator")), kind) {
 		return true
 	}
 	referer, err := url.Parse(c.Request.Referer())

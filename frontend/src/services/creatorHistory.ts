@@ -4,6 +4,15 @@ export type CreatorWorkType = 'image' | 'video'
 export type CreatorWorkStatus = 'pending' | 'completed' | 'failed'
 export type CreatorVideoGenerationMethod = 'text' | 'image' | 'reference'
 
+export interface CreatorVideoShotQueue {
+  /** First shot not yet submitted; earlier shots are in requestId or failed. */
+  nextIndex: number
+  failedIndexes: number[]
+  failureReason?: string
+  /** Reference images per shot; emptied once a shot is submitted. */
+  referenceBlobs: Blob[][]
+}
+
 export interface CreatorHistoryItem {
   id: string
   type: CreatorWorkType
@@ -35,6 +44,8 @@ export interface CreatorHistoryItem {
   shotActualOutputSizes?: string[]
   /** Multi-shot video: original shot index of each output; failed shots have no output. */
   shotOutputIndexes?: number[]
+  /** Multi-shot video still submitting shots; lets a refreshed page submit the rest. */
+  shotQueue?: CreatorVideoShotQueue
   mergeError?: string
   groupId?: number
   apiKeyId?: number
@@ -60,6 +71,8 @@ export interface CreatorHistoryItem {
   version?: string
   source?: string
   requestId?: string
+  /** Server-side image tasks still owed to this work; they survive a refresh. */
+  imageTaskIds?: string[]
   error?: string
 }
 
@@ -107,6 +120,12 @@ export function subscribeCreatorHistory(listener: (item: CreatorHistoryItem) => 
   return () => { listeners.delete(listener) }
 }
 
+function cloneShotQueue(queue?: CreatorVideoShotQueue): CreatorVideoShotQueue | undefined {
+  return queue
+    ? { ...queue, failedIndexes: [...queue.failedIndexes], referenceBlobs: queue.referenceBlobs.map(blobs => [...blobs]) }
+    : undefined
+}
+
 function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...item,
@@ -123,6 +142,8 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
     shotFollowSourceAspects: item.shotFollowSourceAspects ? [...item.shotFollowSourceAspects] : undefined,
     shotActualOutputSizes: item.shotActualOutputSizes ? [...item.shotActualOutputSizes] : undefined,
     shotOutputIndexes: item.shotOutputIndexes ? [...item.shotOutputIndexes] : undefined,
+    shotQueue: cloneShotQueue(item.shotQueue),
+    imageTaskIds: item.imageTaskIds ? [...item.imageTaskIds] : undefined,
   }
 }
 

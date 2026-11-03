@@ -150,6 +150,7 @@ func TestSeedanceVideoStatusAndContent(t *testing.T) {
 	require.Equal(t, "mp4-bytes", w.Body.String())
 	require.Equal(t, "/v1/videos/t/content", upstream.request.URL.Path)
 	require.Equal(t, 1, result.VideoCount)
+	require.True(t, result.VideoContentDelivered)
 
 	for _, id := range []string{"", "..", "a/b", "a?b", "%2e%2e"} {
 		_, err := seedanceVideoRelay.buildURL("https://relay.example", SeedanceVideoEndpointStatus, id)
@@ -348,6 +349,7 @@ func TestSeedanceVideoZhonghengContentFromStatus(t *testing.T) {
 	require.Empty(t, upstream.requests[1].Header.Get("Authorization"))
 	require.Equal(t, "mp4-bytes", w.Body.String())
 	require.Equal(t, 1, result.VideoCount)
+	require.True(t, result.VideoContentDelivered)
 
 	require.True(t, isZhonghengAccount(zhonghengTestAccount("特价seadanco2.5-1080")))
 }

@@ -106,3 +106,28 @@ func TestMiniMaxH3CompletionBillsRequestedSecondsOnce(t *testing.T) {
 	require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, completed))
 	require.NotEqual(t, service.StableGrokVideoBillingRequestID("task"), result.RequestID)
 }
+
+func TestRelayCreatorVideoBillsOnlyAfterFullDelivery(t *testing.T) {
+	for _, scenario := range []string{"creator key", "creator request"} {
+		t.Run(scenario, func(t *testing.T) {
+			h, _, _, _ := newGrokMediaSlotHandler(t, false, false, service.PlatformMiniMax)
+			c, _ := grokMediaSlotContext(context.Background(), false)
+			key, _ := middleware.GetAPIKeyFromContext(c)
+			subject, _ := middleware.GetAuthSubjectFromContext(c)
+			taskID := service.MiniMaxH3TaskKey("task")
+			base := 0.02
+			pending := service.GrokVideoPendingBilling{Model: "m", BillingModel: "m", VideoDurationSeconds: 15, MiniMaxH3BaseCost: &base}
+			if scenario == "creator key" {
+				key.Name = "创作中心 · MiniMax"
+			} else {
+				pending.BillOnContent = true
+			}
+			require.NoError(t, h.gatewayService.StoreGrokVideoPendingBilling(context.Background(), taskID, subject.UserID, key.ID, pending))
+			completed := &service.OpenAIForwardResult{ResponseID: taskID, VideoCount: 1}
+			require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, completed), "status completion must not charge Creator")
+			delivered := &service.OpenAIForwardResult{ResponseID: taskID, VideoCount: 1, VideoContentDelivered: true}
+			require.NotNil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, delivered))
+			require.Nil(t, prepareRelayVideoCompletionBilling(context.Background(), h, key, subject, taskID, delivered), "charge once")
+		})
+	}
+}

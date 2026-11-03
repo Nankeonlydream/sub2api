@@ -102,6 +102,7 @@ func TestMiniMaxH3StatusStates(t *testing.T) {
 				want = 1
 			}
 			require.Equal(t, want, result.VideoCount)
+			require.False(t, result.VideoContentDelivered, "status alone never delivers the video")
 			require.Zero(t, result.VideoDurationSeconds, "status must not override requested seconds")
 		})
 	}
@@ -121,6 +122,7 @@ func TestMiniMaxH3ContentStreamsDeepKeyVideo(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "mp4-bytes", w.Body.String())
 	require.Equal(t, 1, result.VideoCount)
+	require.True(t, result.VideoContentDelivered)
 }
 
 // The media upload and status download paths stay for Zhongheng-style relays.
@@ -150,6 +152,7 @@ func TestMiniMaxH3ContentDownloadsStatusVideoWithoutKey(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "mp4-bytes", w.Body.String())
 	require.Equal(t, 1, result.VideoCount)
+	require.True(t, result.VideoContentDelivered)
 }
 
 func TestMiniMaxH3ContentRejectsUnreadyOrForeignVideo(t *testing.T) {

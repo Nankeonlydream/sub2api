@@ -454,33 +454,48 @@ func (h *OpenAIGatewayHandler) Images(c *gin.Context) {
 			upstreamModel = result.UpstreamModel
 		}
 		sessionID := service.ExtractClientSessionID(c)
-		h.submitMandatoryUsageRecordTask(c.Request.Context(), func(ctx context.Context) {
-			if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
-				Result:             result,
-				APIKey:             apiKey,
-				User:               apiKey.User,
-				Account:            account,
-				Subscription:       subscription,
-				InboundEndpoint:    inboundEndpoint,
-				UpstreamEndpoint:   upstreamEndpoint,
-				UserAgent:          userAgent,
-				IPAddress:          clientIP,
-				RequestPayloadHash: requestPayloadHash,
-				APIKeyService:      h.apiKeyService,
-				QuotaPlatform:      quotaPlatform,
-				SessionID:          sessionID,
-				ChannelUsageFields: clientRequestedUsageFields(c, channelMapping, requestModel, upstreamModel),
-			}); err != nil {
-				logger.L().With(
-					zap.String("component", "handler.openai_gateway.images"),
-					zap.Int64("user_id", subject.UserID),
-					zap.Int64("api_key_id", apiKey.ID),
-					zap.Any("group_id", apiKey.GroupID),
-					zap.String("model", clientRequestModel),
-					zap.Int64("account_id", account.ID),
-				).Error("openai.images.record_usage_failed", zap.Error(err))
-			}
-		})
+		usageCtx := c.Request.Context()
+		channelUsageFields := clientRequestedUsageFields(c, channelMapping, requestModel, upstreamModel)
+		recordImageUsage := func() {
+			h.submitMandatoryUsageRecordTask(usageCtx, func(ctx context.Context) {
+				if err := h.gatewayService.RecordUsage(ctx, &service.OpenAIRecordUsageInput{
+					Result:             result,
+					APIKey:             apiKey,
+					User:               apiKey.User,
+					Account:            account,
+					Subscription:       subscription,
+					InboundEndpoint:    inboundEndpoint,
+					UpstreamEndpoint:   upstreamEndpoint,
+					UserAgent:          userAgent,
+					IPAddress:          clientIP,
+					RequestPayloadHash: requestPayloadHash,
+					APIKeyService:      h.apiKeyService,
+					QuotaPlatform:      quotaPlatform,
+					SessionID:          sessionID,
+					ChannelUsageFields: channelUsageFields,
+				}); err != nil {
+					logger.L().With(
+						zap.String("component", "handler.openai_gateway.images"),
+						zap.Int64("user_id", subject.UserID),
+						zap.Int64("api_key_id", apiKey.ID),
+						zap.Any("group_id", apiKey.GroupID),
+						zap.String("model", clientRequestModel),
+						zap.Int64("account_id", account.ID),
+					).Error("openai.images.record_usage_failed", zap.Error(err))
+				}
+			})
+		}
+		if result != nil && result.ImageCount > 0 && deferCreatorImageTaskBill(c, recordImageUsage) {
+			return
+		}
+		if result != nil && creatorImageUndelivered(c, apiKey, result.ImageCount) {
+			reqLog.Info("openai.images.creator_undelivered_not_billed",
+				zap.Int64("account_id", account.ID),
+				zap.Int("image_count", result.ImageCount),
+			)
+			return
+		}
+		recordImageUsage()
 
 		reqLog.Debug("openai.images.request_completed",
 			zap.Int64("account_id", account.ID),

@@ -14,7 +14,8 @@ import time
 
 HOST = 'iZrj92zzv39jbi7n9fz4fuZ'
 LEFT_HOST = 'iZrj9eby63lh2zp7dbipn8Z'
-HOSTS = {HOST: 'right', LEFT_HOST: 'left'}
+NEW_HOST = 'iZrj97sgqumwizgptmhvzaZ'
+HOSTS = {HOST: 'right', LEFT_HOST: 'left', NEW_HOST: 'catbee-app'}
 LEFT_LEGACY_IMAGE = 'ghcr.io/ranxi2001/sub2api@sha256:67d3167a638bab1f466384f9db187873e983d776a6a8e741ae6bc2402867e83a'
 LEFT_OFFICIAL_IMAGE = 'ghcr.io/wei-shaw/sub2api@sha256:44b59fc74b0b582750ef5f38146782db177767ef9d3f34351f1c75c157b1bb88'
 REPOSITORY = 'ghcr.io/nankeonlydream/sub2api'

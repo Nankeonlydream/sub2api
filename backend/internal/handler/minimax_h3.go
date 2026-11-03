@@ -45,6 +45,7 @@ func (h *OpenAIGatewayHandler) relayVideos(c *gin.Context, name string, create, 
 // Successful status and content requests share one claim and durable billing ID.
 // Failed/queued/unknown jobs never charge. Always bill requested seconds, even
 // when the completed MP4 duration differs or the upstream omits billing fields.
+// Creator jobs charge only once the full video is delivered, as for Grok.
 // Shared by the MiniMax-H3 and Seedance relays.
 func prepareRelayVideoCompletionBilling(ctx context.Context, h *OpenAIGatewayHandler, key *service.APIKey, subject middleware.AuthSubject, taskID string, result *service.OpenAIForwardResult) *service.OpenAIForwardResult {
 	if result == nil || result.VideoCount != 1 {
@@ -52,6 +53,9 @@ func prepareRelayVideoCompletionBilling(ctx context.Context, h *OpenAIGatewayHan
 	}
 	pending, err := h.gatewayService.LoadGrokVideoPendingBilling(ctx, taskID, subject.UserID, key.ID)
 	if err != nil || pending == nil || pending.MiniMaxH3BaseCost == nil {
+		return nil
+	}
+	if (isCreatorStudioAPIKey(key) || pending.BillOnContent) && !result.VideoContentDelivered {
 		return nil
 	}
 	claimed, err := h.gatewayService.ClaimGrokVideoBilling(ctx, taskID, subject.UserID, key.ID)
