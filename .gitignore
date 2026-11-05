@@ -214,6 +214,7 @@ issues/
 /deploy/creator/__pycache__/
 
 !docs/astra-candy-beta.md
+!docs/api-key-model-policy.md
 
 # PR screenshots belong in PR attachments; retain text evidence in docs/screenshots.
 !docs/screenshots/
