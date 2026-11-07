@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 	"io"
 	"math"
 	"mime"
@@ -511,6 +513,11 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 		if body, err = relay.PrepareCreate(account, body, result); err != nil {
 			return nil, err
 		}
+		if hooks, ok := ctx.Value(relayVideoAcceptanceKey{}).(RelayVideoAcceptance); ok && hooks.Prepare != nil {
+			if err := hooks.Prepare(ctx, result); err != nil {
+				return nil, fmt.Errorf("video billing admission unavailable: %w", err)
+			}
+		}
 		if relay.UploadDataImages {
 			if body, err = s.uploadRelayDataImages(ctx, relay, account, base, token, body); err != nil {
 				return nil, err
@@ -586,6 +593,18 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 			return nil, err
 		}
 		result.ResponseID = relay.TaskPrefix + strings.TrimSpace(id)
+		if hooks, ok := ctx.Value(relayVideoAcceptanceKey{}).(RelayVideoAcceptance); ok && hooks.Accept != nil {
+			saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+			saveErr := hooks.Accept(saveCtx, result)
+			cancel()
+			if saveErr != nil {
+				// Keep the accepted task ID available; returning a retryable generation
+				// failure here would encourage duplicate upstream jobs. The durable
+				// submission intent and this structured error retain recovery evidence.
+				c.Header("X-Sub2API-Billing-State", "pending-recovery")
+				logger.L().Error("relay_video.acceptance_persist_failed", zap.String("task_id", result.ResponseID), zap.Int64("account_id", account.ID), zap.Error(saveErr))
+			}
+		}
 	case relay.Status:
 		if miniMaxH3StatusCompleted(responseBody) {
 			result.VideoCount = 1

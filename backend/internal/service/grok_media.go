@@ -335,6 +335,20 @@ func (s *OpenAIGatewayService) ResolveGrokMediaVideoRequestAccount(
 	requestID string,
 	userID, apiKeyID int64,
 ) (int64, error) {
+	if s != nil {
+		if repo, ok := s.usageBillingRepo.(RelayVideoSettlementRepository); ok {
+			task, err := repo.LoadRelayVideoSettlement(ctx, requestID, apiKeyID)
+			if err != nil {
+				return 0, err
+			}
+			if task != nil {
+				if task.Event.Command.UserID != userID {
+					return 0, ErrUsageBillingRequestConflict
+				}
+				return task.Event.Command.AccountID, nil
+			}
+		}
+	}
 	if s == nil || s.cache == nil {
 		return 0, fmt.Errorf("grok video request binding cache is unavailable")
 	}
@@ -385,6 +399,8 @@ func (s *OpenAIGatewayService) SelectMediaVideoRequestAccount(
 // observes a completed video URL or delivers a Creator video. Status may omit
 // model/duration; we fall back to this snapshot, then defaults.
 type GrokVideoPendingBilling struct {
+	// New durable relay jobs must never fall back to mutable legacy pricing.
+	DurableRelay bool `json:"durable_relay,omitempty"`
 	// H3 and Seedance price requested seconds at submission; later
 	// tariff edits cannot reprice a task. The JSON name predates Seedance.
 	MiniMaxH3BaseCost    *float64 `json:"minimax_h3_base_cost,omitempty"`
@@ -498,12 +514,27 @@ func (s *OpenAIGatewayService) LoadGrokVideoPendingBilling(
 	requestID string,
 	userID, apiKeyID int64,
 ) (*GrokVideoPendingBilling, error) {
-	if s == nil || s.cache == nil {
+	if s == nil {
 		return nil, fmt.Errorf("grok video pending billing cache is unavailable")
 	}
 	key := grokVideoPendingBillingKey(requestID, userID, apiKeyID)
 	if key == "" {
 		return nil, fmt.Errorf("grok video pending billing key is invalid")
+	}
+	if repo, ok := s.usageBillingRepo.(RelayVideoSettlementRepository); ok {
+		task, err := repo.LoadRelayVideoSettlement(ctx, requestID, apiKeyID)
+		if err != nil {
+			return nil, err
+		}
+		if task != nil {
+			if task.Event.Command.UserID != userID {
+				return nil, ErrUsageBillingRequestConflict
+			}
+			return &task.Pending, nil
+		}
+	}
+	if s.cache == nil {
+		return nil, fmt.Errorf("grok video pending billing cache is unavailable")
 	}
 	payload, err := s.cache.GetGrokVideoPendingBilling(ctx, key)
 	if err != nil || len(payload) == 0 {

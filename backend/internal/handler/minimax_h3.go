@@ -55,6 +55,9 @@ func prepareRelayVideoCompletionBilling(ctx context.Context, h *OpenAIGatewayHan
 	if err != nil || pending == nil || pending.MiniMaxH3BaseCost == nil {
 		return nil
 	}
+	if pending.DurableRelay {
+		return nil
+	}
 	if (isCreatorStudioAPIKey(key) || pending.BillOnContent) && !result.VideoContentDelivered {
 		return nil
 	}

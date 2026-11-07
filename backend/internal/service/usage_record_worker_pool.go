@@ -112,6 +112,9 @@ type UsageRecordWorkerPool struct {
 	lastScaleNanos        atomic.Int64
 	autoScaleCancel       context.CancelFunc
 	billingRecoveryCancel context.CancelFunc
+	relayVideoCancel      context.CancelFunc
+	relayVideoMu          sync.Mutex
+	relayVideoStopped     bool
 	lifecycleWg           sync.WaitGroup
 	stopOnce              sync.Once
 }
@@ -226,6 +229,12 @@ func (p *UsageRecordWorkerPool) Stop() {
 		if p.billingRecoveryCancel != nil {
 			p.billingRecoveryCancel()
 		}
+		p.relayVideoMu.Lock()
+		p.relayVideoStopped = true
+		if p.relayVideoCancel != nil {
+			p.relayVideoCancel()
+		}
+		p.relayVideoMu.Unlock()
 		p.lifecycleWg.Wait()
 		p.pool.StopAndWait()
 	})

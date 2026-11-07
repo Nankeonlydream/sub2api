@@ -15,6 +15,7 @@ import (
 	middleware2 "github.com/Wei-Shaw/sub2api/internal/server/middleware"
 	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 )
 
@@ -434,16 +435,53 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		service.SetOpsLatencyMs(c, service.OpsRoutingLatencyMsKey, time.Since(routingStart).Milliseconds())
 		forwardStart := time.Now()
 		writerSizeBeforeForward := c.Writer.Size()
+		forwardCtx := requestCtx
+		durableRelayCreate := (endpoint == service.MiniMaxH3EndpointCreate || endpoint == service.SeedanceVideoEndpointCreate) &&
+			h.gatewayService.HasRelayVideoSettlementStore()
+		if durableRelayCreate {
+			prefix := "seedance-video:"
+			if endpoint == service.MiniMaxH3EndpointCreate {
+				prefix = "minimax-h3:"
+			}
+			submissionID := prefix + "submission_" + uuid.NewString()
+			var snapshot *service.RelayVideoSettlement
+			forwardCtx = service.WithRelayVideoAcceptance(requestCtx, service.RelayVideoAcceptance{Prepare: func(saveCtx context.Context, accepted *service.OpenAIForwardResult) error {
+				pending := service.GrokVideoPendingBilling{
+					DurableRelay:      true,
+					MiniMaxH3BaseCost: miniMaxH3BaseCost, Model: requestModel,
+					BillingModel:  firstNonEmptyString(accepted.BillingModel, requestModel),
+					UpstreamModel: accepted.UpstreamModel, VideoResolution: accepted.VideoResolution,
+					VideoDurationSeconds: accepted.VideoDurationSeconds, OriginalModel: clientRequestedModel(c, requestModel),
+					// New relay jobs settle on confirmed upstream success. Client headers,
+					// referer and editable key names cannot exempt a generation from billing.
+					BillOnContent: false, CreatedAt: videoCreateStartedAt,
+				}
+				quoted := *accepted
+				quoted.VideoCount = 1
+				quoted.RequestID = service.StableGrokVideoBillingRequestID(submissionID)
+				quoted.MiniMaxH3BaseCost = miniMaxH3BaseCost
+				snapshot = &service.RelayVideoSettlement{SubmissionID: submissionID, TaskID: submissionID, Pending: pending}
+				return h.gatewayService.PersistRelayVideoSettlement(saveCtx, snapshot, &service.OpenAIRecordUsageInput{
+					Result: &quoted, APIKey: apiKey, User: apiKey.User, Account: account, Subscription: subscription,
+					InboundEndpoint: GetInboundEndpoint(c), UpstreamEndpoint: GetUpstreamEndpoint(c, account.Platform),
+					UserAgent: c.GetHeader("User-Agent"), IPAddress: ip.GetClientIP(c), SessionID: service.ExtractClientSessionID(c),
+					APIKeyService: h.apiKeyService, QuotaPlatform: service.QuotaPlatform(c.Request.Context(), apiKey),
+					ChannelUsageFields: service.ChannelUsageFields{OriginalModel: pending.OriginalModel, ChannelMappedModel: requestModel},
+				})
+			}, Accept: func(saveCtx context.Context, accepted *service.OpenAIForwardResult) error {
+				return h.gatewayService.AcceptRelayVideoSettlement(saveCtx, snapshot, accepted.ResponseID)
+			}})
+		}
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer releaseAccount()
 			if endpoint.IsSeedance() {
 				return h.gatewayService.ForwardSeedance(requestCtx, c, account, endpoint, requestID, body)
 			}
 			if endpoint.IsMiniMaxH3() {
-				return h.gatewayService.ForwardMiniMaxH3(requestCtx, c, account, endpoint, requestID, body)
+				return h.gatewayService.ForwardMiniMaxH3(forwardCtx, c, account, endpoint, requestID, body)
 			}
 			if endpoint.IsSeedanceVideo() {
-				return h.gatewayService.ForwardSeedanceVideo(requestCtx, c, account, endpoint, requestID, body)
+				return h.gatewayService.ForwardSeedanceVideo(forwardCtx, c, account, endpoint, requestID, body)
 			}
 			return h.gatewayService.ForwardGrokMedia(requestCtx, c, account, endpoint, requestID, body, contentType)
 		}()
@@ -550,6 +588,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			// Persist model/duration/resolution for status bodies that omit pricing units.
 			// Retry once: missing pending causes silent underpricing (status omits resolution).
 			pending := service.GrokVideoPendingBilling{
+				DurableRelay:         durableRelayCreate,
 				MiniMaxH3BaseCost:    result.MiniMaxH3BaseCost,
 				Model:                requestModel,
 				BillingModel:         firstNonEmptyString(result.BillingModel, requestModel),
@@ -584,6 +623,16 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 			endpoint == service.SeedanceVideoEndpointStatus || endpoint == service.SeedanceVideoEndpointContent {
 			// Content billing runs after the video is streamed; the client may be gone.
 			billingCtx, cancelBilling := context.WithTimeout(context.WithoutCancel(requestCtx), 10*time.Second)
+			if result != nil && result.VideoCount == 1 {
+				handled, settleErr := h.gatewayService.SettleRelayVideo(billingCtx, requestID, subject.UserID, apiKey.ID, result.VideoContentDelivered, h.apiKeyService)
+				if handled {
+					cancelBilling()
+					if settleErr != nil {
+						reqLog.Error("relay_video.settlement_failed", zap.String("task_id", requestID), zap.Error(settleErr))
+					}
+					return
+				}
+			}
 			billResult := prepareRelayVideoCompletionBilling(billingCtx, h, apiKey, subject, requestID, result)
 			cancelBilling()
 			if billResult != nil {

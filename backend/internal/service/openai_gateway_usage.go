@@ -22,6 +22,8 @@ import (
 
 // OpenAIRecordUsageInput input for recording usage
 type OpenAIRecordUsageInput struct {
+	// Create-time quotation capture never executes billing.
+	relaySettlement    *RelayVideoSettlement
 	Result             *OpenAIForwardResult
 	APIKey             *APIKey
 	User               *User
@@ -555,6 +557,21 @@ func (s *OpenAIGatewayService) RecordUsage(ctx context.Context, input *OpenAIRec
 	quotaPlatform := input.QuotaPlatform
 	if quotaPlatform == "" {
 		quotaPlatform = PlatformFromAPIKey(apiKey)
+	}
+
+	if input.relaySettlement != nil {
+		cmd := buildUsageBillingCommand(requestID, usageLog, &postUsageBillingParams{
+			Cost: cost, User: user, APIKey: apiKey, Account: account, Subscription: subscription,
+			RequestPayloadHash: HashUsageRequestPayload([]byte(input.relaySettlement.TaskID)),
+			IsSubscriptionBill: isSubscriptionBilling, AccountRateMultiplier: accountRateMultiplier,
+			APIKeyService: input.APIKeyService, Platform: quotaPlatform,
+		})
+		if cmd == nil {
+			return errors.New("relay quotation command unavailable")
+		}
+		usageLog.ActualCost = QuantizeUsageBillingAmount(cost.ActualCost)
+		input.relaySettlement.Event = UsageBillingEvent{Version: 1, Command: *cmd, Usage: *usageLog}
+		return nil
 	}
 
 	_, billingErr := applyUsageBilling(ctx, requestID, usageLog, &postUsageBillingParams{

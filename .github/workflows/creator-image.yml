@@ -40,6 +40,12 @@ jobs:
         working-directory: backend
       - run: go test -tags embed ./internal/web
         working-directory: backend
+      - name: Relay billing regression and PostgreSQL recovery
+        working-directory: backend
+        run: |
+          go test -race ./internal/service -run '^TestRelay(Settlement|Submission)' -count=1
+          go test -tags unit ./internal/service ./internal/handler -run 'Relay|MiniMax|Seedance|GrokMedia|GrokVideo|Creator|UsageBilling' -count=1
+          go test -tags integration ./internal/repository -run 'TestRelaySettlementDurable|TestUsageBillingDelivery' -count=1
       - name: Build binary
         working-directory: backend
         run: |
