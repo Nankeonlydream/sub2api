@@ -57,7 +57,7 @@ async function open(url: string, locale: 'en' | 'zh' = 'en') {
   i18n.global.locale.value = locale
   await router.push(url)
   await router.isReady()
-  wrapper = mount(RouterView, { global: { plugins: [router, createPinia(), createI18n({ legacy: false, locale, messages: { en, zh } })], stubs: { RuntimeOverview: true, EndpointPool: true, PolicyPanel: true, PenaltyPolicyPanel: true, EventWorkspace: true, EventDetailDialog: true, FilterDeleteDialog: true, ConfirmDialog: true } } })
+  wrapper = mount(RouterView, { global: { plugins: [createPinia(), router, createI18n({ legacy: false, locale, messages: { en, zh } })], stubs: { RuntimeOverview: true, EndpointPool: true, PolicyPanel: true, PenaltyPolicyPanel: true, EventWorkspace: true, EventDetailDialog: true, FilterDeleteDialog: true, ConfirmDialog: true } } })
   await flushPromises()
   return wrapper
 }
