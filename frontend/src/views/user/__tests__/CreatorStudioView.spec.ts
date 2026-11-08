@@ -3835,6 +3835,43 @@ describe('CreatorStudioView', () => {
     }
   })
 
+  it('loads a finished video in place when its opening check was skipped by another running check', async () => {
+    const base = {
+      type: 'video', prompt: '冰块玻璃杯', model: 'grok-imagine-video', provider: 'Grok 视频',
+      groupName: group.name, groupId: group.id, apiKeyId: createdKey.id, outputs: [],
+      aspectRatio: '16:9', resolution: '720p',
+    }
+    const rendering = { ...base, id: 'still-rendering', status: 'pending', requestId: 'video-task-slow', createdAt: 2000, updatedAt: 2000 }
+    const finished = { ...base, id: 'finished-elsewhere', status: 'completed', requestId: 'video-task-done', createdAt: 1000, updatedAt: 1000, completedAt: 1500 }
+    listHistory.mockResolvedValue([rendering, finished])
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    let releaseSlowStatus: (value: unknown) => void = () => undefined
+    getVideoStatus.mockReset().mockImplementation((_key: string, requestId: string) => requestId === 'video-task-slow'
+      ? new Promise(resolve => { releaseSlowStatus = resolve })
+      : Promise.resolve({ id: requestId, status: 'done' }))
+    getVideoContent.mockReset().mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.findAll('.history-tabs button')[1].trigger('click')
+      await wrapper.findAll('.history-item-hitbox')[0].trigger('click')
+      await flushPromises()
+      // The first work's status check is still in flight when the finished one is opened.
+      await wrapper.findAll('.history-item-hitbox')[1].trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.result-error').text()).toContain('正在加载视频')
+      expect(getVideoContent).not.toHaveBeenCalled()
+
+      releaseSlowStatus({ id: 'video-task-slow', status: 'in_progress', progress: 30 })
+      await flushPromises()
+      expect(getVideoContent).toHaveBeenCalledWith(createdKey.key, 'video-task-done')
+      expect(wrapper.find('video').exists()).toBe(true)
+    } finally {
+      wrapper.unmount()
+    }
+  })
+
   it('keeps the finished video element when a history save broadcasts a stripped copy', async () => {
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])

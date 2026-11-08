@@ -409,11 +409,11 @@
           <!-- Opening a finished video from history and reloading after an error share
                this one placeholder box; the player replaces it once the video arrives. -->
           <div
-            v-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && (isLoadingSelectedVideo(selectedWork) || (selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone === 'error'))"
+            v-if="needsVideoDownload(selectedWork)"
             class="result-error muted"
             aria-live="polite"
           >
-            <template v-if="isLoadingSelectedVideo(selectedWork)">
+            <template v-if="!(selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone === 'error') || isLoadingSelectedVideo(selectedWork)">
               <span class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
               <strong>正在加载视频</strong>
               <p>视频已生成，正在准备播放，请稍候。</p>
@@ -4543,11 +4543,39 @@ const reloadingVideoInPlaceId = ref('')
 function isLoadingSelectedVideo(work: CreatorHistoryItem) {
   return loadingVideoWorkId.value === work.id || reloadingVideoInPlaceId.value === work.id
 }
-async function reloadVideoInPlace(work: CreatorHistoryItem) {
+
+// A finished video whose file is not in this browser yet (another tab finished
+// it, local storage was full, or the opening check was skipped while a different
+// check ran). It must never render as an empty canvas.
+function needsVideoDownload(work: CreatorHistoryItem | null | undefined): work is CreatorHistoryItem {
+  return Boolean(work && work.type === 'video' && work.status === 'completed' && work.requestId
+    && !work.outputs.length && !work.videoBlobs?.length && !activeGenerations.has(work.id))
+}
+
+// Fetch such a video automatically, once per selection; a failure leaves the
+// error and its reload button instead of retrying in a loop. A check that is
+// still running for another work defers this one until it finishes.
+const autoLoadedVideoKeys = new Set<string>()
+// Registered first so a new selection clears the set before the loader below runs.
+watch(() => selectedWork.value?.id, () => autoLoadedVideoKeys.clear())
+watch(
+  () => {
+    const work = selectedWork.value
+    return needsVideoDownload(work) && !checkingVideoHistory.value ? `${work.id}:${work.requestId}` : ''
+  },
+  key => {
+    const work = selectedWork.value
+    if (!key || !work || autoLoadedVideoKeys.has(key)) return
+    if (videoHistoryFeedback.value?.workId === work.id && videoHistoryFeedback.value.tone === 'error') return
+    autoLoadedVideoKeys.add(key)
+    void reloadVideoInPlace(work, true)
+  },
+)
+async function reloadVideoInPlace(work: CreatorHistoryItem, quiet = false) {
   if (checkingVideoHistory.value) return
   reloadingVideoInPlaceId.value = work.id
   try {
-    await refreshVideoWork(work)
+    await refreshVideoWork(work, quiet)
   } finally {
     if (reloadingVideoInPlaceId.value === work.id) reloadingVideoInPlaceId.value = ''
   }
