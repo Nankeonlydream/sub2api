@@ -672,7 +672,10 @@ export async function syncUpstreamModels(
   options?: SyncUpstreamModelsOptions,
   request?: { signal?: AbortSignal }
 ): Promise<SyncUpstreamModelsResult> {
-  const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`, options, request)
+  const url = `/admin/accounts/${id}/models/sync-upstream`
+  const { data } = options === undefined && request === undefined
+    ? await apiClient.post<SyncUpstreamModelsResult>(url)
+    : await apiClient.post<SyncUpstreamModelsResult>(url, options, request)
   return data
 }
 
