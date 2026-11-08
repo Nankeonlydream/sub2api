@@ -193,8 +193,20 @@ async function fetchJSON<T>(url: string, init: RequestInit): Promise<T> {
   }
   // A non-streaming image heartbeat commits HTTP 200 before a late upstream
   // error is known. Treat the final OpenAI error envelope as a failed request.
-  if (body?.error) throw creatorErrorFromBody(response, body)
+  if (hasCreatorErrorPayload(body?.error)) throw creatorErrorFromBody(response, body)
   return body
+}
+
+// Video relays report placeholders such as `"error": {}` or
+// `{"code": "", "message": ""}` while a task is still rendering; only an
+// error carrying a message or code is a real failure.
+function hasCreatorErrorPayload(error: unknown): boolean {
+  if (typeof error === 'string') return error.trim() !== ''
+  if (!error || typeof error !== 'object') return false
+  const { message, code } = error as { message?: unknown; code?: unknown }
+  return (typeof message === 'string' && message.trim() !== '')
+    || (typeof code === 'string' && code.trim() !== '')
+    || (typeof code === 'number' && code !== 0)
 }
 
 export async function listCreatorModels(apiKey: string): Promise<CreatorModel[]> {
@@ -620,7 +632,7 @@ export async function getCreatorVideoStatus(
     ? Math.max(0, Math.min(100, !progressIsPercentage && parsedProgress > 0 && parsedProgress < 1 ? parsedProgress * 100 : parsedProgress))
     : undefined
   const moderationRejected = nested?.respect_moderation === false || nestedVideo?.respect_moderation === false
-  const error = body?.error || nested?.error || nestedVideo?.error
+  const error = [body?.error, nested?.error, nestedVideo?.error].find(hasCreatorErrorPayload)
     || (moderationRejected ? { message: '视频未通过上游内容审核，生成失败' } : undefined)
   return {
     ...body,
@@ -636,7 +648,8 @@ export async function getCreatorVideoStatus(
     status: error ? 'failed' : String(body?.status || nested?.status || nestedVideo?.status || ''),
     ...(progress !== undefined ? { progress } : {}),
     ...(url ? { url: String(url) } : {}),
-    ...(error ? { error } : {}),
+    // Overwrite the spread raw field so an empty placeholder never reads as a failure.
+    error: error || undefined,
   }
 }
 

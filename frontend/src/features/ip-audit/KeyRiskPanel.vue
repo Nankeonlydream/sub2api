@@ -7,6 +7,7 @@
       <fieldset :disabled="busy" class="space-y-4">
         <div class="flex flex-wrap gap-4">
           <label><input v-model="config.enabled" type="checkbox" /> {{ t('ipAudit.keyRisk.enabled') }}</label>
+          <label><input v-model="config.user_notice_enabled" type="checkbox" /> {{ t('ipAudit.keyRisk.userNoticeEnabled') }}</label>
           <label><input v-model="config.age_email" type="checkbox" /> {{ t('ipAudit.keyRisk.ageEmail') }}</label>
           <label><input v-model="config.auto_email" type="checkbox" /> {{ t('ipAudit.keyRisk.autoEmail') }}</label>
         </div>

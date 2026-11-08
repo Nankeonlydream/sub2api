@@ -4574,7 +4574,6 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('切换页面继续生成')
     if (outcome === 'pending') {
       expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
-      expect(wrapper.find('.generation-heading-loader').exists()).toBe(true)
       expect(wrapper.find('.generation-frame-ring').exists()).toBe(true)
       expect(wrapper.get('.generate-button').attributes('disabled')).toBeDefined()
       finish({ data: [{ url: '/completed-away.png' }] })

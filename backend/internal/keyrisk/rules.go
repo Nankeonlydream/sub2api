@@ -10,19 +10,20 @@ import (
 )
 
 type Config struct {
-	Enabled         bool     `json:"enabled"`
-	AutoEmail       bool     `json:"auto_email"`
-	AgeEmail        bool     `json:"age_email"`
-	MaxReminders    int      `json:"max_reminders"`
-	AgeDays         int      `json:"age_days"`
-	WindowMinutes   int      `json:"window_minutes"`
-	UsersPerIP      int      `json:"users_per_ip"`
-	IPsPerKey       int      `json:"ips_per_key"`
-	TrustedNetworks []string `json:"trusted_networks"`
+	Enabled           bool     `json:"enabled"`
+	UserNoticeEnabled bool     `json:"user_notice_enabled"`
+	AutoEmail         bool     `json:"auto_email"`
+	AgeEmail          bool     `json:"age_email"`
+	MaxReminders      int      `json:"max_reminders"`
+	AgeDays           int      `json:"age_days"`
+	WindowMinutes     int      `json:"window_minutes"`
+	UsersPerIP        int      `json:"users_per_ip"`
+	IPsPerKey         int      `json:"ips_per_key"`
+	TrustedNetworks   []string `json:"trusted_networks"`
 }
 
 func DefaultConfig() Config {
-	return Config{Enabled: true, MaxReminders: 3, AgeDays: 90, WindowMinutes: 30, UsersPerIP: 3, IPsPerKey: 5, TrustedNetworks: []string{}}
+	return Config{Enabled: true, UserNoticeEnabled: true, MaxReminders: 3, AgeDays: 90, WindowMinutes: 30, UsersPerIP: 3, IPsPerKey: 5, TrustedNetworks: []string{}}
 }
 func (c Config) Validate() error {
 	if c.MaxReminders < 1 || c.MaxReminders > 10 || c.AgeDays < 1 || c.AgeDays > 3650 || c.WindowMinutes < 1 || c.WindowMinutes > 60 || c.UsersPerIP < 2 || c.UsersPerIP > 100 || c.IPsPerKey < 2 || c.IPsPerKey > 100 || len(c.TrustedNetworks) > 256 {

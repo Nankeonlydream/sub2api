@@ -1,5 +1,5 @@
 <template>
-  <section class="rounded-lg border border-amber-200 bg-amber-50/40 p-4 dark:border-amber-900 dark:bg-amber-950/20" aria-labelledby="key-risk-notices-title">
+  <section v-if="visible" class="rounded-lg border border-amber-200 bg-amber-50/40 p-4 dark:border-amber-900 dark:bg-amber-950/20" aria-labelledby="key-risk-notices-title">
     <div class="flex items-center justify-between gap-3">
       <h2 id="key-risk-notices-title" class="font-medium">{{ t('ipAudit.keyRisk.userTitle') }}</h2>
       <button class="btn btn-secondary btn-sm" :disabled="busy" @click="load(0)">{{ t('common.refresh') }}</button>
@@ -41,13 +41,18 @@ import { useI18n } from 'vue-i18n'
 import { userKeyRiskApi, type UserKeyRiskNotice } from './keyRiskApi'
 const { t } = useI18n()
 const items = ref<UserKeyRiskNotice[]>([])
+const visible = ref(false)
 const busy = ref(false), error = ref(false), message = ref(''), before = ref(0)
 const confirming = ref<UserKeyRiskNotice | null>(null)
 async function load(cursor: number) {
   if (busy.value) return
   busy.value = true; error.value = false; message.value = ''; confirming.value = null
-  try { items.value = (await userKeyRiskApi.list(cursor)).items; before.value = cursor }
-  catch { error.value = true }
+  try {
+    const result = await userKeyRiskApi.list(cursor)
+    visible.value = result.enabled
+    items.value = result.items
+    before.value = cursor
+  } catch { visible.value = true; error.value = true }
   finally { busy.value = false }
 }
 async function acknowledge(item: UserKeyRiskNotice) {
@@ -57,7 +62,9 @@ async function acknowledge(item: UserKeyRiskNotice) {
     await userKeyRiskApi.acknowledge(item)
     confirming.value = null
     message.value = t('ipAudit.keyRisk.acknowledged')
-    items.value = (await userKeyRiskApi.list(before.value)).items
+    const result = await userKeyRiskApi.list(before.value)
+    visible.value = result.enabled
+    items.value = result.items
   } catch { error.value = true }
   finally { busy.value = false }
 }

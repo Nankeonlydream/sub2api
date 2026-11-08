@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/DATA-DOG/go-sqlmock"
+	"github.com/Wei-Shaw/sub2api/internal/keyrisk"
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 )
@@ -102,4 +104,17 @@ func TestUserKeyRiskRequiresAuthentication(t *testing.T) {
 	require.Equal(t, 401, auditAdminRequest(t, h.AcknowledgeMyKeyRisk, "POST", "/test", "", `{"generation":1,"confirm":true}`).Code)
 	// Ordinary customers reach the user-facing service, not the administrator gate.
 	require.Equal(t, 503, auditAdminRequest(t, h.GetMyKeyRisks, "GET", "/test", "user", "").Code)
+}
+
+func TestUserKeyRiskHiddenWithoutLoadingRecords(t *testing.T) {
+	db, mock, err := sqlmock.New()
+	require.NoError(t, err)
+	defer db.Close()
+	mock.ExpectQuery("SELECT config FROM key_risk_control").WillReturnRows(
+		sqlmock.NewRows([]string{"config"}).AddRow(`{"user_notice_enabled":false}`))
+	h := &SettingHandler{keyRisk: &keyrisk.Service{DB: db}}
+	w := auditAdminRequest(t, h.GetMyKeyRisks, "GET", "/test", "user", "")
+	require.Equal(t, 200, w.Code)
+	require.JSONEq(t, `{"code":0,"message":"success","data":{"enabled":false,"items":[]}}`, w.Body.String())
+	require.NoError(t, mock.ExpectationsWereMet())
 }

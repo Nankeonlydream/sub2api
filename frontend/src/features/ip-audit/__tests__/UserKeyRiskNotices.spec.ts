@@ -10,7 +10,7 @@ const notice = (): UserKeyRiskNotice => ({ event_id: 4, generation: 2, rule: 'cr
 function render(locale = 'en') {
   return mount(UserKeyRiskNotices, { global: { plugins: [createI18n({ legacy: false, locale, messages: { en: { ipAudit: en, common: { refresh: 'Refresh', cancel: 'Cancel' } }, zh: { ipAudit: zh, common: { refresh: '刷新', cancel: '取消' } } } })] } })
 }
-beforeEach(() => { vi.resetAllMocks(); vi.mocked(userKeyRiskApi.list).mockResolvedValue({ items: [notice()] }); vi.mocked(userKeyRiskApi.acknowledge).mockResolvedValue() })
+beforeEach(() => { vi.resetAllMocks(); vi.mocked(userKeyRiskApi.list).mockResolvedValue({ enabled: true, items: [notice()] }); vi.mocked(userKeyRiskApi.acknowledge).mockResolvedValue() })
 describe('Customer risk acknowledgement', () => {
   it.each(['en', 'zh'])('renders the risk and confirmation boundary in %s', async locale => {
     const w = render(locale); await flushPromises()
@@ -25,7 +25,7 @@ describe('Customer risk acknowledgement', () => {
     await w.findAll('button').find(b => b.text() === en.keyRisk.acknowledge)!.trigger('click')
     expect(userKeyRiskApi.acknowledge).not.toHaveBeenCalled()
     expect(w.get('[role=group]').text()).toContain(en.keyRisk.ackConfirm)
-    vi.mocked(userKeyRiskApi.list).mockResolvedValue({ items: [{ ...notice(), acknowledged_at: '2026-11-07T02:00:00Z' }] })
+    vi.mocked(userKeyRiskApi.list).mockResolvedValue({ enabled: true, items: [{ ...notice(), acknowledged_at: '2026-11-07T02:00:00Z' }] })
     await w.get('[data-test=confirm-risk]').trigger('click'); await flushPromises()
     expect(userKeyRiskApi.acknowledge).toHaveBeenCalledWith(notice())
     expect(w.text()).toContain(en.keyRisk.acknowledged)
@@ -43,10 +43,16 @@ describe('Customer risk acknowledgement', () => {
     w.unmount()
   })
   it('permits acknowledgement after the reminder cap is reached', async () => {
-    vi.mocked(userKeyRiskApi.list).mockResolvedValue({ items: [{ ...notice(), attempts: 3 }] })
+    vi.mocked(userKeyRiskApi.list).mockResolvedValue({ enabled: true, items: [{ ...notice(), attempts: 3 }] })
     const w = render(); await flushPromises()
     expect(w.text()).toContain(en.keyRisk.limitReached)
     expect(w.findAll('button').some(b => b.text() === en.keyRisk.acknowledge)).toBe(true)
+    w.unmount()
+  })
+  it('hides the entire user-facing section when disabled by the administrator', async () => {
+    vi.mocked(userKeyRiskApi.list).mockResolvedValue({ enabled: false, items: [] })
+    const w = render(); await flushPromises()
+    expect(w.find('section').exists()).toBe(false)
     w.unmount()
   })
 })

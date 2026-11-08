@@ -1,6 +1,6 @@
 # catbee.online Seedance API 接入指南
 
-本文面向使用 `catbee.online` 和平台 API Key 的开发者：先读取当前 Key 可调用的模型，选择 Seedance，再提交视频任务、轮询状态并下载成品。API Key 由网站账号创建；请勿把 Key 写进网页前端、公开代码或日志。网站参数与计费约定另见[在线 API 文档](https://www.yeepay.top/api-docs#billing)。
+本文面向使用 `catbee.online` 和平台 API Key 的开发者：先读取当前 Key 可调用的模型，选择 Seedance，再提交视频任务、轮询状态并下载成品。API Key 由网站账号创建；请勿把 Key 写进网页前端、公开代码或日志。
 
 ## 快速流程
 
@@ -129,7 +129,7 @@ curl "$CATBEE_BASE_URL/videos/$TASK_ID/content" \
 
 创建任务时平台会检查余额并预留在途额度；任务成功后按该模型的计费配置结算，失败任务不收取视频生成费用。Seedance 型号配置为按条计费时，每个视频收一次价格；按秒计费时，价格乘请求的输出时长。查询状态不会重复收费，任务状态查询和后台结算使用任务 ID 做去重。
 
-客户端无需自行扣费或根据实际 MP4 时长估算金额。提交前可调用上面的 `video-pricing` 接口展示价格，最终以平台的用量记录为准。具体计费原则见[在线文档的计费说明](https://www.yeepay.top/api-docs#billing)。
+客户端无需自行扣费或根据实际 MP4 时长估算金额。提交前可调用上面的 `video-pricing` 接口展示价格，最终以平台的用量记录为准。
 
 ## 最小 Python 示例
 

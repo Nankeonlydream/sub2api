@@ -1,6 +1,7 @@
 package keyrisk
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 )
@@ -53,6 +54,16 @@ func TestValidate(t *testing.T) {
 	c.TrustedNetworks = []string{"invalid"}
 	if c.Validate() == nil {
 		t.Fatal("invalid network accepted")
+	}
+}
+
+func TestUserNoticeVisibilityDefaultsOnForExistingConfigs(t *testing.T) {
+	c := DefaultConfig()
+	if err := json.Unmarshal([]byte(`{"enabled":true}`), &c); err != nil {
+		t.Fatal(err)
+	}
+	if !c.UserNoticeEnabled {
+		t.Fatal("existing configurations should keep user notices visible by default")
 	}
 }
 

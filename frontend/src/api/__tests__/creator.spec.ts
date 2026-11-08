@@ -568,6 +568,26 @@ describe('creator gateway API', () => {
     expect(isCreatorVideoComplete(status.status)).toBe(true)
   })
 
+  it('keeps a rendering video pending when the relay sends an empty error placeholder', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ id: 'vid_1', status: 'in_progress', progress: 28, error: {} }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'vid_1', status: 'in_progress', progress: 32, error: { code: '', message: '' } }))
+      .mockResolvedValueOnce(jsonResponse({ id: 'vid_1', status: 'in_progress', video: { error: null } }))
+    const { getCreatorVideoStatus } = await import('@/api/creator')
+    for (const progress of [28, 32, undefined]) {
+      const status = await getCreatorVideoStatus('sk-grok', 'vid_1')
+      expect(status.status).toBe('in_progress')
+      expect(status.progress).toBe(progress)
+      expect(status.error).toBeUndefined()
+    }
+  })
+
+  it('still fails a video whose relay error carries a message', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ id: 'vid_2', status: 'failed', error: { message: 'moderation rejected' } }))
+    const { getCreatorVideoStatus } = await import('@/api/creator')
+    await expect(getCreatorVideoStatus('sk-grok', 'vid_2')).rejects.toThrow('moderation rejected')
+  })
+
   it('reads the MiniMax H3 result URL from metadata', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({
       id: 'task_1', status: 'completed', progress: 100,

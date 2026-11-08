@@ -38,12 +38,21 @@ func (h *SettingHandler) GetMyKeyRisks(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
+	cfg, err := h.keyRisk.Config(ctx)
+	if err != nil {
+		response.Error(c, 503, "Risk notice settings unavailable")
+		return
+	}
+	if !cfg.UserNoticeEnabled {
+		response.Success(c, gin.H{"enabled": false, "items": []any{}})
+		return
+	}
 	notices, err := h.keyRisk.UserNotices(ctx, user, before)
 	if err != nil {
 		response.Error(c, 503, "Risk notices unavailable")
 		return
 	}
-	response.Success(c, gin.H{"items": notices})
+	response.Success(c, gin.H{"enabled": true, "items": notices})
 }
 func (h *SettingHandler) AcknowledgeMyKeyRisk(c *gin.Context) {
 	user, ok := h.keyRiskOwner(c)

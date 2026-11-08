@@ -207,9 +207,8 @@
         <div v-if="selectedGeneration && selectedWork" class="generation-state" :class="{ 'is-video': generationMode === 'video' }">
           <section class="generation-panel">
             <div class="generation-heading">
-              <span class="generation-heading-loader" aria-hidden="true"><Icon name="sparkles" size="sm" /></span>
               <div class="generation-heading-copy">
-                <h2>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
+                <h2><span class="generation-status-dot" aria-hidden="true"></span>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
                 <p>{{ generationProgress }}</p>
               </div>
               <button type="button" class="new-creation-link generation-new-creation" @click="newCreation">
@@ -224,7 +223,26 @@
                 </ul>
               </div>
               <div class="generation-metrics">
+                <!-- One segment per image, so each frame below has its own progress. -->
                 <div
+                  v-if="generationMode === 'image' && generationFrames.length > 1"
+                  class="generation-segments"
+                  role="progressbar"
+                  aria-valuemin="0"
+                  :aria-valuemax="generationFrames.length"
+                  :aria-valuenow="selectedWork.outputs.length"
+                  :aria-valuetext="`已完成 ${selectedWork.outputs.length} / ${generationFrames.length}`"
+                >
+                  <span
+                    v-for="frame in generationFrames"
+                    :key="frame.index"
+                    class="generation-segment"
+                    :class="`is-${frame.state}`"
+                    :style="{ '--segment-delay': `${frame.index * 0.2}s` }"
+                  ></span>
+                </div>
+                <div
+                  v-else
                   class="progress-track"
                   :class="{ indeterminate: !generationHasExactProgress }"
                   role="progressbar"
@@ -349,21 +367,33 @@
             </div>
           </div>
 
-          <div v-if="selectedWork.status === 'failed' && !hasPartialImages(selectedWork)" class="result-error">
-            <Icon name="exclamationTriangle" size="lg" />
-            <strong>生成失败</strong>
-            <p>{{ localizeSvgGenerationError(selectedWork.error || '请检查模型与参数后重试。') }}</p>
-            <button
-              v-if="isVideoDownloadFailure(selectedWork)"
-              type="button"
-              class="secondary-command primary-soft status-check-command"
-              :disabled="checkingVideoHistory"
-              @click="refreshVideoWork(selectedWork)"
-            >
-              <Icon name="refresh" size="xs" />
-              {{ checkingVideoHistory ? '正在重试...' : '重新加载视频' }}
-            </button>
-            <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
+          <div
+            v-if="selectedWork.status === 'failed' && !hasPartialImages(selectedWork)"
+            class="result-error"
+            :class="{ muted: reloadingVideoInPlaceId === selectedWork.id }"
+            aria-live="polite"
+          >
+            <template v-if="reloadingVideoInPlaceId === selectedWork.id">
+              <span class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
+              <strong>正在加载视频</strong>
+              <p>视频已生成，正在准备播放，请稍候。</p>
+            </template>
+            <template v-else>
+              <Icon name="exclamationTriangle" size="lg" />
+              <strong>生成失败</strong>
+              <p>{{ localizeSvgGenerationError(selectedWork.error || '请检查模型与参数后重试。') }}</p>
+              <button
+                v-if="isVideoDownloadFailure(selectedWork)"
+                type="button"
+                class="secondary-command primary-soft status-check-command"
+                :disabled="checkingVideoHistory"
+                @click="reloadVideoInPlace(selectedWork)"
+              >
+                <Icon name="refresh" size="xs" />
+                重新加载视频
+              </button>
+              <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
+            </template>
           </div>
 
           <div v-else-if="missingOutputCount(selectedWork)" class="partial-result-notice" role="status">
@@ -376,44 +406,32 @@
             <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
           </div>
 
+          <!-- Opening a finished video from history and reloading after an error share
+               this one placeholder box; the player replaces it once the video arrives. -->
           <div
-            v-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && loadingVideoWorkId === selectedWork.id"
-            class="result-grid single video-loading-grid"
-          >
-            <article class="result-card video-loading-card">
-              <div class="result-media video-loading-media" :style="resultMediaStyle(selectedWork)" role="status" aria-live="polite">
-                <div class="video-loading-content">
-                  <span class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
-                  <strong>正在加载视频</strong>
-                  <p>视频已生成，正在准备播放，请稍候。</p>
-                </div>
-              </div>
-              <div class="result-actions video-loading-actions">
-                <div class="result-description">
-                  <strong>{{ isMultiShotVideo(selectedWork) ? '完整成片' : '视频结果' }}</strong>
-                  <span class="result-model" :title="selectedWork.model">{{ videoModelLabel(selectedWork.model) }}</span>
-                  <span class="result-meta"><span v-for="(part, partIndex) in metaParts(videoResolutionTierLabel(selectedWork))" :key="partIndex">{{ part }}</span></span>
-                </div>
-              </div>
-            </article>
-          </div>
-
-          <div
-            v-else-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone === 'error'"
+            v-if="selectedWork.status === 'completed' && selectedWork.type === 'video' && selectedWork.requestId && !selectedWork.outputs.length && (isLoadingSelectedVideo(selectedWork) || (selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone === 'error'))"
             class="result-error muted"
+            aria-live="polite"
           >
-            <Icon name="exclamationTriangle" size="lg" />
-            <strong>视频加载失败</strong>
-            <p>{{ selectedVideoHistoryFeedback.message }}</p>
-            <button
-              type="button"
-              class="secondary-command primary-soft status-check-command"
-              :disabled="checkingVideoHistory"
-              @click="refreshVideoWork(selectedWork)"
-            >
-              <Icon name="refresh" size="xs" />
-              {{ checkingVideoHistory ? '正在重试...' : '重新加载视频' }}
-            </button>
+            <template v-if="isLoadingSelectedVideo(selectedWork)">
+              <span class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
+              <strong>正在加载视频</strong>
+              <p>视频已生成，正在准备播放，请稍候。</p>
+            </template>
+            <template v-else>
+              <Icon name="exclamationTriangle" size="lg" />
+              <strong>视频加载失败</strong>
+              <p>{{ selectedVideoHistoryFeedback?.message }}</p>
+              <button
+                type="button"
+                class="secondary-command primary-soft status-check-command"
+                :disabled="checkingVideoHistory"
+                @click="reloadVideoInPlace(selectedWork)"
+              >
+                <Icon name="refresh" size="xs" />
+                重新加载视频
+              </button>
+            </template>
           </div>
 
           <section v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="complete-video-card">
@@ -572,7 +590,8 @@
           </div>
 
           <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
-            <Icon :name="checkingVideoHistory ? 'refresh' : 'clock'" size="lg" :class="{ 'status-check-icon': checkingVideoHistory }" />
+            <span v-if="checkingVideoHistory" class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
+            <Icon v-else name="clock" size="lg" />
             <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在同步状态' : '视频还在生成中' }}</strong>
             <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在获取最新进度，请稍候。' : '任务已保存，可随时点击下方按钮同步最新进度。' }}</p>
             <div v-if="selectedWork.type === 'image'" class="pending-image-actions">
@@ -4518,6 +4537,22 @@ async function selectWork(work: CreatorHistoryItem) {
   if (shouldRefreshVideo) await refreshVideoWork(work, true)
 }
 
+// Reloading from an error card keeps the spinner inside that same card, then
+// the finished video replaces it directly instead of flashing a separate loading card.
+const reloadingVideoInPlaceId = ref('')
+function isLoadingSelectedVideo(work: CreatorHistoryItem) {
+  return loadingVideoWorkId.value === work.id || reloadingVideoInPlaceId.value === work.id
+}
+async function reloadVideoInPlace(work: CreatorHistoryItem) {
+  if (checkingVideoHistory.value) return
+  reloadingVideoInPlaceId.value = work.id
+  try {
+    await refreshVideoWork(work)
+  } finally {
+    if (reloadingVideoInPlaceId.value === work.id) reloadingVideoInPlaceId.value = ''
+  }
+}
+
 // A manual check of a still-rendering task resumes live polling, so progress
 // lost to a page refresh is shown again until the video loads.
 async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume = !quiet) {
@@ -5539,10 +5574,14 @@ function generationTags(work: CreatorHistoryItem) {
       (work.shotCount || 1) > 1 ? `${work.shotCount} 个镜头` : undefined,
     )
   }
+  const size = workResolutionLabel(work).split(' · ')[1]
+  const dimensions = /^(\d+)×(\d+)$/.exec(size || '')
+  const tier = work.resolution || (dimensions ? customImageResolution(Number(dimensions[1]), Number(dimensions[2])) : undefined)
   return metaParts(
     modelLabel(work.model),
     imageAspectRatioLabel(work),
-    workResolutionLabel(work).split(' · ')[1],
+    tier,
+    size,
     work.outputFormat?.toUpperCase(),
     work.outputFormat === 'gif' && work.frameCount ? `${work.frameCount} 帧` : undefined,
     work.referenceCount ? `${work.referenceCount} 张参考图` : undefined,
@@ -6030,7 +6069,7 @@ onBeforeUnmount(() => {
 .history-item.generating { border-color: #a5ddd4; }
 .history-copy small.history-progress { color: var(--creator-accent-strong); }
 .pending-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.generation-new-creation { flex: none; min-height: 40px; gap: 7px; padding: 0 18px; border-color: #e3ebe9; border-radius: var(--creator-radius); background: #fff; color: #475569; font-size: 13px; font-weight: 600; box-shadow: 0 1px 2px rgb(16 40 36 / 5%); transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
+.generation-new-creation { flex: none; min-height: 36px; gap: 6px; padding: 0 14px; border-color: #e3ebe9; border-radius: var(--creator-radius); background: #fff; color: #475569; font-size: 13px; font-weight: 600; box-shadow: 0 1px 2px rgb(16 40 36 / 5%); transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
 .generation-new-creation:hover { border-color: var(--creator-accent); background: #effbf8; color: var(--creator-accent-strong); }
 .ready-status {
   white-space: nowrap;
@@ -6322,17 +6361,18 @@ onBeforeUnmount(() => {
 /* One compact status panel; the frames below carry the main loading animation. */
 .generation-panel { display: grid; gap: 18px; width: 100%; min-width: 0; padding: 22px 24px 20px; border: 1px solid #e6eeec; border-radius: var(--creator-radius-large); background: #fff; box-shadow: 0 1px 2px rgb(16 40 36 / 4%), 0 14px 36px -14px rgb(16 40 36 / 12%); text-align: left; }
 .generation-heading { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.generation-heading-loader { position: relative; display: grid; flex: none; width: 40px; height: 40px; place-items: center; border-radius: 12px; color: var(--creator-accent-strong); background: #f0f8f6; box-shadow: inset 0 0 0 1px #d9eeea; }
-.generation-heading-loader::before { position: absolute; inset: 0; border-radius: inherit; box-shadow: 0 0 0 0 rgb(15 159 143 / 30%); content: ''; animation: creatorLoaderPulse 1.8s ease-out infinite; }
-@media (prefers-reduced-motion: reduce) { .generation-heading-loader::before { animation: none; } }
-.generation-heading-copy { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; }
-.generation-state .generation-heading-copy h2 { overflow: hidden; color: #0f172a; font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-/* Prompt and metrics share the title's text column so the icon stands alone on the left. */
-.generation-body { display: grid; gap: 18px; padding-left: 54px; }
-@media (max-width: 640px) { .generation-body { padding-left: 0; } }
-.generation-brief { display: grid; gap: 10px; min-width: 0; padding-left: 14px; border-left: 2px solid #d3ece7; }
-.generation-prompt { display: -webkit-box; margin: 0; overflow: hidden; color: #3a4757; font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.result-tags.generation-tags li { padding: 3px 10px; border: 1px solid #e3ebe9; color: #5c6b7a; background: #fff; font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .01em; }
+.generation-heading-copy { display: grid; flex: 0 1 auto; order: 1; gap: 2px; min-width: 0; }
+.generation-heading .generation-new-creation { order: 3; margin-left: auto; }
+/* The ellipsis needs overflow: hidden; the offset padding gives the status dot's pulse room so it isn't clipped. */
+.generation-state .generation-heading-copy h2 { margin-left: -8px; padding-left: 8px; overflow: hidden; color: #0f172a; font-size: 16px; font-weight: 650; letter-spacing: -.01em; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+/* A breathing dot marks the task as live without a heavy icon tile. */
+.generation-status-dot { display: inline-block; width: 8px; height: 8px; margin-right: 10px; border-radius: 50%; background: var(--creator-accent); vertical-align: 2px; animation: creatorStatusPulse 1.8s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .generation-status-dot { animation: none; } }
+.generation-body { display: grid; gap: 16px; }
+.generation-brief { display: grid; gap: 12px; min-width: 0; }
+.generation-prompt { display: -webkit-box; margin: 0; overflow: hidden; color: #1e293b; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-tags.generation-tags { align-items: center; }
+.result-tags.generation-tags li { padding: 2px 10px; border: 1px solid #e6edeb; color: #5c6b7a; background: #f8fafa; font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .01em; font-variant-numeric: tabular-nums; }
 .result-tags.generation-tags li:first-child { border-color: #cfe9e3; color: var(--creator-accent-strong); background: #f3faf8; }
 .generation-heading-copy p { margin: 0; overflow: hidden; color: #8391a2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .generation-stage { display: flex; align-items: center; justify-content: center; gap: 12px; max-width: 100%; }
@@ -6383,6 +6423,12 @@ onBeforeUnmount(() => {
 }
 .generation-metrics { display: flex; align-items: center; gap: 16px; min-height: 20px; margin: 0; }
 .generation-metrics > .progress-track { flex: 1 1 auto; height: 3px; }
+.generation-segments { display: flex; flex: 1 1 auto; gap: 6px; min-width: 0; }
+.generation-segment { position: relative; flex: 1 1 0; height: 4px; overflow: hidden; border-radius: 999px; background: #e3f4f1; transition: background .4s ease; }
+.generation-segment.is-done { background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); }
+.generation-segment.is-failed { background: #f3cdc8; }
+.generation-segment.is-current::after { position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgb(43 196 172 / 80%), transparent); content: ''; transform: translateX(-100%); animation: creatorSegmentSweep 1.8s ease-in-out var(--segment-delay, 0s) infinite; }
+@media (prefers-reduced-motion: reduce) { .generation-segment.is-current { background: #bfe7df; } .generation-segment.is-current::after { display: none; } }
 .generation-elapsed { display: inline-flex; flex: none; align-items: center; gap: 5px; white-space: nowrap; color: #8391a2; font-size: 12px; line-height: 1; }
 .generation-elapsed strong { margin-left: 2px; color: #0f172a; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .generation-percent { display: inline-flex; flex: none; align-items: center; justify-content: center; min-width: 42px; height: 22px; padding: 0 8px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
@@ -6430,16 +6476,11 @@ onBeforeUnmount(() => {
 .video-result-frame { position: relative; width: 100%; overflow: hidden; }
 .complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
 .video-result-frame { display: grid; border-radius: inherit; max-height: min(58vh, 620px); }
-.video-loading-media { color: #dcebe8; background: #142321; }
-.video-loading-media { display: grid; height: auto; }
-.video-loading-content strong { margin-top: 13px; color: #f1f8f6; font-size: 14px; font-weight: 700; }
-.video-loading-content p { margin: 7px 0 0; color: #9bb4af; font-size: 11px; line-height: 1.5; }
-.video-loading-content { display: grid; justify-items: center; align-content: center; width: 100%; height: 100%; }
-.video-loading-spinner { display: inline-grid; width: 42px; height: 42px; place-items: center; border: 2px solid rgb(146 224 211 / 28%); border-top-color: #79dfd0; border-radius: 50%; color: #9cebe0; animation: creatorSpin 900ms linear infinite; }
-.video-loading-spinner svg { width: 18px; height: 18px; }
-.video-loading-grid { margin-bottom: 24px; }
-.video-loading-card { box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
-.video-loading-actions { min-height: 76px; }
+/* Only the ring spins; the icon stays upright so the motion reads as one calm loop. */
+.video-loading-spinner { position: relative; display: inline-grid; width: 52px; height: 52px; place-items: center; border-radius: 50%; color: var(--creator-accent); background: #fff; box-shadow: 0 6px 18px rgb(25 74 67 / 10%); }
+.video-loading-spinner::before { position: absolute; inset: -4px; border: 2px solid rgb(17 160 140 / 14%); border-top-color: var(--creator-accent); border-radius: 50%; content: ""; animation: creatorSpin 900ms linear infinite; }
+.video-loading-spinner svg { width: 20px; height: 20px; }
+@media (prefers-reduced-motion: reduce) { .video-loading-spinner::before { animation-duration: 2400ms; } }
 /* Equal vertical padding keeps the download button centered between the video and the card's bottom edge. */
 .complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 16px; }
 .complete-video-card > footer > div { min-width: 0; flex: 1; }
@@ -6835,7 +6876,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
 @keyframes creatorTwinkle { 50% { opacity: .55; transform: scale(.88) rotate(-8deg); } }
-@keyframes creatorLoaderPulse { 70%, 100% { box-shadow: 0 0 0 8px rgb(15 159 143 / 0%); } }
 @keyframes creatorShimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @keyframes creatorFrameIn { from { opacity: 0; transform: scale(.96); } }
 @keyframes creatorStatusPulse { to { opacity: .35; transform: scale(.92); } }
@@ -6853,6 +6893,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   54% { clip-path: inset(0 1% 0 81% round 999px); }
   60%, 100% { clip-path: inset(0 0% 0 100% round 999px); }
 }
+@keyframes creatorStatusPulse { 0% { box-shadow: 0 0 0 0 rgb(15 159 143 / 35%); } 70%, 100% { box-shadow: 0 0 0 6px rgb(15 159 143 / 0%); } }
+@keyframes creatorSegmentSweep { to { transform: translateX(100%); } }
 @keyframes creatorProgressShort {
   0%, 60% { clip-path: inset(0 100% 0 0% round 999px); }
   65% { clip-path: inset(0 82.03% 0 7.031% round 999px); }
@@ -6930,14 +6972,16 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .partial-result-notice p { color: #c9ad7f; }
 :global(.dark) .generation-panel { border-color: #2a3a38; background: #142220; box-shadow: none; }
 :global(.dark) .generation-state .generation-heading-copy h2 { color: #eef5f4; }
-:global(.dark) .generation-brief { border-left-color: #2b4a45; }
-:global(.dark) .generation-prompt { color: #d3dfdc; }
+:global(.dark) .generation-prompt { color: #e2ebe9; }
 :global(.dark) .result-tags.generation-tags li { border-color: #2c3d3b; color: #a5b8b4; background: transparent; }
 :global(.dark) .result-tags.generation-tags li:first-child { border-color: #2b4a45; color: #79dfd0; background: #17302c; }
+:global(.dark) .generation-segment { background: #213532; }
+:global(.dark) .generation-segment.is-done { background: linear-gradient(90deg, #2bc4ac, #79dfd0); }
+:global(.dark) .generation-segment.is-failed { background: #5a2f2b; }
+:global(.dark) .generation-status-dot { background: #79dfd0; }
 :global(.dark) .generation-heading-copy p,
 :global(.dark) .generation-elapsed { color: #93a7a3; }
 :global(.dark) .generation-elapsed strong { color: #e6efed; }
-:global(.dark) .generation-heading-loader { color: #79dfd0; background: #17322e; box-shadow: inset 0 0 0 1px #24423d; }
 :global(.dark) .generation-done-count { color: #93a7a3; }
 :global(.dark) .generation-new-creation { border-color: #344744; color: #c5d6d3; background: #192725; }
 :global(.dark) .generation-new-creation:hover { border-color: #79dfd0; color: #79dfd0; background: #1d2f2c; }
@@ -7021,7 +7065,11 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .generation-stage.is-video { grid-auto-rows: auto; justify-items: center; }
   .generation-frame { flex: 1 1 0; width: auto; max-width: var(--generation-frame-mobile-max); }
   .generation-stage.is-video .generation-frame { width: 100%; aspect-ratio: var(--generation-frame-aspect-ratio); }
-  .generation-panel { width: 100%; }
+  .generation-panel { width: 100%; padding: 18px 16px 16px; }
+  .generation-panel .generation-body { gap: 14px; }
+  .generation-heading { gap: 10px; }
+  /* Compact button keeps the heading on one row so the subtitle has room. */
+  .generation-heading .generation-new-creation { min-height: 34px; gap: 4px; padding: 0 12px; font-size: 12px; }
   /* The card no longer clips (overflow: visible for sticky), so round the toolbar to match it. */
   .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: flex; gap: 8px; align-items: stretch; padding: 8px; border-radius: var(--creator-surface-radius) var(--creator-surface-radius) 0 0; transition: border-radius 160ms ease; }
   .studio-toolbar.is-stuck { border-radius: 0; }
