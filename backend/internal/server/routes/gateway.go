@@ -148,12 +148,18 @@ func RegisterGatewayRoutes(
 		}
 	}
 	// Video relays serve MiniMax-H3 from MiniMax groups and Seedance from
-	// DeepSeek groups through the same JSON OpenAI Videos API.
+	// DeepSeek groups through the same JSON OpenAI Videos API. Grok groups use
+	// the Seedance relay for relay catalog models (e.g. heavy-grok-720p).
 	relayVideos := func(c *gin.Context) bool {
 		switch getGroupPlatform(c) {
 		case service.PlatformMiniMax:
 			h.OpenAIGateway.MiniMaxH3Videos(c)
 		case service.PlatformDeepseek:
+			h.OpenAIGateway.SeedanceVideos(c)
+		case service.PlatformGrok:
+			if !h.OpenAIGateway.GrokGroupRelayVideo(c) {
+				return false
+			}
 			h.OpenAIGateway.SeedanceVideos(c)
 		default:
 			return false
@@ -268,6 +274,7 @@ func RegisterGatewayRoutes(
 	gateway.GET("/sub2api/billing", h.Gateway.KeyBillingInfo)
 	gateway.GET("/sub2api/image-pricing", h.OpenAIGateway.CreatorImagePricing)
 	gateway.GET("/sub2api/video-pricing", h.OpenAIGateway.CreatorVideoPricing)
+	gateway.GET("/sub2api/seedance-catalog", h.OpenAIGateway.CreatorSeedanceCatalog)
 	gateway.Use(groupModelAllowlist, apiKeyModelPolicy)
 	gateway.Use(groupCodexCLIOnly, groupBlockSubagents)
 	gateway.Use(groupAntiDistillation, groupStreamOnly)

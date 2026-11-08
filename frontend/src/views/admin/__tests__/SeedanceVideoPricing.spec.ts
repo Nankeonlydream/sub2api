@@ -1,15 +1,18 @@
 import { mount } from '@vue/test-utils'
+import { createPinia } from 'pinia'
 import { createI18n } from 'vue-i18n'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import SeedanceVideoPricing from '../SeedanceVideoPricing.vue'
 import { createVideoModelPricesForm, serializeVideoModelPrices } from '../groupsVideoModelPricing'
 import { SEEDANCE_VIDEO_TIERS } from '@/utils/seedanceVideo'
+
+vi.mock('@/api/admin/seedanceCatalog', () => ({ getSeedanceCatalog: vi.fn().mockResolvedValue({ customized: false, entries: [] }) }))
 
 type Form = ReturnType<typeof createVideoModelPricesForm>
 
 function render(prices: Record<string, Record<string, number>> = {}) {
   const i18n = createI18n({ legacy: false, locale: 'en', missingWarn: false, fallbackWarn: false })
-  return mount(SeedanceVideoPricing, { props: { modelValue: createVideoModelPricesForm(prices), multiplier: 0.5 }, global: { plugins: [i18n] } })
+  return mount(SeedanceVideoPricing, { props: { modelValue: createVideoModelPricesForm(prices), multiplier: 0.5 }, global: { plugins: [i18n, createPinia()] } })
 }
 
 describe('Seedance video pricing', () => {

@@ -9,6 +9,7 @@ import profitOps from './profitOps'
 import upstreamOps from './upstreamOps'
 import channelOps from './channelOps'
 import ipAudit from './ipAudit'
+import videoReview from './videoReview'
 import traffic from './traffic'
 import connections from './connections'
 import securityRecords from './securityRecords'
@@ -49,6 +50,7 @@ export default {
   upstreamEntities,
   traffic,
   ipAudit,
+  videoReview,
   connections,
   securityRecords,
   siwc,

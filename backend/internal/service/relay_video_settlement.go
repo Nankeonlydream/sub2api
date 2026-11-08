@@ -319,6 +319,11 @@ func (p *UsageRecordWorkerPool) StartRelayVideoSettlement(s *OpenAIGatewayServic
 					logger.L().Warn("relay_video.recovery_failed", zap.Error(err))
 				}
 				stop()
+				cycle, stop = context.WithTimeout(ctx, 2*time.Minute)
+				if err := s.recoverNativeVideos(cycle, auth); err != nil && ctx.Err() == nil {
+					logger.L().Warn("native_video.recovery_failed", zap.Error(err))
+				}
+				stop()
 			}
 		}
 	}()

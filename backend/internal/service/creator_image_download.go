@@ -209,6 +209,9 @@ func validateCreatorImageDownloadURL(ctx context.Context, rawURL string) error {
 }
 
 func creatorImageContentType(data []byte, declared string) (string, string) {
+	if isSVGContent(data) {
+		return "image/svg+xml", "svg"
+	}
 	detected := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(data), ";")[0]))
 	declared = strings.ToLower(strings.TrimSpace(strings.Split(declared, ";")[0]))
 	if contentType, extension, ok := supportedCreatorImageType(detected); ok {
@@ -234,6 +237,8 @@ func supportedCreatorImageType(contentType string) (string, string, bool) {
 		return contentType, "gif", true
 	case "image/avif":
 		return contentType, "avif", true
+	case "image/svg+xml":
+		return contentType, "svg", true
 	default:
 		return "", "", false
 	}

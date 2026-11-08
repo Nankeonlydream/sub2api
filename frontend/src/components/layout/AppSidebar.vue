@@ -235,6 +235,7 @@ import { computed, h, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'v
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAdminSettingsStore, useAppStore, useAuthStore, useOnboardingStore, useSupportTicketStore } from '@/stores'
+import { useVideoSettlementReviewStore } from '@/stores/videoSettlementReviews'
 import VersionBadge from '@/components/common/VersionBadge.vue'
 import NewFeatureBadge from '@/components/common/NewFeatureBadge.vue'
 import FeatureSearch from './FeatureSearch.vue'
@@ -329,6 +330,7 @@ const CredentialOpsIcon = { render: () => h(Icon, { name: 'credentialOps', size:
 const PelicanTestsIcon = { render: () => h(Icon, { name: 'beaker', size: 'sm' }) }
 const SupportTicketIcon = { render: () => h(Icon, { name: 'chat' }) }
 const SupportTicketInboxIcon = { render: () => h(Icon, { name: 'inbox' }) }
+const VideoReviewIcon = { render: () => h(Icon, { name: 'playOutline' }) }
 
 const DashboardIcon = {
   render: () =>
@@ -811,6 +813,7 @@ const flagSupportTickets = makeSidebarFlag(FeatureFlags.supportTickets)
 // Admins answer tickets from their own menu, so their "my account" list skips it.
 const flagUserSupportTickets = () => flagSupportTickets() && !authStore.isAdmin
 const supportTicketStore = useSupportTicketStore()
+const videoReviewStore = useVideoSettlementReviewStore()
 const flagOpsMonitoring = () => adminSettingsStore.opsMonitoringEnabled
 const flagAdminPayment = () => adminSettingsStore.paymentEnabled
 const flagBatchImageAccess = () => canUseBatchImage.value
@@ -963,6 +966,7 @@ const adminNavItems = computed((): NavItem[] => {
       ],
     },
     { path: '/admin/usage', label: t('nav.usage'), icon: ChartIcon },
+    { path: '/admin/video-settlement-reviews', label: t('videoReview.nav'), icon: VideoReviewIcon, hideInSimpleMode: true, featureFlag: () => authStore.isAdmin, badge: () => videoReviewStore.pending },
     { path: '/admin/audit-logs', label: t('nav.auditLogs'), icon: ShieldIcon, hideInSimpleMode: true }
   ]
 

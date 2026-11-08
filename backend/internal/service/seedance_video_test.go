@@ -114,6 +114,13 @@ func TestSeedanceVideoAccountCapability(t *testing.T) {
 	a.Credentials["base_url"] = " "
 	require.False(t, a.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilitySeedanceVideo))
 
+	// A Grok API key account serves the relay only when mapped to a relay model.
+	grok := seedanceVideoTestAccount("ttsedanco2.0-480")
+	grok.Platform = PlatformGrok
+	require.True(t, grok.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilitySeedanceVideo))
+	grok.Credentials["model_mapping"] = map[string]any{"grok-imagine-video": "grok-imagine-video"}
+	require.False(t, grok.SupportsOpenAIEndpointCapability(OpenAIEndpointCapabilitySeedanceVideo))
+
 	// An H3 account must not serve Seedance endpoints and vice versa.
 	svc := &OpenAIGatewayService{httpUpstream: &grokMediaContentUpstreamStub{}}
 	c, _ := grokMediaContentTestContext(http.MethodGet, "/v1/videos/t", nil)

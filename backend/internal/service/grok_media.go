@@ -484,6 +484,15 @@ func (s *OpenAIGatewayService) StoreGrokVideoPendingBilling(
 	if key == "" {
 		return fmt.Errorf("grok video pending billing key is invalid")
 	}
+	pending = normalizeGrokVideoPendingBilling(pending)
+	payload, err := json.Marshal(pending)
+	if err != nil {
+		return err
+	}
+	return s.cache.SetGrokVideoPendingBilling(ctx, key, payload, grokVideoPendingBillingTTL(s.cfg))
+}
+
+func normalizeGrokVideoPendingBilling(pending GrokVideoPendingBilling) GrokVideoPendingBilling {
 	pending.Model = strings.TrimSpace(pending.Model)
 	pending.BillingModel = strings.TrimSpace(pending.BillingModel)
 	pending.UpstreamModel = strings.TrimSpace(pending.UpstreamModel)
@@ -501,11 +510,7 @@ func (s *OpenAIGatewayService) StoreGrokVideoPendingBilling(
 	} else {
 		pending.CreatedAt = strings.TrimSpace(pending.CreatedAt)
 	}
-	payload, err := json.Marshal(pending)
-	if err != nil {
-		return err
-	}
-	return s.cache.SetGrokVideoPendingBilling(ctx, key, payload, grokVideoPendingBillingTTL(s.cfg))
+	return pending
 }
 
 // LoadGrokVideoPendingBilling returns the create-time snapshot (may be nil on miss).

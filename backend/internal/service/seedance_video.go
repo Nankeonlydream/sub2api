@@ -92,8 +92,18 @@ func zhOnly(resolution string, perRequest bool, allowed ...int) seedanceVideoTie
 	return tier
 }
 
+// lookupSeedanceVideoTier consults the administrator's saved catalog when there
+// is one (seedance_catalog.go), else the built-in seedanceVideoTiers.
 func lookupSeedanceVideoTier(model string) (seedanceVideoTier, bool) {
-	tier, ok := seedanceVideoTiers[strings.ToLower(strings.TrimSpace(model))]
+	// Billing and request checks pass through here, so a catalog saved on another
+	// node reaches this one even if nobody opens Creator Studio.
+	refreshSeedanceCatalogIfStale()
+	key := strings.ToLower(strings.TrimSpace(model))
+	if catalog := activeSeedanceCatalog.Load(); catalog != nil {
+		tier, ok := catalog.tiers[key]
+		return tier, ok
+	}
+	tier, ok := seedanceVideoTiers[key]
 	return tier, ok
 }
 

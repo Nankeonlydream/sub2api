@@ -121,3 +121,38 @@ func TestCodexDirectImagesShadowCredentials(t *testing.T) {
 	require.Equal(t, "test-account", upstream.lastReq.Header.Get("Chatgpt-Account-Id"))
 	require.Equal(t, "/backend-api/codex/images/generations", upstream.lastReq.URL.Path)
 }
+
+func TestOpenAIImagesGIFFrameOptionsReachUpstream(t *testing.T) {
+	body := []byte(`{"model":"gpt-image-2.6-sunburst","prompt":"loop","output_format":"gif","frame_count":12,"frame_duration_ms":150}`)
+	c, _ := newOpenAIImagesTestContext(t, body)
+	parsed, err := newOpenAIImagesTestService(nil).ParseOpenAIImagesRequest(c, body)
+	require.NoError(t, err)
+	require.True(t, parsed.HasNativeOptions)
+
+	// OAuth sends 2.6 through the Responses tool; the direct Codex Images path covers older models.
+	direct, target, err := buildOpenAIImagesOAuthPayload(parsed, "gpt-image-2")
+	require.NoError(t, err)
+	require.Contains(t, target, "/images/generations")
+	require.Equal(t, "gif", gjson.GetBytes(direct, "output_format").String())
+	require.EqualValues(t, 12, gjson.GetBytes(direct, "frame_count").Int())
+	require.EqualValues(t, 150, gjson.GetBytes(direct, "frame_duration_ms").Int())
+
+	responses, err := buildOpenAIImagesResponsesRequest(parsed, parsed.Model)
+	require.NoError(t, err)
+	require.Equal(t, "gif", gjson.GetBytes(responses, "tools.0.output_format").String())
+	require.EqualValues(t, 12, gjson.GetBytes(responses, "tools.0.frame_count").Int())
+	require.EqualValues(t, 150, gjson.GetBytes(responses, "tools.0.frame_duration_ms").Int())
+	require.Equal(t, "image/gif", openAIImageOutputMIMEType("gif"))
+	require.Equal(t, "image/svg+xml", openAIImageOutputMIMEType("svg"))
+}
+
+func TestSVGImageContentDetection(t *testing.T) {
+	svg := []byte(`<?xml version="1.0" encoding="UTF-8"?><svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"></svg>`)
+	require.Equal(t, "image/svg+xml", detectImageContentType(svg))
+	require.Equal(t, ".svg", extensionForContentType("image/svg+xml"))
+	contentType, extension := creatorImageContentType([]byte(`<svg viewBox="0 0 1 1"></svg>`), "text/plain")
+	require.Equal(t, "image/svg+xml", contentType)
+	require.Equal(t, "svg", extension)
+	require.Equal(t, "image/png", detectImageContentType([]byte("\x89PNG\r\n\x1a\n0000")))
+	require.False(t, isSVGContent([]byte(`<html><body>error</body></html>`)))
+}

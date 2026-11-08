@@ -82,6 +82,34 @@ func TestImageTaskServiceInvalidResultBecomesFailed(t *testing.T) {
 	require.Contains(t, string(got.Error), "non-JSON")
 }
 
+// A worker lost to a restart never finishes its task; polls must stop.
+func TestImageTaskServiceExpiresAbandonedProcessingTask(t *testing.T) {
+	owner := ImageTaskOwner{UserID: 1, APIKeyID: 2}
+	store := &imageTaskMemoryStore{}
+	svc := NewImageTaskServiceWithOptions(store, 24*time.Hour, 30*time.Minute)
+	created, err := svc.Create(context.Background(), owner)
+	require.NoError(t, err)
+
+	got, err := svc.Get(context.Background(), owner, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, ImageTaskStatusProcessing, got.Status)
+
+	store.task.CreatedAt = time.Now().Add(-12 * time.Hour).Unix()
+	got, err = svc.Get(context.Background(), owner, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, ImageTaskStatusFailed, got.Status)
+	require.Equal(t, http.StatusGatewayTimeout, got.HTTPStatus)
+	require.Contains(t, string(got.Error), "timeout_error")
+	require.NotNil(t, got.CompletedAt)
+
+	// A result that did land is still returned as is.
+	require.NoError(t, svc.Complete(context.Background(), created.ID, http.StatusOK, json.RawMessage(`{"data":[]}`)))
+	store.task.CreatedAt = time.Now().Add(-12 * time.Hour).Unix()
+	got, err = svc.Get(context.Background(), owner, created.ID)
+	require.NoError(t, err)
+	require.Equal(t, ImageTaskStatusCompleted, got.Status)
+}
+
 func TestImageTaskServiceMapsStoreFailures(t *testing.T) {
 	store := &imageTaskMemoryStore{saveErr: errors.New("redis down")}
 	svc := NewImageTaskService(store)

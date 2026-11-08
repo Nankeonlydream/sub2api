@@ -62,6 +62,7 @@ func ProvideAdminHandlers(
 	codexHarvest *service.CodexHarvestService,
 	openAIGatewayService *service.OpenAIGatewayService,
 	autoCredit service.AutoCreditRepository,
+	apiKeyService *service.APIKeyService,
 ) *AdminHandlers {
 	userHandler.SetAutoCredit(autoCredit)
 	accountHandler.SetUpstreamBillingProbeService(upstreamBillingProbe)
@@ -72,6 +73,7 @@ func ProvideAdminHandlers(
 	accountHandler.SetOpenCodeGoUsageService(opencodeGoUsage)
 	accountHandler.SetOpenAIOAuthReauthService(openaiOAuthReauthService)
 	return &AdminHandlers{
+		NativeVideoReview:      admin.NewNativeVideoReviewHandler(openAIGatewayService, apiKeyService),
 		RequestCapture:         requestCaptureHandler,
 		Dashboard:              dashboardHandler,
 		User:                   userHandler,

@@ -5,7 +5,7 @@ import {
   miniMaxH3Tier,
   type MiniMaxH3Tier,
 } from '@/utils/miniMaxH3'
-import { seedanceVideoTier, type SeedanceVideoTier } from '@/utils/seedanceVideo'
+import { isGrokRelayVideoModel, seedanceVideoTier, type SeedanceCatalogState, type SeedanceVideoTier } from '@/utils/seedanceVideo'
 
 export interface CreatorImagePricing {
   currency: 'USD'
@@ -34,6 +34,14 @@ export async function getCreatorVideoPricing(apiKey: string, model: string, sign
   })
 }
 
+// The Seedance models an administrator currently sells and how to describe them.
+export async function getCreatorSeedanceCatalog(apiKey: string, signal?: AbortSignal): Promise<SeedanceCatalogState> {
+  return fetchJSON<SeedanceCatalogState>(buildGatewayUrl('/v1/sub2api/seedance-catalog'), {
+    headers: authHeaders(apiKey),
+    signal,
+  })
+}
+
 export interface CreatorModel {
   id: string
   object?: string
@@ -57,8 +65,11 @@ export interface ImageGenerationInput {
   size?: string
   quality?: 'auto' | 'low' | 'medium' | 'high' | string
   background?: 'auto' | 'opaque' | 'transparent' | string
-  outputFormat?: 'png' | 'jpeg' | 'webp' | string
+  outputFormat?: 'png' | 'jpeg' | 'webp' | 'gif' | 'svg' | string
   outputCompression?: number
+  /** GIF only (GPT Image 2.6): number of frames and milliseconds per frame. */
+  frameCount?: number
+  frameDurationMs?: number
   responseFormat?: 'url' | 'b64_json' | string
   aspectRatio?: string
   imageSize?: '1K' | '2K' | '4K' | string
@@ -209,9 +220,27 @@ function imageMimeType(input: ImageGenerationInput): string {
       return 'image/jpeg'
     case 'webp':
       return 'image/webp'
+    case 'gif':
+      return 'image/gif'
+    case 'svg':
+      return 'image/svg+xml'
     default:
       return 'image/png'
   }
+}
+
+// Trust the bytes over the declared type: an upstream may ignore output_format, and a PNG
+// labelled image/svg+xml (or a GIF labelled PNG) would not render or would lose its frames.
+function sniffBase64ImageMime(b64: string): string {
+  let head = ''
+  try { head = atob(b64.slice(0, 64)) } catch { return '' }
+  if (head.startsWith('\x89PNG\r\n\x1a\n')) return 'image/png'
+  if (head.startsWith('\xff\xd8\xff')) return 'image/jpeg'
+  if (head.startsWith('GIF87a') || head.startsWith('GIF89a')) return 'image/gif'
+  if (head.startsWith('RIFF') && head.slice(8, 12) === 'WEBP') return 'image/webp'
+  const text = head.replace(/^\xef\xbb\xbf/, '').trimStart().toLowerCase()
+  if (text.startsWith('<svg') || text.startsWith('<?xml') || text.startsWith('<!doctype svg')) return 'image/svg+xml'
+  return ''
 }
 
 function normalizeOpenAIImages(body: any, fallbackMimeType: string): ImageGenerationResult {
@@ -219,10 +248,11 @@ function normalizeOpenAIImages(body: any, fallbackMimeType: string): ImageGenera
   const data = items.flatMap((item): CreatorGeneratedImage[] => {
     const b64 = typeof item?.b64_json === 'string' ? item.b64_json.trim() : ''
     const directURL = typeof item?.url === 'string' ? item.url.trim() : ''
-    const mimeType =
+    const declaredMimeType =
       typeof item?.mime_type === 'string' && item.mime_type.trim()
         ? item.mime_type.trim()
         : fallbackMimeType
+    const mimeType = (b64 && sniffBase64ImageMime(b64)) || declaredMimeType
     // Compatible relays can return both fields. Their URL may require upstream
     // authentication, use HTTP or expire; the included bytes are self-contained.
     const url = b64 ? `data:${mimeType};base64,${b64}` : directURL
@@ -260,16 +290,24 @@ function buildOpenAIJSONPayload(input: ImageGenerationInput): Record<string, unk
     }
   }
 
+  // GPT Image 2.6 GIF: frame_count / frame_duration_ms are only valid with GIF output,
+  // and GIF output rejects a custom output_compression.
+  const wantsGif = input.outputFormat?.toLowerCase() === 'gif'
+  // GPT Image 2.6 SVG: generations only, n must be 1, no custom output_compression.
+  const wantsSvg = input.outputFormat?.toLowerCase() === 'svg'
+
   return {
     ...input.extra,
     model: input.model,
     prompt: input.prompt,
-    ...(input.n !== undefined ? { n: input.n } : {}),
+    ...(wantsSvg ? { n: 1 } : input.n !== undefined ? { n: input.n } : {}),
     ...(input.size ? { size: input.size } : {}),
     ...(input.quality ? { quality: input.quality } : {}),
     ...(input.background ? { background: input.background } : {}),
     ...(input.outputFormat ? { output_format: input.outputFormat } : {}),
-    ...(input.outputCompression !== undefined
+    ...(wantsGif && input.frameCount !== undefined ? { frame_count: input.frameCount } : {}),
+    ...(wantsGif && input.frameDurationMs !== undefined ? { frame_duration_ms: input.frameDurationMs } : {}),
+    ...(input.outputCompression !== undefined && !wantsGif && !wantsSvg
       ? { output_compression: input.outputCompression }
       : {}),
     // GPT Image models always return b64_json and reject the legacy
@@ -284,11 +322,18 @@ function buildOpenAIJSONPayload(input: ImageGenerationInput): Record<string, unk
   }
 }
 
+function assertSvgWithoutReferences(input: ImageGenerationInput, references: unknown[]) {
+  if (references.length && input.outputFormat?.toLowerCase() === 'svg') {
+    throw new Error('SVG 输出只支持文生图，请移除参考图或改用其他格式')
+  }
+}
+
 async function generateOpenAIImage(
   apiKey: string,
   input: ImageGenerationInput,
 ): Promise<ImageGenerationResult> {
   const references = input.referenceImages || input.references || []
+  assertSvgWithoutReferences(input, references)
   let body: unknown
 
   if (references.length === 0) {
@@ -413,6 +458,7 @@ export interface CreatorImageTaskStatus {
 export async function submitCreatorImageTask(apiKey: string, input: ImageGenerationInput): Promise<string | null> {
   if (input.protocol === 'gemini') return null
   const references = input.referenceImages || input.references || []
+  assertSvgWithoutReferences(input, references)
   let init: RequestInit
   if (references.length === 0) {
     init = {
@@ -499,7 +545,7 @@ export async function createCreatorVideo(
   const h3Tier = miniMaxH3Tier(input.model)
   const seedanceTier = seedanceVideoTier(input.model)
   const relayTier = h3Tier || seedanceTier
-  const relayProvider = h3Tier ? 'MiniMax H3' : 'Seedance'
+  const relayProvider = h3Tier ? 'MiniMax H3' : isGrokRelayVideoModel(input.model) ? 'Grok' : 'Seedance'
   if (relayTier && input.imageDataUrl) {
     throw new Error(`${relayProvider} 不支持首帧图生视频，请改用参考图生视频`)
   }

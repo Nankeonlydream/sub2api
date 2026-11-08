@@ -5,7 +5,7 @@ export type CreatorWorkStatus = 'pending' | 'completed' | 'failed'
 export type CreatorVideoGenerationMethod = 'text' | 'image' | 'reference'
 
 export interface CreatorVideoShotQueue {
-  /** First shot not yet submitted; earlier shots are in requestId or failed. */
+  /** First shot neither finished nor failed; shots run in parallel and are resumed until all settle. */
   nextIndex: number
   failedIndexes: number[]
   failureReason?: string
@@ -53,13 +53,18 @@ export interface CreatorHistoryItem {
   aspectRatio?: string
   resolution?: string
   outputSize?: string
-  /** Actual pixel dimensions after client-side normalization, when available. */
+  /** Actual pixel dimensions of the saved output (first image for image works). */
   actualOutputSize?: string
-  /** Original provider dimensions, before download resizing. */
+  /** Saved file dimensions per image; older resized files can differ from the originals. */
+  imageOutputSizes?: string[]
+  /** Original provider dimensions, when known. */
   upstreamImageSizes?: string[]
   imageSizeMode?: 'auto' | 'ratio' | 'custom'
   quality?: string
   outputFormat?: string
+  /** GIF works only. */
+  frameCount?: number
+  frameDurationMs?: number
   background?: string
   completedAt?: number
   generationDurationMs?: number
@@ -132,6 +137,7 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
     outputs: [...item.outputs],
     imageBlobs: item.imageBlobs ? [...item.imageBlobs] : undefined,
     upstreamImageSizes: item.upstreamImageSizes ? [...item.upstreamImageSizes] : undefined,
+    imageOutputSizes: item.imageOutputSizes ? [...item.imageOutputSizes] : undefined,
     videoBlobs: item.videoBlobs ? [...item.videoBlobs] : undefined,
     shotPrompts: item.shotPrompts ? [...item.shotPrompts] : undefined,
     shotDurations: item.shotDurations ? [...item.shotDurations] : undefined,

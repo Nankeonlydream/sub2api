@@ -1,3 +1,5 @@
+import { shallowRef } from 'vue'
+
 export interface SeedanceVideoTier {
   resolution: '480p' | '720p' | '1080p'
   minSeconds: number
@@ -67,6 +69,82 @@ export const SEEDANCE_VIDEO_TIERS: Record<string, SeedanceVideoTier> = {
 // Fallback list when the key's model list cannot be read.
 export const SEEDANCE_FALLBACK_MODELS = ['00sd2.0']
 
+// The built-in catalog above applies until an administrator saves their own
+// (backend/internal/service/seedance_catalog.go). Maps keep entry order.
+const builtinTiers = new Map<string, SeedanceVideoTier>(Object.entries(SEEDANCE_VIDEO_TIERS))
+const activeTiers = shallowRef<Map<string, SeedanceVideoTier>>(builtinTiers)
+
+// One model of the saved catalog, as the backend stores and serves it.
+export interface SeedanceCatalogEntry {
+  model: string
+  name: string
+  note: string
+  resolution: SeedanceVideoTier['resolution']
+  min_seconds: number
+  max_seconds: number
+  allowed_seconds?: number[]
+  per_request: boolean
+  max_reference_images: number
+}
+
+export interface SeedanceCatalogState {
+  customized: boolean
+  entries: SeedanceCatalogEntry[]
+}
+
+export function seedanceEntryToTier(entry: SeedanceCatalogEntry): SeedanceVideoTier {
+  const refs = Math.max(0, Number(entry.max_reference_images) || 0)
+  return {
+    resolution: entry.resolution,
+    minSeconds: entry.min_seconds,
+    maxSeconds: entry.max_seconds,
+    ...(entry.allowed_seconds?.length ? { allowedSeconds: [...entry.allowed_seconds] } : {}),
+    perRequest: entry.per_request,
+    aspectRatios: ZHONGHENG_RATIOS,
+    supportsUploadedReferences: refs > 0,
+    maxReferenceImages: refs,
+    label: '纵横',
+    name: entry.name || entry.model,
+    note: entry.note,
+  }
+}
+
+export function seedanceTierToEntry(model: string, tier: SeedanceVideoTier): SeedanceCatalogEntry {
+  return {
+    model,
+    name: tier.name,
+    note: tier.note,
+    resolution: tier.resolution,
+    min_seconds: tier.minSeconds,
+    max_seconds: tier.maxSeconds,
+    ...(tier.allowedSeconds?.length ? { allowed_seconds: [...tier.allowedSeconds] } : {}),
+    per_request: tier.perRequest,
+    max_reference_images: tier.supportsUploadedReferences ? tier.maxReferenceImages : 0,
+  }
+}
+
+// The built-in catalog in saved form: the starting point for editing.
+export function builtinSeedanceCatalogEntries(): SeedanceCatalogEntry[] {
+  return [...builtinTiers].map(([model, tier]) => seedanceTierToEntry(model, tier))
+}
+
+// Switch the whole app to the saved catalog, or back to the built-in one.
+export function applySeedanceCatalog(state: SeedanceCatalogState | null | undefined) {
+  activeTiers.value = state?.customized && state.entries?.length
+    ? new Map(state.entries.map(entry => [entry.model.toLowerCase(), seedanceEntryToTier(entry)]))
+    : builtinTiers
+}
+
+// Model IDs and tiers in catalog order. Reactive, so views follow a new catalog.
+export function seedanceCatalogModels(): Array<[string, SeedanceVideoTier]> {
+  return [...activeTiers.value]
+}
+
+export function seedanceFallbackModels(): string[] {
+  const first = activeTiers.value.keys().next().value
+  return first ? [first] : [...SEEDANCE_FALLBACK_MODELS]
+}
+
 // One line under the model picker: what the line is, how it bills, its length.
 export function seedanceTierHint(tier: SeedanceVideoTier): string {
   const seconds = tier.allowedSeconds?.length
@@ -83,11 +161,17 @@ export function seedanceTierHint(tier: SeedanceVideoTier): string {
 export const SEEDANCE_VIDEO_PRICE_FAMILY = 'seedance'
 
 export function seedanceVideoTier(model: string): SeedanceVideoTier | null {
-  return SEEDANCE_VIDEO_TIERS[model.trim().replace(/^models\//i, '').toLowerCase()] || null
+  return activeTiers.value.get(model.trim().replace(/^models\//i, '').toLowerCase()) || null
 }
 
 export function isSeedanceVideoModel(model: string): boolean {
   return seedanceVideoTier(model) !== null
+}
+
+// Relay catalog models that Grok groups sell (e.g. heavy-grok-720p) belong to
+// Creator Studio's Grok tab; the rest of the catalog is Seedance.
+export function isGrokRelayVideoModel(model: string): boolean {
+  return isSeedanceVideoModel(model) && /grok/i.test(model)
 }
 
 // Snap a duration to the tier: clamp to its range, then to the nearest sold

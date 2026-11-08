@@ -236,3 +236,4 @@ issues/
 tools/local-worker/
 
 !docs/key-risk-patrol.md
+!docs/seedance-development.md

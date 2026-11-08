@@ -109,6 +109,68 @@ describe('creator gateway API', () => {
     expect(JSON.parse(String(init?.body))).not.toHaveProperty('response_format')
   })
 
+  it('sends GIF output with official frame fields and without output_compression', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'R0lGODlhAQABAAAAACw=' }] }))
+    const { generateCreatorImage } = await import('@/api/creator')
+
+    const result = await generateCreatorImage('sk-image', {
+      model: 'gpt-image-2.6-sunburst',
+      prompt: 'monkey lifts a lantern',
+      n: 1,
+      size: 'auto',
+      outputFormat: 'gif',
+      outputCompression: 80,
+      frameCount: 9,
+      frameDurationMs: 200,
+    })
+
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({
+      prompt: 'monkey lifts a lantern',
+      size: 'auto',
+      output_format: 'gif',
+      frame_count: 9,
+      frame_duration_ms: 200,
+    })
+    expect(body).not.toHaveProperty('output_compression')
+    expect(result.data[0].mime_type).toBe('image/gif')
+  })
+
+  it('does not send frame fields for non-GIF output', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'aW1hZ2U=' }] }))
+    const { generateCreatorImage } = await import('@/api/creator')
+    await generateCreatorImage('sk-image', { model: 'gpt-image-2', prompt: 'cat', outputFormat: 'png', frameCount: 9, frameDurationMs: 200 })
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).not.toHaveProperty('frame_count')
+    expect(body).not.toHaveProperty('frame_duration_ms')
+  })
+
+  it('sends SVG output to generations with n=1 and without output_compression', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'PHN2Zz48L3N2Zz4=' }] }))
+    const { generateCreatorImage } = await import('@/api/creator')
+    const result = await generateCreatorImage('sk-image', { model: 'gpt-image-2', prompt: 'logo', outputFormat: 'svg', n: 3, outputCompression: 80 })
+    expect(String(vi.mocked(fetch).mock.calls[0][0])).toContain('/v1/images/generations')
+    const body = JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))
+    expect(body).toMatchObject({ output_format: 'svg', n: 1 })
+    expect(body).not.toHaveProperty('output_compression')
+    expect(result.data[0]).toMatchObject({ mime_type: 'image/svg+xml', url: 'data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=' })
+  })
+
+  it('labels a PNG returned for an SVG request as PNG', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ data: [{ b64_json: 'iVBORw0KGgoAAAANSUhEUg==' }] }))
+    const { generateCreatorImage } = await import('@/api/creator')
+    const result = await generateCreatorImage('sk-image', { model: 'gpt-image-2', prompt: 'logo', outputFormat: 'svg' })
+    expect(result.data[0].mime_type).toBe('image/png')
+  })
+
+  it('rejects SVG output with reference images before calling edits', async () => {
+    const { generateCreatorImage } = await import('@/api/creator')
+    const reference = new File(['x'], 'ref.png', { type: 'image/png' })
+    await expect(generateCreatorImage('sk-image', { model: 'gpt-image-2', prompt: 'logo', outputFormat: 'svg', referenceImages: [reference] }))
+      .rejects.toThrow('SVG 输出只支持文生图')
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects a late image error envelope after an HTTP 200 heartbeat', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(
       jsonResponse({

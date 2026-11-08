@@ -611,11 +611,20 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 		}
 	case relay.Content:
 		// Only reached with ContentFromStatus: responseBody is the task status.
-		videoURL, ok := relayStatusVideoURL(responseBody, base)
-		if !ok || !miniMaxH3StatusCompleted(responseBody) {
+		if !miniMaxH3StatusCompleted(responseBody) {
 			return nil, fmt.Errorf("%s video is not ready", relay.Name)
 		}
-		return s.downloadRelayVideo(ctx, c, relay, account, videoURL, result)
+		if videoURL, ok := relayStatusVideoURL(responseBody, base); ok {
+			return s.downloadRelayVideo(ctx, c, relay, account, videoURL, "", result)
+		}
+		// A gateway relay (e.g. another sub2api) reports its supplier's video
+		// host. Never fetch that host; ask the relay's own /content route,
+		// which is on the account host and so may carry the key.
+		contentURL, err := relay.buildURL(base, relay.Content, strings.TrimPrefix(taskID, relay.TaskPrefix))
+		if err != nil {
+			return nil, err
+		}
+		return s.downloadRelayVideo(ctx, c, relay, account, contentURL, token, result)
 	}
 	c.Header("Cache-Control", "private, no-store")
 	writeGrokMediaResponse(c, resp, maskRelayUpstreamQuotaError(responseBody), s.responseHeaderFilter)
@@ -629,13 +638,17 @@ func relayAccountProxy(account *Account) string {
 	return ""
 }
 
-// downloadRelayVideo streams a finished relay video. The URL is public, so the
-// account key and header overrides are never sent, and redirects are passed
-// to the client instead of followed.
-func (s *OpenAIGatewayService) downloadRelayVideo(ctx context.Context, c *gin.Context, relay openAIVideosRelay, account *Account, videoURL string, result *OpenAIForwardResult) (*OpenAIForwardResult, error) {
+// downloadRelayVideo streams a finished relay video, passing redirects to the
+// client instead of following them. token is set only for the relay's own
+// /content route; public output URLs never receive the key or header overrides.
+func (s *OpenAIGatewayService) downloadRelayVideo(ctx context.Context, c *gin.Context, relay openAIVideosRelay, account *Account, videoURL, token string, result *OpenAIForwardResult) (*OpenAIForwardResult, error) {
 	req, err := http.NewRequestWithContext(WithHTTPUpstreamRedirectsDisabled(ctx), http.MethodGet, videoURL, nil)
 	if err != nil {
 		return nil, err
+	}
+	if token != "" {
+		account.ApplyHeaderOverrides(req.Header)
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	if rangeHeader := strings.TrimSpace(c.GetHeader("Range")); rangeHeader != "" {
 		req.Header.Set("Range", rangeHeader)
@@ -647,6 +660,9 @@ func (s *OpenAIGatewayService) downloadRelayVideo(ctx context.Context, c *gin.Co
 	defer func() { _ = resp.Body.Close() }()
 	c.Header("Cache-Control", "private, no-store")
 	switch {
+	case (resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent) && isJSONContentType(resp.Header.Get("Content-Type")):
+		// A JSON body is an error or status document, never the video.
+		return nil, fmt.Errorf("%s video download returned JSON", relay.Name)
 	case resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent:
 		if err := writeGrokMediaContentResponse(c, resp); err != nil {
 			return nil, err

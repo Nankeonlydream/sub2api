@@ -383,6 +383,9 @@ func detectImageContentType(data []byte) string {
 }
 
 func detectedImageContentType(data []byte) string {
+	if isSVGContent(data) {
+		return "image/svg+xml"
+	}
 	ct := strings.TrimSpace(strings.Split(http.DetectContentType(data), ";")[0])
 	if strings.HasPrefix(ct, "image/") {
 		return ct
@@ -400,7 +403,23 @@ func extensionForContentType(ct string) string {
 		return ".webp"
 	case strings.Contains(ct, "gif"):
 		return ".gif"
+	case strings.Contains(ct, "svg"):
+		return ".svg"
 	default:
 		return ".png"
 	}
+}
+
+// isSVGContent reports whether data is an SVG document (GPT Image 2.6 output_format=svg
+// returns UTF-8 XML). net/http sniffs SVG as text/xml or text/plain, never image/*.
+func isSVGContent(data []byte) bool {
+	head := data
+	if len(head) > 1024 {
+		head = head[:1024]
+	}
+	text := strings.ToLower(strings.TrimSpace(strings.TrimPrefix(string(head), "\ufeff")))
+	if strings.HasPrefix(text, "<svg") {
+		return true
+	}
+	return (strings.HasPrefix(text, "<?xml") || strings.HasPrefix(text, "<!doctype svg") || strings.HasPrefix(text, "<!--")) && strings.Contains(text, "<svg")
 }

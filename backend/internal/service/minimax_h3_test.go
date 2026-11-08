@@ -155,10 +155,9 @@ func TestMiniMaxH3ContentDownloadsStatusVideoWithoutKey(t *testing.T) {
 	require.True(t, result.VideoContentDelivered)
 }
 
-func TestMiniMaxH3ContentRejectsUnreadyOrForeignVideo(t *testing.T) {
+func TestMiniMaxH3ContentRejectsUnreadyVideo(t *testing.T) {
 	for _, status := range []string{
 		`{"task_id":"vid_1","status":"processing","next_poll_seconds":10}`,
-		`{"task_id":"vid_1","status":"succeeded","video_url":"https://evil.example/vid_1.mp4"}`,
 		`{"task_id":"vid_1","status":"succeeded","video_url":"http://relay.example/api/video-content/vid_1"}`,
 	} {
 		upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(status)}
@@ -166,7 +165,45 @@ func TestMiniMaxH3ContentRejectsUnreadyOrForeignVideo(t *testing.T) {
 		c, _ := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
 		_, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
 		require.Error(t, err, status)
-		require.Len(t, upstream.requests, 1, "must not download from %s", status)
+		require.Len(t, upstream.requests, 1, status)
+	}
+}
+
+// A gateway relay reports its supplier's host. The gateway never fetches that
+// host; it asks the relay's own /content route with the account key.
+func TestMiniMaxH3ContentForeignVideoUsesRelayContentRoute(t *testing.T) {
+	for _, status := range []string{
+		`{"task_id":"vid_1","status":"succeeded","video_url":"https://evil.example/vid_1.mp4"}`,
+		`{"task_id":"vid_1","status":"succeeded","video_url":"/v1/videos/vid_1/content"}`,
+	} {
+		video := grokMediaContentStatusResponse("mp4-bytes")
+		video.Header.Set("Content-Type", "video/mp4")
+		video.ContentLength = int64(len("mp4-bytes"))
+		upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{grokMediaContentStatusResponse(status), video}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream}
+		c, w := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
+		result, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+		require.NoError(t, err, status)
+		require.Len(t, upstream.requests, 2)
+		require.Equal(t, "https://relay.example/v1/videos/vid_1/content", upstream.requests[1].URL.String(), "must not download from %s", status)
+		require.Equal(t, "Bearer test-upstream-key", upstream.requests[1].Header.Get("Authorization"))
+		require.True(t, HTTPUpstreamRedirectsDisabled(upstream.requests[1].Context()))
+		require.Equal(t, "mp4-bytes", w.Body.String())
+		require.True(t, result.VideoContentDelivered)
+	}
+
+	// A relay without /content must surface as a gateway error, not a 404 that
+	// clients read as a vanished task.
+	for _, fallback := range []*http.Response{
+		{StatusCode: http.StatusNotFound, Header: http.Header{"Content-Type": []string{"application/json"}}, Body: io.NopCloser(strings.NewReader(`{"error":"not found"}`))},
+		grokMediaContentStatusResponse(`{"error":{"message":"no content"}}`),
+	} {
+		upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{grokMediaContentStatusResponse(`{"task_id":"vid_1","status":"succeeded","video_url":"https://evil.example/vid_1.mp4"}`), fallback}}
+		svc := &OpenAIGatewayService{httpUpstream: upstream}
+		c, _ := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
+		_, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+		require.Error(t, err)
+		require.False(t, c.Writer.Written(), "the handler writes the gateway error")
 	}
 }
 

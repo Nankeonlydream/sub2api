@@ -53,7 +53,8 @@ let version = 0
 
 function resolveDisplaySource() {
   placeholderSrc.value = props.preview && props.cacheKey ? peekCreatorDisplayImage(props.cacheKey) : ''
-  if (!props.downscale || !props.cacheKey || !props.src.startsWith('data:')) {
+  // The downscaled copy is a single decoded frame, so animated GIFs keep their original.
+  if (!props.downscale || !props.cacheKey || !props.src.startsWith('data:') || /^data:image\/gif[;,]/i.test(props.src.slice(0, 24))) {
     // A short blob URL for a known original avoids parsing a multi-megabyte
     // src attribute on the main thread (full-size preview). It is shared, so
     // reopening a preview can reuse the browser's decoded image.

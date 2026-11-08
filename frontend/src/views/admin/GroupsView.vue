@@ -1128,9 +1128,10 @@
           :multiplier="createForm.rate_multiplier"
         />
         <SeedanceVideoPricing
-          v-if="createForm.platform === 'deepseek'"
+          v-if="createForm.platform === 'deepseek' || createForm.platform === 'grok'"
           v-model="createForm.video_model_prices"
           :multiplier="createForm.rate_multiplier"
+          :grok-only="createForm.platform === 'grok'"
         />
         <!-- 视频生成计费配置（仅 Grok 平台） -->
         <div
@@ -2831,9 +2832,10 @@
           :multiplier="editForm.rate_multiplier"
         />
         <SeedanceVideoPricing
-          v-if="editForm.platform === 'deepseek'"
+          v-if="editForm.platform === 'deepseek' || editForm.platform === 'grok'"
           v-model="editForm.video_model_prices"
           :multiplier="editForm.rate_multiplier"
+          :grok-only="editForm.platform === 'grok'"
         />
         <!-- 视频生成计费配置（仅 Grok 平台） -->
         <div

@@ -66,6 +66,10 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 	}
 	if endpoint.IsSeedanceVideo() {
 		platform = service.PlatformDeepseek
+		// Grok groups sell relay catalog models from Grok accounts.
+		if apiKey, ok := middleware2.GetAPIKeyFromContext(c); ok && apiKey.Group != nil && apiKey.Group.Platform == service.PlatformGrok {
+			platform = service.PlatformGrok
+		}
 		noAccountCode, noAccountMessage = "seedance_video_no_eligible_account", "No eligible Seedance video accounts"
 	}
 	streamStarted := false
@@ -386,7 +390,7 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		)
 
 		account := selection.Account
-		if endpoint.IsGenerationRequest() && platform == service.PlatformGrok {
+		if endpoint.IsGenerationRequest() && platform == service.PlatformGrok && !endpoint.IsSeedanceVideo() {
 			eligible, eligibilityReason, eligibilityErr := h.ensureGrokMediaAccountEligibility(requestCtx, account)
 			if !eligible {
 				releaseAccount()
@@ -472,6 +476,29 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				return h.gatewayService.AcceptRelayVideoSettlement(saveCtx, snapshot, accepted.ResponseID)
 			}})
 		}
+		nativeKind := service.NativeVideoKindForEndpoint(endpoint)
+		var nativeIntent *service.NativeVideoSettlement
+		if nativeKind != "" && apiKey.GroupID != nil && h.gatewayService.HasNativeVideoSettlementStore() {
+			// Commit the intent before the POST: an accepted task without a
+			// durable row could never be billed by the settlement worker.
+			nativeIntent = &service.NativeVideoSettlement{
+				SubmissionID: service.NewNativeVideoSubmissionID(uuid.NewString()), Kind: nativeKind,
+				UserID: subject.UserID, APIKeyID: apiKey.ID, GroupID: *apiKey.GroupID, AccountID: account.ID,
+				Pending: service.GrokVideoPendingBilling{
+					Model: requestModel, OriginalModel: clientRequestedModel(c, requestModel), CreatedAt: videoCreateStartedAt,
+				},
+				QuotaPlatform:   service.QuotaPlatform(c.Request.Context(), apiKey),
+				InboundEndpoint: GetInboundEndpoint(c), UpstreamEndpoint: GetUpstreamEndpoint(c, account.Platform),
+				UserAgent: truncateNativeVideoMeta(c.GetHeader("User-Agent")), IPAddress: truncateNativeVideoMeta(ip.GetClientIP(c)),
+				SessionID: truncateNativeVideoMeta(service.ExtractClientSessionID(c)),
+			}
+			if err := h.gatewayService.PrepareNativeVideoSettlement(requestCtx, nativeIntent); err != nil {
+				releaseAccount()
+				reqLog.Error("native_video.admission_failed", zap.Int64("account_id", account.ID), zap.Error(err))
+				h.errorResponse(c, http.StatusServiceUnavailable, "api_error", "Video billing is temporarily unavailable; please retry")
+				return
+			}
+		}
 		result, err := func() (*service.OpenAIForwardResult, error) {
 			defer releaseAccount()
 			if endpoint.IsSeedance() {
@@ -494,6 +521,15 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 		}
 		service.SetOpsLatencyMs(c, service.OpsResponseLatencyMsKey, responseLatencyMs)
 
+		if err != nil && nativeIntent != nil {
+			// No task ID reached the client, so no task can be polled or billed;
+			// a failover retry writes its own intent.
+			discardCtx, cancelDiscard := context.WithTimeout(context.WithoutCancel(requestCtx), 5*time.Second)
+			if discardErr := h.gatewayService.DiscardNativeVideoSubmission(discardCtx, nativeIntent); discardErr != nil {
+				reqLog.Warn("native_video.discard_intent_failed", zap.String("submission_id", nativeIntent.SubmissionID), zap.Error(discardErr))
+			}
+			cancelDiscard()
+		}
 		if err != nil {
 			var failoverErr *service.UpstreamFailoverError
 			if errors.As(err, &failoverErr) {
@@ -600,6 +636,15 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				// Wall-clock start for usage duration_ms: create accepted → first done discovery.
 				CreatedAt: videoCreateStartedAt,
 			}
+			if nativeIntent != nil {
+				bindCtx, cancelBind := context.WithTimeout(context.WithoutCancel(requestCtx), 10*time.Second)
+				if bindErr := h.gatewayService.AcceptNativeVideoSettlement(bindCtx, nativeIntent, result.ResponseID, pending); bindErr != nil {
+					// The intent row stays and goes to review; the Redis snapshot
+					// below keeps the legacy poll billing as a fallback.
+					reqLog.Error("native_video.acceptance_persist_failed", zap.String("task_id", result.ResponseID), zap.Int64("account_id", account.ID), zap.Error(bindErr))
+				}
+				cancelBind()
+			}
 			if err := h.gatewayService.StoreGrokVideoPendingBilling(requestCtx, result.ResponseID, subject.UserID, apiKey.ID, pending); err != nil {
 				reqLog.Warn("grok_media.store_video_pending_billing_failed_retrying",
 					zap.Int64("account_id", account.ID),
@@ -639,11 +684,20 @@ func (h *OpenAIGatewayHandler) handleGrokMedia(c *gin.Context, endpoint service.
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, requestID)
 			}
 		} else if endpoint == service.SeedanceEndpointStatus {
+			// Durable native tasks are billed only by the settlement worker.
+			if result != nil && result.Usage.OutputTokens > 0 && h.gatewayService.IsNativeVideoSettled(requestCtx, requestID, apiKey.ID) {
+				return
+			}
 			if billResult := prepareSeedanceCompletionBilling(requestCtx, h, apiKey, subject, requestID, result); billResult != nil {
 				recordGrokMediaUsage(c, h, reqLog, apiKey, subject, subscription, account, billResult, billResult.Model, body, requestID)
 			}
 		} else if endpoint == service.GrokMediaEndpointVideoStatus || endpoint == service.GrokMediaEndpointVideoContent {
-			// Creator status polling must not charge before its full content fetch.
+			// Durable native tasks bill on upstream success in the background,
+			// including Creator ones; polls and downloads never charge them.
+			if result != nil && result.VideoCount > 0 && h.gatewayService.IsNativeVideoSettled(requestCtx, strings.TrimSpace(requestID), apiKey.ID) {
+				return
+			}
+			// Legacy Creator status polling must not charge before its full content fetch.
 			// The persisted flag also protects lookups that omit the header.
 			if isCreatorVideoRequest(c, apiKey) && !result.VideoContentDelivered {
 				return
@@ -969,4 +1023,12 @@ func recordGrokMediaUsage(
 			reqLog.Debug("grok_media.record_usage_failed", zap.Error(err))
 		}
 	})
+}
+
+// Request metadata in the durable settlement row is bounded like usage_logs.
+func truncateNativeVideoMeta(v string) string {
+	if len(v) > 512 {
+		return v[:512]
+	}
+	return v
 }

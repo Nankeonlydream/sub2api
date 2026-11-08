@@ -184,7 +184,30 @@ func (s *ImageTaskService) Get(ctx context.Context, owner ImageTaskOwner, id str
 		// Do not reveal whether a random task ID exists for another caller.
 		return nil, ErrImageTaskNotFound
 	}
+	s.expireAbandoned(task, time.Now().UTC())
 	return imageTaskToPublic(task), nil
+}
+
+// imageTaskFinishGrace covers the result offload that runs after the upstream
+// call has used up its execution timeout.
+const imageTaskFinishGrace = 5 * time.Minute
+
+// expireAbandoned reports a task as failed once it has outlived its execution
+// limit. The worker runs in-process, so a restart or a failed final write
+// leaves the record "processing" until the Redis TTL, and pages poll it forever.
+func (s *ImageTaskService) expireAbandoned(task *ImageTaskRecord, now time.Time) {
+	if task.Status != ImageTaskStatusProcessing || task.CreatedAt <= 0 {
+		return
+	}
+	deadline := time.Unix(task.CreatedAt, 0).Add(s.ExecutionTimeout() + imageTaskFinishGrace)
+	if now.Before(deadline) {
+		return
+	}
+	completedAt := deadline.Unix()
+	task.Status = ImageTaskStatusFailed
+	task.HTTPStatus = http.StatusGatewayTimeout
+	task.Error = imageTaskErrorJSON("timeout_error", "image generation task was interrupted or timed out; no image was returned")
+	task.CompletedAt = &completedAt
 }
 
 func (s *ImageTaskService) Complete(ctx context.Context, id string, statusCode int, result json.RawMessage) error {

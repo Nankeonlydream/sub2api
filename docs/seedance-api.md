@@ -1,5 +1,7 @@
 # Seedance 原生 API
 
+> 本文只描述火山方舟 Ark 原生 `content[]` 任务协议。Creator Studio 中 `00sd2.0`、`xseadanco2.0` 等 Seedance 视频中继走 `/v1/videos`，请求形状、模型目录和计费方式不同，见 [Seedance 开发与接入](seedance-development.md)。
+
 支持火山方舟 Ark 的异步视频任务协议，无需把 `content[]` 转换成 OpenAI `messages` 或 Grok `prompt`。
 
 ## 配置

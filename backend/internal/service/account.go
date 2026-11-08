@@ -2074,8 +2074,12 @@ func (a *Account) SupportsOpenAIEndpointCapability(capability OpenAIEndpointCapa
 			strings.TrimSpace(a.GetCredential("base_url")) != ""
 	}
 	if capability == OpenAIEndpointCapabilitySeedanceVideo {
-		return a.Platform == PlatformDeepseek &&
-			a.Type == AccountTypeAPIKey && strings.TrimSpace(a.GetCredential("base_url")) != ""
+		if a.Type != AccountTypeAPIKey || strings.TrimSpace(a.GetCredential("base_url")) == "" {
+			return false
+		}
+		// Grok groups may sell relay catalog models too (e.g. heavy-grok-720p);
+		// only Grok accounts mapped to such a model speak the relay API.
+		return a.Platform == PlatformDeepseek || a.Platform == PlatformGrok && isZhonghengAccount(a)
 	}
 	if capability == OpenAIEndpointCapabilitySeedance {
 		configured, _ := a.openAIEndpointCapabilitySet()

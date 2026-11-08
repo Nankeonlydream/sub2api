@@ -8,6 +8,7 @@ import AdminComplianceDialog from '@/components/admin/AdminComplianceDialog.vue'
 import { resolveRouteDocumentTitle } from '@/router/title'
 import AnnouncementPopup from '@/components/common/AnnouncementPopup.vue'
 import { useAppStore, useAuthStore, useSubscriptionStore, useAnnouncementStore, useAdminComplianceStore, useAdminSettingsStore, useSupportTicketStore } from '@/stores'
+import { useVideoSettlementReviewStore } from '@/stores/videoSettlementReviews'
 import { getSetupStatus } from '@/api/setup'
 import { updateFavicon } from '@/utils/branding'
 import { FeatureFlags, isFeatureFlagEnabled } from '@/utils/featureFlags'
@@ -23,6 +24,7 @@ const subscriptionStore = useSubscriptionStore()
 const announcementStore = useAnnouncementStore()
 const adminComplianceStore = useAdminComplianceStore()
 const supportTicketStore = useSupportTicketStore()
+const videoReviewStore = useVideoSettlementReviewStore()
 const adminSettingsStore = useAdminSettingsStore()
 let claimingLotteryInvitation = false
 async function claimLotteryInvitation() {
@@ -81,6 +83,7 @@ function onVisibilityChange() {
     void claimLotteryInvitation()
     announcementStore.fetchAnnouncements()
     supportTicketStore.refresh()
+    videoReviewStore.refresh()
   }
 }
 
@@ -144,6 +147,7 @@ watch(
 
       // Support ticket badge (skips itself while the feature is off)
       supportTicketStore.refresh(true)
+      videoReviewStore.refresh(true)
 
       // Register visibility change listener
       document.addEventListener('visibilitychange', onVisibilityChange)
@@ -153,6 +157,7 @@ watch(
       announcementStore.reset()
       adminComplianceStore.reset()
       supportTicketStore.reset()
+      videoReviewStore.reset()
       document.removeEventListener('visibilitychange', onVisibilityChange)
     }
   },
@@ -164,6 +169,7 @@ router.afterEach(() => {
   if (authStore.isAuthenticated) {
     announcementStore.fetchAnnouncements()
     supportTicketStore.refresh()
+    videoReviewStore.refresh()
   }
 })
 

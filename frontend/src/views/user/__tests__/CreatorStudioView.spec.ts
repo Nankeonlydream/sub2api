@@ -180,6 +180,16 @@ const AppLayoutStub = {
 
 type StudioWrapper = ReturnType<typeof mount>
 
+function pngWithDimensions(width: number, height: number) {
+  const header = new Uint8Array(24)
+  header.set([137, 80, 78, 71, 13, 10, 26, 10])
+  header.set([73, 72, 68, 82], 12)
+  const view = new DataView(header.buffer)
+  view.setUint32(16, width)
+  view.setUint32(20, height)
+  return `data:image/png;base64,${btoa(String.fromCharCode(...header))}`
+}
+
 function videoParamsDialog(wrapper: StudioWrapper) {
   return wrapper.findAllComponents(BaseDialog).find(dialog => dialog.props('title') === '设置视频参数')!
 }
@@ -228,6 +238,7 @@ function mockViewportWidth(width: number) {
 describe('CreatorStudioView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
     vi.spyOn(HTMLMediaElement.prototype, 'load').mockImplementation(() => {})
     getVideoPricing.mockReset().mockResolvedValue({ currency: 'USD', prices: { '480p': Array.from({ length: 15 }, (_, i) => (i + 1) * 0.05), '720p': Array.from({ length: 15 }, (_, i) => (i + 1) * 0.1) } })
     getImagePricing.mockReset().mockResolvedValue({ currency: "USD", billing_mode: "image", prices: { "1K": 0.04, "2K": 0.08, "4K": 0.16 } })
@@ -273,9 +284,10 @@ describe('CreatorStudioView', () => {
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     await flushPromises()
-    expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.04')
+    expect(wrapper.get('.image-cost-total strong').text()).toBe('$0.04–$0.16')
     await wrapper.get('#creator-output-size').trigger('click')
     const dialog = wrapper.findComponent(BaseDialog)
+    await dialog.findAll('.image-size-mode-tabs button').find(button => button.text() === '按比例')!.trigger('click')
     expect(dialog.findAll('.image-resolution-grid button')[2].text()).toContain('$0.16/张')
     await dialog.findAll('.image-resolution-grid button')[1].trigger('click')
     await dialog.get('.image-size-confirm').trigger('click')
@@ -306,6 +318,7 @@ describe('CreatorStudioView', () => {
     for (const [index, size] of sizes.entries()) {
       await wrapper.get('#creator-output-size').trigger('click')
       const dialog = wrapper.getComponent(BaseDialog)
+      await dialog.findAll('button[role="tab"]').find(button => button.text() === '按比例')!.trigger('click')
       await dialog.findAll('.image-resolution-grid button')[0].trigger('click')
       await dialog.findAll('.image-ratio-grid button').filter(button => button.attributes('disabled') === undefined)[index].trigger('click')
       await dialog.get('.image-size-confirm').trigger('click')
@@ -480,53 +493,91 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
-  it.each(['grok', 'banner'])('normalizes a larger %s download while preserving the original provider size', async capability => {
-    const isGrok = capability === 'grok'
-    const key = isGrok ? createdKey : bananaKey
-    listGroups.mockResolvedValue([isGrok ? group : bananaGroup])
+  it.each(['image2', 'grok', 'banner'])('saves and downloads %s provider pixels unchanged', async capability => {
+    const capabilityIndex = ['image2', 'grok', 'banner'].indexOf(capability)
+    const key = [image2Key, createdKey, bananaKey][capabilityIndex]
+    listGroups.mockResolvedValue([key.group])
     listKeys.mockResolvedValue({ items: [key], total: 1, page: 1, page_size: 100, pages: 1 })
-    listModels.mockResolvedValue([{ id: isGrok ? 'grok-imagine-image-2.0' : 'gemini-3.1-flash-image' }])
-    const png = (width: number, height: number) => {
-      const header = new Uint8Array(24)
-      header.set([137, 80, 78, 71, 13, 10, 26, 10])
-      header.set([73, 72, 68, 82], 12)
-      const view = new DataView(header.buffer)
-      view.setUint32(16, width)
-      view.setUint32(20, height)
-      return `data:image/png;base64,${btoa(String.fromCharCode(...header))}`
-    }
-    const source = png(1248, 832)
-    const resized = png(1024, 688)
+    listModels.mockResolvedValue([{ id: ['gpt-image-2.5-sunburst', 'grok-imagine-image-2.0', 'gemini-3.1-flash-image'][capabilityIndex] }])
+    const source = pngWithDimensions(1248, 832)
     generateImage.mockResolvedValue({ data: [{ url: source }] })
-    vi.stubGlobal('Image', class {
-      naturalWidth = 1248
-      naturalHeight = 832
-      onload?: () => void
-      set src(_source: string) { queueMicrotask(() => this.onload?.()) }
+    const downloaded: string[] = []
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded.push(this.href)
     })
-    const drawImage = vi.fn()
-    const context = vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue({ drawImage } as unknown as CanvasRenderingContext2D)
-    const dataURL = vi.spyOn(HTMLCanvasElement.prototype, 'toDataURL').mockReturnValue(resized)
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
     try {
       await flushPromises()
-      await wrapper.findAll('.capability-switch button')[isGrok ? 1 : 2].trigger('click')
+      await wrapper.findAll('.capability-switch button')[capabilityIndex].trigger('click')
       await flushPromises()
-      await wrapper.get('#creator-prompt').setValue('1K 尺寸检查')
+      await wrapper.get('#creator-prompt').setValue('保留上游原图')
       await wrapper.get('#creator-output-size').trigger('click')
+      if (capability === 'image2') {
+        await wrapper.findAll('.image-size-mode-tabs button').find(button => button.text() === '按比例')!.trigger('click')
+      }
       await wrapper.findAll('.image-ratio-grid button')[1].trigger('click')
       await wrapper.get('.image-size-confirm').trigger('click')
       await wrapper.get('.generate-button').trigger('click')
       await flushPromises()
-      expect(drawImage).toHaveBeenCalledWith(expect.anything(), expect.any(Number), expect.any(Number), expect.any(Number), expect.any(Number), 0, 0, 1024, 688)
       expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
-        status: 'completed', resolution: '1K', outputSize: '1024x688', actualOutputSize: '1024x688', upstreamImageSizes: ['1248x832'], outputs: [resized],
+        status: 'completed', resolution: '1K', outputSize: '1024x688', actualOutputSize: '1248x832',
+        upstreamImageSizes: ['1248x832'], imageOutputSizes: ['1248x832'], outputs: [source],
       }))
+      expect(wrapper.get('.result-tags').text()).toContain('1248×832')
+      await wrapper.findAll('.result-media-actions button')[1].trigger('click')
+      expect(downloaded).toEqual([source])
     } finally {
       wrapper.unmount()
-      context.mockRestore()
-      dataURL.mockRestore()
-      vi.unstubAllGlobals()
+      anchorClick.mockRestore()
+    }
+  })
+
+  it('keeps different upstream sizes for two 4K 21:9 results through preview and download', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2.5-sunburst' }])
+    const sources = [pngWithDimensions(1918, 820), pngWithDimensions(3840, 1645)]
+    generateImage.mockResolvedValueOnce({ data: [{ url: sources[0] }] }).mockResolvedValueOnce({ data: [{ url: sources[1] }] })
+    const downloaded: { href: string; filename: string }[] = []
+    const anchorClick = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+      downloaded.push({ href: this.href, filename: this.download })
+    })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.get('#creator-prompt').setValue('高原湖泊边的牧场')
+      await wrapper.get('#creator-output-size').trigger('click')
+      await wrapper.get('.image-size-mode-tabs').findAll('button').find(button => button.text() === '按比例')!.trigger('click')
+      await wrapper.findAll('.image-resolution-grid button')[2].trigger('click')
+      await wrapper.findAll('.image-ratio-grid button').find(button => button.text().includes('21:9'))!.trigger('click')
+      await wrapper.get('.image-size-confirm').trigger('click')
+      // If the provider ignores JPEG and returns PNG, keep those bytes and extension too.
+      await wrapper.get('#creator-format').setValue('jpeg')
+      await wrapper.get('button[title="增加数量"]').trigger('click')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+      expect(generateImage.mock.calls.map(([, request]) => request.size)).toEqual(['3840x1648', '3840x1648'])
+      expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({
+        status: 'completed', outputs: sources, imageOutputSizes: ['1918x820', '3840x1645'], actualOutputSize: '1918x820',
+      }))
+      const cards = wrapper.findAll('.result-card')
+      expect(cards.map(card => card.get('.result-tags').text())).toEqual([
+        expect.stringContaining('1918×820'), expect.stringContaining('3840×1645'),
+      ])
+      for (const [index, card] of cards.entries()) {
+        expect(card.get('.result-media img').attributes('src')).toBe(sources[index])
+        await card.findAll('.result-media-actions button')[0].trigger('click')
+        expect(wrapper.get('.image-preview .creator-image img').attributes('src')).toBe(sources[index])
+        window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+        await nextTick()
+        await card.findAll('.result-media-actions button')[1].trigger('click')
+      }
+      expect(downloaded.map(item => item.href)).toEqual(sources)
+      expect(downloaded.every(item => item.filename.endsWith('.png'))).toBe(true)
+      expect(showError).not.toHaveBeenCalled()
+    } finally {
+      wrapper.unmount()
+      anchorClick.mockRestore()
     }
   })
 
@@ -665,7 +716,7 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     await wrapper.get('.history-item-hitbox').trigger('click')
     await flushPromises()
-    expect(wrapper.get('.result-heading').text()).toContain('1K · 1248×832')
+    expect(wrapper.get('.history-item-hitbox').element.parentElement?.textContent).toContain('1K · 1248×832')
     wrapper.unmount()
   })
 
@@ -848,6 +899,42 @@ describe('CreatorStudioView', () => {
       outputs: ['data:image/png;base64,QQ=='],
       error: expect.stringContaining('已同步 1 / 2 张'),
     }))
+    wrapper.unmount()
+  })
+
+  it('fails a refreshed image whose server task timed out without resubmitting it', async () => {
+    const work = {
+      id: 'refreshed-image-abandoned',
+      type: 'image',
+      status: 'pending',
+      prompt: '冬日清晨的江边',
+      model: 'gpt-image-2',
+      provider: 'Image2 生图',
+      groupName: image2Group.name,
+      groupId: image2Group.id,
+      apiKeyId: image2Key.id,
+      imageCapability: 'image2',
+      createdAt: Date.now() - 12 * 3600_000,
+      updatedAt: Date.now() - 12 * 3600_000,
+      outputs: [],
+      outputCount: 4,
+      imageTaskIds: ['imgtask_s1', 'imgtask_s2'],
+    } as const
+    listGroups.mockResolvedValue([image2Group])
+    listHistory.mockResolvedValue([work])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    getImageTask.mockResolvedValue({
+      status: 'failed',
+      error: Object.assign(new Error('image generation task was interrupted or timed out; no image was returned'), { status: 504 }),
+    })
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+
+    expect(getImageTask).toHaveBeenCalledTimes(2)
+    expect(submitImageTask).not.toHaveBeenCalled()
+    expect(generateImage).not.toHaveBeenCalled()
+    expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ id: work.id, status: 'failed', imageTaskIds: [] }))
     wrapper.unmount()
   })
 
@@ -1120,7 +1207,7 @@ describe('CreatorStudioView', () => {
     }
   })
 
-  it('on mobile, jumps from a used brief to the settings and back to the canvas on generate', async () => {
+  it('on mobile, keeps inline prompt selection in place and reveals the canvas on generate', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
@@ -1132,11 +1219,15 @@ describe('CreatorStudioView', () => {
       const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
       await flushPromises()
 
-      const title = wrapper.get('.brief-summary h3').text()
-      await wrapper.get('.brief-copy button').trigger('click')
+      await wrapper.get('.prompt-toggle').trigger('click')
+      const template = wrapper.findAll('.prompt-template-grid button')[0]
+      const title = template.get('strong').text()
+      await template.trigger('click')
       await flushPromises()
       expect(showSuccess).toHaveBeenCalledWith(`已填入「${title}」，请确认生成参数`)
-      expect(scrolled.at(-1)?.classList.contains('settings-panel')).toBe(true)
+      expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).not.toBe('')
+      expect(template.classes()).toContain('active')
+      expect(scrolled).toHaveLength(0)
 
       await wrapper.get('.generate-button').trigger('click')
       await flushPromises()
@@ -1301,6 +1392,130 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
+  it('reads saved Image2 pixels without resizing to the requested size', async () => {
+    const header = new Uint8Array(24)
+    header.set([137, 80, 78, 71, 13, 10, 26, 10], 0)
+    header.set([73, 72, 68, 82], 12)
+    const dimensions = new DataView(header.buffer)
+    dimensions.setUint32(16, 1248)
+    dimensions.setUint32(20, 832)
+    const output = `data:image/png;base64,${btoa(String.fromCharCode(...header))}`
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listHistory.mockResolvedValue([{
+      id: 'image2-native-size', type: 'image', status: 'completed', prompt: '实际尺寸',
+      model: 'gpt-image-2', provider: 'GPT Image', groupName: image2Group.name,
+      createdAt: 1, updatedAt: 1, outputs: [output],
+      imageCapability: 'image2', imageSizeMode: 'ratio', aspectRatio: '2:3', resolution: '1K',
+      outputSize: '688x1024', actualOutputSize: '688x1024',
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('.result-tags').text()).not.toContain('1K')
+    expect(wrapper.find('.result-tags').text()).toContain('3:2')
+    expect(wrapper.find('.result-tags').text()).toContain('1248×832')
+    expect(wrapper.find('.result-stat-grid').text()).toContain('3:2')
+    expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
+      imageOutputSizes: ['1248x832'],
+      actualOutputSize: '1248x832',
+      outputs: [output],
+    }))
+    wrapper.unmount()
+  })
+
+  it('labels a legacy resized file by its stored pixels without trying to resize it back', async () => {
+    const output = pngWithDimensions(3840, 1648)
+    listHistory.mockResolvedValue([{
+      id: 'legacy-resized-image', type: 'image', status: 'completed', prompt: '旧版已放大的图片',
+      model: 'gpt-image-2.5-sunburst', provider: 'Image 生图', groupName: image2Group.name,
+      createdAt: 1, updatedAt: 1, outputs: [output],
+      imageCapability: 'image2', imageSizeMode: 'ratio', aspectRatio: '21:9', resolution: '4K',
+      outputSize: '3840x1648', actualOutputSize: '3840x1648', upstreamImageSizes: ['1918x820'],
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.get('.history-item-hitbox').trigger('click')
+      await flushPromises()
+      expect(wrapper.get('.result-tags').text()).toContain('3840×1648')
+      expect(wrapper.get('.result-tags').text()).not.toContain('1918×820')
+      expect(putHistory).toHaveBeenCalledWith(expect.objectContaining({
+        outputs: [output], imageOutputSizes: ['3840x1648'], upstreamImageSizes: ['1918x820'],
+      }))
+    } finally { wrapper.unmount() }
+  })
+
+  it('adapts the result frame and ratio label to an auto-sized provider image', async () => {
+    const output = 'data:image/png;base64,UE5H'
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listHistory.mockResolvedValue([{
+      id: 'image2-auto-square', type: 'image', status: 'completed', prompt: '自动尺寸',
+      model: 'gpt-image-2', provider: 'GPT Image', groupName: image2Group.name,
+      createdAt: 1, updatedAt: 1, outputs: [output],
+      imageCapability: 'image2', imageSizeMode: 'auto', aspectRatio: '2:3',
+      outputFormat: 'gif', frameCount: 16, upstreamImageSizes: ['512x512'],
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const media = wrapper.get<HTMLElement>('.result-media')
+    expect(media.classes()).toContain('fitted')
+    expect(media.attributes('style')).toContain('aspect-ratio: 1 / 1')
+    expect(wrapper.get('.result-actions .result-tags').text()).toContain('1:1')
+    expect(wrapper.get('.result-stat-grid').text()).toContain('1:1')
+    expect(wrapper.get('.result-stat-grid').text()).toContain('512×512')
+    wrapper.unmount()
+  })
+
+  it.each([
+    ['390x439', '8:9', '390×439', '390 / 439'],
+    ['436x388', '9:8', '436×388', '109 / 97'],
+  ])('shows compact ratios for an unusual GIF size %s', async (size, ratio, dimensions, frameRatio) => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listHistory.mockResolvedValue([{
+      id: `image2-gif-${size}`, type: 'image', status: 'completed', prompt: '自动尺寸 GIF',
+      model: 'gpt-image-2.6-sunburst', provider: 'Image 生图', groupName: image2Group.name,
+      createdAt: 1, updatedAt: 1, outputs: ['data:image/gif;base64,R0lGODlh'],
+      imageCapability: 'image2', imageSizeMode: 'auto', aspectRatio: '2:3',
+      outputFormat: 'gif', upstreamImageSizes: [size],
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.get('.result-actions .result-tags').text()).toContain(ratio)
+    expect(wrapper.get('.result-actions .result-tags').text()).toContain(dimensions)
+    expect(wrapper.get('.result-stat-grid').text()).toContain(ratio)
+    expect(wrapper.get('.result-media').attributes('style')).toContain(`aspect-ratio: ${frameRatio}`)
+    wrapper.unmount()
+  })
+
+  it('keeps a rounded standard pixel target as its selected ratio', async () => {
+    listHistory.mockResolvedValue([{
+      id: 'rounded-standard-size', type: 'image', status: 'completed', prompt: '标准尺寸',
+      model: 'gpt-image-2.5-sunburst', provider: 'Image 生图', groupName: group.name,
+      createdAt: 1, updatedAt: 1, outputs: ['data:image/png;base64,UE5H'],
+      aspectRatio: '2:3', actualOutputSize: '688x1024', resolution: '1K',
+    }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    await flushPromises()
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    const tags = wrapper.get('.result-actions .result-tags').text()
+    expect(tags).toContain('2:3')
+    expect(tags).not.toContain('43:64')
+    wrapper.unmount()
+  })
+
   it('opens a history card and deletes it from its hover actions', async () => {
     const work = {
       id: 'image-history-1',
@@ -1460,6 +1675,13 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     const grid = wrapper.get('.result-stat-grid')
+    const resultTags = wrapper.get('.result-actions .result-tags').text()
+    expect(resultTags).toContain('16:9')
+    expect(resultTags).not.toContain('4K')
+    expect(resultTags).toContain('3840×2160')
+    expect(resultTags).toContain('PNG')
+    expect(wrapper.get('.result-actions .result-tags li:first-child').text()).toBe(work.model)
+    expect(resultTags).not.toContain('文生')
     expect(grid.get('article.wide').text()).toContain('gemini-nano-banana-2.1')
     expect(grid.text()).toContain('3840×2160')
     expect(grid.text()).toContain('完成耗时')
@@ -1646,33 +1868,52 @@ describe('CreatorStudioView', () => {
     }
   })
 
-  it('on mobile, editing from the preview jumps to the settings panel', async () => {
+  it.each(['result card', 'preview'] as const)('on mobile, editing from the %s immediately returns to the page top before the image loads', async (source) => {
     const restoreViewport = mockViewportWidth(390)
     const originalScrollIntoView = Element.prototype.scrollIntoView
     const scrolled: Element[] = []
     Element.prototype.scrollIntoView = function (this: Element) { scrolled.push(this) }
+    const windowScrollTo = vi.spyOn(window, 'scrollTo').mockImplementation(() => {})
+    let resolveDownload: ((value: Blob) => void) | undefined
+    downloadImage.mockReturnValueOnce(new Promise(resolve => { resolveDownload = resolve }))
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
     listHistory.mockResolvedValue([{
       id: 'mobile-edit', type: 'image', status: 'completed', prompt: '手机上编辑', model: 'grok-imagine-image',
-      provider: 'Grok 生图', groupName: group.name, createdAt: 1, updatedAt: 1, outputCount: 1,
-      outputs: ['data:image/png;base64,UE5H'], aspectRatio: '1:1', resolution: '1K',
+      provider: 'Grok 生图', groupName: group.name, groupId: group.id, createdAt: 1, updatedAt: 1, outputCount: 1,
+      outputs: ['https://cdn.example/mobile-edit.png'], aspectRatio: '1:1', resolution: '1K',
     }])
     try {
       const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+      onTestFinished(() => wrapper.unmount())
       await flushPromises()
       await wrapper.get('.history-item-hitbox').trigger('click')
       await flushPromises()
-      await wrapper.get('button[title="预览作品"]').trigger('click')
-      await flushPromises()
+      if (source === 'preview') {
+        await wrapper.get('button[title="预览作品"]').trigger('click')
+        await flushPromises()
+      }
       scrolled.length = 0
-      await wrapper.findAll('.preview-action')[1].trigger('click')
-      await flushPromises()
+      windowScrollTo.mockClear()
+      const editButton = source === 'preview'
+        ? wrapper.findAll('.preview-action')[1]
+        : wrapper.get('[aria-label="编辑这张照片"]')
+      await editButton.trigger('click')
+      expect(windowScrollTo).toHaveBeenCalledTimes(1)
+      expect(windowScrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'instant' })
+      expect(downloadImage).toHaveBeenCalledTimes(1)
       expect(wrapper.find('.image-preview').exists()).toBe(false)
+      expect(wrapper.findAll('.reference-item')).toHaveLength(0)
+
+      resolveDownload?.(new Blob(['image'], { type: 'image/png' }))
+      await flushPromises()
+      expect(wrapper.find('.result-workspace').exists()).toBe(false)
       expect(wrapper.findAll('.reference-item')).toHaveLength(1)
-      expect(scrolled.at(-1)?.classList.contains('settings-panel')).toBe(true)
-      wrapper.unmount()
+      expect(scrolled).toHaveLength(0)
+      expect(windowScrollTo).toHaveBeenCalledTimes(1)
     } finally {
       restoreViewport()
       Element.prototype.scrollIntoView = originalScrollIntoView
+      windowScrollTo.mockRestore()
     }
   })
 
@@ -1736,7 +1977,7 @@ describe('CreatorStudioView', () => {
     }))
   })
 
-  it('keeps a referenced Image2 history item on the standard model for a non-4K size', async () => {
+  it.each(['png', 'svg'])('reuses an Image2 %s work with one notification and preserves its model and size', async (outputFormat) => {
     const output = 'data:image/png;base64,UE5H'
     const work = {
       id: 'image2-reference-standard-size',
@@ -1756,6 +1997,7 @@ describe('CreatorStudioView', () => {
       outputSize: '1536x656',
       imageSizeMode: 'ratio',
       outputCount: 1,
+      outputFormat,
     } as const
     listHistory.mockResolvedValue([work])
     listGroups.mockResolvedValue([group, image2Group])
@@ -1777,15 +2019,49 @@ describe('CreatorStudioView', () => {
     await flushPromises()
     expect(wrapper.get('#creator-output-size').text()).toContain('自定义 · 1536×656')
     expect(wrapper.text()).toContain('2K · $0.08/张 × 1 张')
+    expect(wrapper.findAll('.reference-item')).toHaveLength(1)
+    expect(wrapper.get<HTMLSelectElement>('#creator-format').element.value).toBe('png')
+    expect(showSuccess).toHaveBeenCalledTimes(1)
+    expect(showSuccess).toHaveBeenCalledWith(outputFormat === 'svg'
+      ? '已加入参考图并带回参数，输出格式已自动切换为 PNG'
+      : '已将作品加入参考图，并带回当时的生成参数')
+    expect(showWarning).not.toHaveBeenCalled()
+    expect(showError).not.toHaveBeenCalled()
     await wrapper.get('.generate-button').trigger('click')
     await flushPromises()
 
     expect(generateImage).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({
       model: 'gpt-image-2',
       size: '1536x656',
+      outputFormat: 'png',
       referenceImages: [expect.any(File)],
     }))
     expect(generateImage.mock.calls.at(-1)?.[1].model).not.toContain('4k')
+    wrapper.unmount()
+  })
+
+  it('still explains the SVG format change when a reference image is uploaded directly', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    onTestFinished(() => wrapper.unmount())
+    await flushPromises()
+    await wrapper.get('#creator-format').setValue('svg')
+    const input = wrapper.get<HTMLInputElement>('input[type="file"]')
+    Object.defineProperty(input.element, 'files', {
+      configurable: true,
+      value: [new File(['image'], 'reference.png', { type: 'image/png' })],
+    })
+    await input.trigger('change')
+    await flushPromises()
+
+    expect(wrapper.findAll('.reference-item')).toHaveLength(1)
+    expect(wrapper.get<HTMLSelectElement>('#creator-format').element.value).toBe('png')
+    expect(showWarning).toHaveBeenCalledTimes(1)
+    expect(showWarning).toHaveBeenCalledWith('SVG 输出不支持参考图，已切换为 PNG')
+    expect(showSuccess).not.toHaveBeenCalled()
+    expect(showError).not.toHaveBeenCalled()
   })
 
   it('prevents duplicate reference-image reads while a remote output is loading', async () => {
@@ -2193,6 +2469,9 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get('#video-params').attributes('data-ratio')).toBe('2:3')
     expect(wrapper.get('#video-params').attributes('data-resolution')).toBe('1080p')
     expect(wrapper.get('.reference-field').text()).toContain('当时使用了 3 张参考图')
+    expect(wrapper.findAll('.result-grid .result-tags li').map(tag => tag.text())).toEqual([
+      'grok-imagine-video-1.5', '2:3', '1080p', '10 秒', 'MP4', '参考图生',
+    ])
     wrapper.unmount()
   })
 
@@ -2257,6 +2536,7 @@ describe('CreatorStudioView', () => {
       aspectRatio: '16:9',
       resolution: '720p',
       requestId: 'persisted-video-task',
+      requestedDuration: 15,
     } as const
     listHistory.mockResolvedValue([work])
     listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
@@ -2280,12 +2560,19 @@ describe('CreatorStudioView', () => {
     await video.trigger('focus')
     await video.trigger('pointerdown', { pointerType: 'touch' })
     expect(video.element.controls).toBe(false)
+    Object.defineProperties(video.element, {
+      videoWidth: { configurable: true, value: 1280 },
+      videoHeight: { configurable: true, value: 720 },
+    })
     await video.trigger('loadedmetadata')
     await video.trigger('loadeddata')
     expect(wrapper.find('[aria-label="播放视频"]').exists()).toBe(true)
     expect(wrapper.get('.video-badge').text()).toContain('视频')
     expect(wrapper.get('.result-parameters').text()).toContain('生成数量')
     expect(wrapper.get('.result-actions .result-prompt').text()).toBe('雨后的城市街道')
+    expect(wrapper.findAll('.result-card > .result-actions > .result-tags li').map(tag => tag.text())).toEqual([
+      'grok-imagine-video', '16:9', '720p', '15 秒', 'MP4', '文生',
+    ])
     expect(getVideoStatus).not.toHaveBeenCalled()
     expect(getVideoContent).not.toHaveBeenCalled()
     const originalFetch = globalThis.fetch
@@ -2421,7 +2708,7 @@ describe('CreatorStudioView', () => {
       await wrapper.findAll('.history-tabs button')[1].trigger('click')
       await wrapper.get('.history-item-hitbox').trigger('click')
       await flushPromises()
-      expect(wrapper.get('.video-status-feedback').text()).toContain('上游进度 40%')
+      expect(wrapper.get('.video-status-feedback').text()).toContain('当前进度 40%')
 
       await wrapper.get('.status-check-command').trigger('click')
       await flushPromises()
@@ -2475,8 +2762,8 @@ describe('CreatorStudioView', () => {
     await wrapper.get('.history-item-hitbox').trigger('click')
     await flushPromises()
     expect(getVideoStatus).toHaveBeenCalledTimes(1)
-    expect(wrapper.get('.video-status-feedback').text()).toContain('任务仍在生成中，请稍后再试')
-    expect(wrapper.get('.video-status-feedback').text()).toMatch(/最近检查 \d{2}:\d{2}:\d{2}/)
+    expect(wrapper.get('.video-status-feedback').text()).toContain('视频还在生成中，稍后可再次同步')
+    expect(wrapper.get('.video-status-feedback').text()).toMatch(/\d{2}:\d{2}:\d{2} 已同步/)
     expect(wrapper.find('.generation-state').exists()).toBe(false)
     expect(showError).not.toHaveBeenCalled()
     wrapper.unmount()
@@ -2518,7 +2805,7 @@ describe('CreatorStudioView', () => {
     await flushPromises()
 
     expect(getVideoStatus).toHaveBeenCalledWith(renamedKey.key, work.requestId)
-    expect(wrapper.get('.video-status-feedback').text()).toContain('任务仍在生成中')
+    expect(wrapper.get('.video-status-feedback').text()).toContain('视频还在生成中')
     expect(showError).not.toHaveBeenCalled()
     wrapper.unmount()
   })
@@ -2703,6 +2990,60 @@ describe('CreatorStudioView', () => {
     wrapper.unmount()
   })
 
+  it.each([
+    { model: 'Minimax-H3-768p-933-10s-15s', name: 'MiniMax H3 标清版 768p', resolution: '768p', seconds: 15 },
+    { model: 'oosd2.5', name: 'Seedance 2.5 720p', resolution: '720p', seconds: 15 },
+    { model: 'oosd2.5-30秒', name: 'Seedance 2.5 720p', resolution: '720p', seconds: 30 },
+    { model: '00sd2.0', name: 'Seedance 2.0 720p', resolution: '720p', seconds: 15 },
+    { model: 'ttseadanco2.5-720', name: 'Seedance 2.5 720p', resolution: '720p', seconds: 15 },
+  ])('keeps $model video result details concise without showing output pixel dimensions', async ({ model, name, resolution, seconds }) => {
+    listHistory.mockResolvedValue([{
+      id: 'concise-video-result',
+      type: 'video',
+      status: 'completed',
+      prompt: '冰块落入玻璃杯',
+      model,
+      provider: 'MiniMax H3 视频',
+      groupName: group.name,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+      outputs: ['blob:h3-video'],
+      outputCount: 1,
+      aspectRatio: '16:9',
+      resolution,
+      actualOutputSize: '1360x768',
+      requestedDuration: seconds,
+      shotCount: 1,
+      videoGenerationMethod: 'text',
+    }])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    await flushPromises()
+    await wrapper.findAll('.history-tabs button')[1].trigger('click')
+    await wrapper.get('.history-item-hitbox').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.findAll('.result-grid .result-tags li').map(tag => tag.text())).toEqual([
+      name, '16:9', resolution, `${seconds} 秒`, 'MP4', '文生',
+    ])
+
+    const parameters = wrapper.get('.result-parameters').text()
+    expect(parameters).toContain(name)
+    expect(parameters).not.toContain('固定')
+    expect(parameters).not.toContain('按条')
+    expect(parameters).not.toContain('按秒')
+    expect(parameters).not.toContain('高并发')
+    expect(parameters).not.toContain('10–15秒')
+    expect(parameters).not.toContain('8种画幅')
+    expect(parameters).not.toContain('输出尺寸')
+    expect(parameters).not.toContain('1360×768')
+    wrapper.unmount()
+  })
+
   it('shows a complete multi-shot video above individually described shot materials', async () => {
     listHistory.mockResolvedValue([{
       id: 'multi-shot-video',
@@ -2719,6 +3060,11 @@ describe('CreatorStudioView', () => {
       shotCount: 2,
       shotPrompts: ['森林推进', '城市跟拍'],
       shotDurations: [4, 6],
+      shotAspectRatios: ['16:9', '9:16'],
+      shotResolutions: ['720p', '1080p'],
+      shotActualOutputSizes: ['1280x720', '1080x1920'],
+      shotGenerationMethods: ['text', 'image'],
+      shotReferenceCounts: [0, 1],
       requestedDuration: 10,
       aspectRatio: '16:9',
       resolution: '720p',
@@ -2735,6 +3081,11 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.get('.complete-video-card').text()).toContain('所有镜头已按顺序合成')
     expect(wrapper.get<HTMLVideoElement>('.complete-video-media').attributes('src')).toBe('blob:complete-video')
+    const completeVideo = wrapper.get<HTMLVideoElement>('.complete-video-media')
+    Object.defineProperties(completeVideo.element, {
+      videoWidth: { configurable: true, value: 1280 },
+      videoHeight: { configurable: true, value: 720 },
+    })
     for (const video of wrapper.findAll<HTMLVideoElement>('.creator-video-player video')) {
       expect(video.element.controls).toBe(false)
       await video.trigger('loadedmetadata')
@@ -2742,8 +3093,15 @@ describe('CreatorStudioView', () => {
     }
     expect(wrapper.findAll('.video-play-toggle')).toHaveLength(3)
     expect(wrapper.get<HTMLAnchorElement>('.complete-video-card footer a').attributes('download')).toBe('creator-complete-multi-shot-video.mp4')
+    expect(wrapper.findAll('.complete-video-card footer .result-tags li').map(tag => tag.text())).toEqual([
+      'grok-imagine-video', '16:9', '720p', '总时长 10 秒', '2 个镜头', 'MP4',
+    ])
     expect(wrapper.findAll('.result-segment-grid .result-card')).toHaveLength(2)
     expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['森林推进', '城市跟拍'])
+    expect(wrapper.findAll('.result-segment-grid .result-tags').map(tags => tags.findAll('li').map(tag => tag.text()))).toEqual([
+      ['grok-imagine-video', '16:9', '720p', '4 秒', 'MP4', '文生'],
+      ['grok-imagine-video', '9:16', '1080p', '6 秒', 'MP4', '图生'],
+    ])
     expect(wrapper.get('.result-prompt-cell .full-prompt').text()).toContain('镜头 1：森林推进')
     expect(wrapper.get('.result-prompt-cell .full-prompt').text()).toContain('镜头 2：城市跟拍')
   })
@@ -3104,15 +3462,17 @@ describe('CreatorStudioView', () => {
   })
 
   it('creates MiniMax H3 video only in priced MiniMax groups and lists only the 10-15s tiers', async () => {
-    const h3Group = { ...group, id: 7700, name: 'MiniMax', description: '', platform: 'minimax', video_model_prices: { 'minimax-h3': { '768p': 0.1, '1440p': 0.15 } } } as Group
+    const h3Group = { ...group, id: 7700, name: 'MiniMax', description: '', platform: 'minimax', video_model_prices: { 'minimax-h3': { '768p': 0.1, '1440p': 0.15, 'minimaxh3-768': 0.08, 'xminimex-h3': 0.2 } } } as Group
     const textGroup = { ...group, id: 7701, name: 'MiniMax 文本', description: '', platform: 'minimax' } as Group
     const h3Key = { ...createdKey, id: 30, key: 'sk-h3', group_id: h3Group.id, group: h3Group } as ApiKey
     listGroups.mockResolvedValue([group, h3Group, textGroup])
     listKeys.mockResolvedValue({ items: [h3Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([
       { id: 'Minimax-H3-768p-933-10s-15s' },
+      { id: 'minimaxh3-768' },
       { id: 'MiniMax-H3-933-1440p-10s' },
       { id: 'MiniMax-H3-933-1440p-10-15s' },
+      { id: 'xminimex-h3' },
       { id: 'MiniMax-M2' },
     ])
     listKeys.mockResolvedValue({ items: [createdKey, h3Key], total: 2, page: 1, page_size: 100, pages: 1 })
@@ -3126,7 +3486,13 @@ describe('CreatorStudioView', () => {
 
     expect(wrapper.findAll('#creator-group option').map(option => option.text())).toEqual(['MiniMax'])
     expect(wrapper.findAll('#creator-model option').map(option => option.text()))
-      .toEqual(['MiniMax H3 标清版 768p · 按秒 · 10–15秒 · 8种画幅', 'MiniMax H3 高清版 2K · 按秒 · 10–15秒 · 8种画幅'])
+      .toEqual([
+        'MiniMax H3 标清版 768p · 8种画幅',
+        'MiniMax H3 标清版 768p · 高速并发',
+        'MiniMax H3 高清版 2K · 8种画幅',
+        'MiniMax H3 高清版 2K · 原生不卡脸',
+      ])
+    expect(wrapper.get('[data-testid="minimax-tier-hint"]').text()).toBe('按秒 · 10–15秒 · 8种画幅')
     expect(wrapper.get<HTMLSelectElement>('#video-generation-method').element.value).toBe('text')
     expect(wrapper.get('#video-generation-method option[value="text"]').attributes('disabled')).toBeUndefined()
     expect(wrapper.get('#video-generation-method option[value="image"]').attributes('disabled')).toBeDefined()
@@ -3425,7 +3791,7 @@ describe('CreatorStudioView', () => {
 
       expect(getVideoContent).toHaveBeenCalledTimes(3)
       expect(showError).not.toHaveBeenCalled()
-      expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('视频未扣费'))
+      expect(showWarning).toHaveBeenCalledWith(expect.stringContaining('不会重复扣费'))
       expect(putHistory).toHaveBeenLastCalledWith(expect.objectContaining({ status: 'completed', requestId: 'video-task-1' }))
       expect(wrapper.get('.result-error').text()).toContain('重新加载视频')
 
@@ -3608,14 +3974,83 @@ describe('CreatorStudioView', () => {
       expect(wrapper.find('.result-error').exists()).toBe(false)
       expect(wrapper.get('.partial-result-notice').text()).toContain('镜头 2')
       expect(wrapper.get('.partial-result-notice').text()).toContain('Invalid URL')
-      expect(wrapper.findAll('.result-segment-grid .result-description strong').map(item => item.text())).toEqual(['镜头 1', '镜头 3'])
+      expect(wrapper.findAll('.result-segment-grid .result-description strong').map(item => item.text())).toEqual(['Grok 视频 · 镜头 1', 'Grok 视频 · 镜头 3'])
       expect(wrapper.findAll('.result-segment-grid .result-description p').map(item => item.text())).toEqual(['第一个镜头', '第三个镜头'])
       const saved = putHistory.mock.calls.at(-1)?.[0]
       expect(saved).toMatchObject({ status: 'completed', requestId: 'video-shot-1,video-shot-3', shotOutputIndexes: [0, 2] })
+      const completedDuration = saved.shotDurations[0] + saved.shotDurations[2]
+      expect(wrapper.get('.complete-video-card footer .result-tags').text()).toContain(`总时长 ${completedDuration} 秒`)
+      expect(wrapper.get('.complete-video-card footer .result-tags').text()).not.toContain(`总时长 ${saved.requestedDuration} 秒`)
     } finally {
       wrapper.unmount()
       createVideo.mockReset()
       getVideoStatus.mockReset()
+    }
+  })
+
+  it('submits every professional shot at once and stitches them in shot order', async () => {
+    listKeys.mockResolvedValue({ items: [createdKey], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'grok-imagine-video' }])
+    createVideo
+      .mockResolvedValueOnce({ id: 'parallel-shot-1' })
+      .mockResolvedValueOnce({ id: 'parallel-shot-2' })
+    // Shot 2 finishes first; shot 1 is still rendering on its first poll.
+    const shot1Status = vi.fn()
+      .mockResolvedValueOnce({ id: 'parallel-shot-1', status: 'processing' })
+      .mockResolvedValue({ id: 'parallel-shot-1', status: 'completed' })
+    getVideoStatus.mockImplementation(async (_key: string, id: string) => id === 'parallel-shot-1'
+      ? shot1Status()
+      : { id, status: 'completed' })
+    const shotBlobs: Record<string, Blob> = {
+      'parallel-shot-1': new Blob(['shot-one'], { type: 'video/mp4' }),
+      'parallel-shot-2': new Blob(['shot-two'], { type: 'video/mp4' }),
+    }
+    getVideoContent.mockImplementation(async (_key: string, id: string) => shotBlobs[id])
+
+    const wrapper = mount(CreatorStudioView, {
+      global: {
+        stubs: { Icon: IconStub, AppLayout: AppLayoutStub },
+      },
+    })
+    vi.useFakeTimers()
+    try {
+      await flushPromises()
+      await openGrokVideo(wrapper)
+      await flushPromises()
+      await wrapper.get<HTMLInputElement>('.toggle-row input').setValue(true)
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第一个镜头')
+      await wrapper.get('.sequence-add').trigger('click')
+      await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('第二个镜头')
+      void wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+
+      // Both shots were submitted before either finished.
+      expect(createVideo).toHaveBeenCalledTimes(2)
+      expect(wrapper.get('.generation-state').text()).toContain('正在同时生成 2 个镜头（已完成 1 个）')
+      // The finished shot 2 is already saved while shot 1 still renders.
+      const partial = putHistory.mock.calls.at(-1)?.[0]
+      expect(partial).toMatchObject({ status: 'pending', shotOutputIndexes: [1, 0] })
+      expect(partial.videoBlobs).toEqual([shotBlobs['parallel-shot-2']])
+
+      await vi.advanceTimersByTimeAsync(4000)
+      await flushPromises()
+
+      expect(composeVideoSegments).toHaveBeenCalledTimes(1)
+      expect(composeVideoSegments.mock.calls[0][0]).toEqual([shotBlobs['parallel-shot-1'], shotBlobs['parallel-shot-2']])
+      const saved = putHistory.mock.calls.at(-1)?.[0]
+      expect(saved).toMatchObject({
+        status: 'completed',
+        requestId: 'parallel-shot-1,parallel-shot-2',
+        shotOutputIndexes: [0, 1],
+        shotQueue: undefined,
+      })
+      expect(showSuccess).toHaveBeenCalledWith('作品生成完成')
+    } finally {
+      wrapper.unmount()
+      vi.useRealTimers()
+      createVideo.mockReset()
+      getVideoStatus.mockReset()
+      getVideoContent.mockReset().mockResolvedValue(new Blob(['video'], { type: 'video/mp4' }))
     }
   })
 
@@ -3765,7 +4200,7 @@ describe('CreatorStudioView', () => {
     expect(media.attributes('style')).toContain('aspect-ratio: 3 / 2')
   })
 
-  it('sends only the standard 1024x1024 size field for an Image2 square request', async () => {
+  it('uses automatic output size by default for an Image2 request', async () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-1' }, { id: 'gpt-image-1.5' }, { id: 'gpt-image-2' }])
@@ -3783,7 +4218,7 @@ describe('CreatorStudioView', () => {
     expect(modelSelect.findAll('option').map(option => option.attributes('value'))).not.toContain('gpt-image-2-4k')
     expect(wrapper.find('#creator-aspect').exists()).toBe(false)
     expect(wrapper.find('#creator-resolution').exists()).toBe(false)
-    expect(wrapper.get('#creator-output-size').text()).toContain('1K · 1024×1024')
+    expect(wrapper.get('#creator-output-size').text()).toContain('自动')
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('正方形产品照片')
     expect(wrapper.text()).not.toContain('透明背景')
     await wrapper.get('.generate-button').trigger('click')
@@ -3791,7 +4226,7 @@ describe('CreatorStudioView', () => {
 
     expect(generateImage).toHaveBeenCalledWith(image2Key.key, expect.objectContaining({
       model: 'gpt-image-2',
-      size: '1024x1024',
+      size: 'auto',
       protocol: 'openai',
       background: 'auto',
     }))
@@ -3818,6 +4253,7 @@ describe('CreatorStudioView', () => {
 
     await wrapper.get('#creator-output-size').trigger('click')
     let dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-size-mode-tabs button').find(button => button.text() === '按比例')!.trigger('click')
     expect(dialog.props('appearance')).toBe('soft')
     expect(dialog.get('.modal-overlay').classes()).toContain('modal-overlay--soft')
     expect(dialog.get('.modal-content').classes()).toContain('modal-content--soft')
@@ -3935,6 +4371,7 @@ describe('CreatorStudioView', () => {
     await wrapper.get<HTMLTextAreaElement>('#creator-prompt').setValue('宽屏未来城市')
     await wrapper.get('#creator-output-size').trigger('click')
     const dialog = wrapper.getComponent(BaseDialog)
+    await dialog.findAll('.image-size-mode-tabs button').find(button => button.text() === '按比例')!.trigger('click')
     await dialog.findAll('.image-resolution-grid button')[1].trigger('click')
     await dialog.findAll('.image-ratio-grid button')[3].trigger('click')
     await dialog.get('.image-size-confirm').trigger('click')
@@ -4137,6 +4574,8 @@ describe('CreatorStudioView', () => {
     expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('切换页面继续生成')
     if (outcome === 'pending') {
       expect(wrapper.get('.generation-state').text()).toContain('正在绘制你的画面')
+      expect(wrapper.find('.generation-heading-loader').exists()).toBe(true)
+      expect(wrapper.find('.generation-frame-ring').exists()).toBe(true)
       expect(wrapper.get('.generate-button').attributes('disabled')).toBeDefined()
       finish({ data: [{ url: '/completed-away.png' }] })
       await flushPromises()
@@ -4164,9 +4603,11 @@ describe('CreatorStudioView', () => {
     listGroups.mockResolvedValue([image2Group])
     listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
     listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
-    let finishFirst!: (result: unknown) => void
+    let finishFirstA!: (result: unknown) => void
+    let finishFirstB!: (result: unknown) => void
     let finishSecond!: (result: unknown) => void
-    generateImage.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve }))
+    generateImage.mockImplementationOnce(() => new Promise(resolve => { finishFirstA = resolve }))
+      .mockImplementationOnce(() => new Promise(resolve => { finishFirstB = resolve }))
       .mockImplementationOnce(() => new Promise(resolve => { finishSecond = resolve }))
     const now = vi.spyOn(Date, 'now').mockReturnValue(10_000)
     const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
@@ -4181,10 +4622,17 @@ describe('CreatorStudioView', () => {
       await flushPromises()
       expect(settings.scrollTop).toBe(420)
       expect(wrapper.get('.generate-button').attributes('disabled')).toBeDefined()
-      expect(wrapper.get('.generation-state').text()).toContain('1 / 2')
-      // One ratio-shaped frame per requested image: the first is drawing, the second waits.
-      expect(wrapper.findAll('.generation-frame').map(frame => frame.classes().find(name => name.startsWith('is-')))).toEqual(['is-current', 'is-queued'])
-      expect(wrapper.get('.generation-tags').text()).toContain('2 张')
+      expect(wrapper.get('.generation-state').text()).toContain('正在同时生成 2 张图片')
+      expect(Array.from(wrapper.get<HTMLElement>('.generation-state').element.children, child => child.classList.item(0))).toEqual([
+        'generation-panel',
+        'generation-stage',
+      ])
+      // Both images are requested at once, so both ratio-shaped frames are drawing.
+      expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第一组图'])
+      expect(wrapper.findAll('.generation-frame').map(frame => frame.classes().find(name => name.startsWith('is-')))).toEqual(['is-current', 'is-current'])
+      expect(wrapper.get('.generation-done-count').text()).toContain('0 / 2')
+      expect(wrapper.get('.generation-prompt').text()).toContain('第一组图')
+      expect(wrapper.findAll('.generation-tags li').length).toBeGreaterThan(0)
       expect(wrapper.find('a.new-creation-link').exists()).toBe(false)
       await wrapper.get('.generation-state button.new-creation-link').trigger('click')
       expect(settings.scrollTop).toBe(420)
@@ -4194,19 +4642,19 @@ describe('CreatorStudioView', () => {
       expect(wrapper.find('.generation-state').exists()).toBe(false)
       expect(wrapper.find('.generation-tasks').exists()).toBe(false)
       expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
-      expect(wrapper.get('.history-item.generating .history-progress').text()).toContain('1 / 2')
+      expect(wrapper.get('.history-item.generating .history-progress').text()).toContain('正在同时生成 2 张图片')
       now.mockReturnValue(20_000)
       await wrapper.get('#creator-prompt').setValue('第二张图')
       await wrapper.get('button[title="减少数量"]').trigger('click')
       await wrapper.get('.generate-button').trigger('click')
       await flushPromises()
-      expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第二张图'])
+      expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第一组图', '第二张图'])
       expect(wrapper.findAll('.history-item.generating')).toHaveLength(2)
       expect(wrapper.get('.history-tab-generating').text()).toBe('2')
       // Selecting either running work shows its own progress, without resubmitting.
       await wrapper.get('[aria-label="打开作品：第一组图"]').trigger('click')
       await flushPromises()
-      expect(wrapper.get('.generation-state').text()).toContain('1 / 2')
+      expect(wrapper.get('.generation-state').text()).toContain('正在同时生成 2 张图片')
       await wrapper.findAll('.history-item-hitbox')[0].trigger('click')
       await flushPromises()
       expect(wrapper.get('.generation-state').text()).toContain('正在调用图片模型')
@@ -4216,23 +4664,46 @@ describe('CreatorStudioView', () => {
       await flushPromises()
       expect(wrapper.get('.result-media img').attributes('src')).toBe('/second-result.png')
       expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
-      // A's second batch still uses A's captured prompt/count, after browsing B.
-      now.mockReturnValue(40_000)
-      finishFirst({ data: [{ url: '/first-result.png' }] })
+      // A's images finish out of order; each is saved without dropping the other.
+      finishFirstB({ data: [{ url: '/first-b.png' }] })
       await flushPromises()
-      expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第二张图', '第一组图'])
+      expect(wrapper.findAll('.history-item.generating')).toHaveLength(1)
+      now.mockReturnValue(40_000)
+      finishFirstA({ data: [{ url: '/first-a.png' }] })
+      await flushPromises()
+      expect(generateImage.mock.calls.map(call => call[1].prompt)).toEqual(['第一组图', '第一组图', '第二张图'])
       expect(wrapper.get('.result-media img').attributes('src')).toBe('/second-result.png')
       expect(wrapper.get<HTMLTextAreaElement>('#creator-prompt').element.value).toBe('第二张图')
       expect(wrapper.find('.history-item.generating').exists()).toBe(false)
       expect(wrapper.find('.history-tab-generating').exists()).toBe(false)
       const completed = putHistory.mock.calls.map(call => call[0]).filter(work => work.status === 'completed')
       expect(completed).toEqual(expect.arrayContaining([
-        expect.objectContaining({ prompt: '第一组图', outputCount: 2, generationDurationMs: 30_000, outputs: ['/first-result.png', 'data:image/png;base64,UE5H'] }),
+        expect.objectContaining({ prompt: '第一组图', outputCount: 2, generationDurationMs: 30_000, outputs: ['/first-b.png', '/first-a.png'] }),
         expect.objectContaining({ prompt: '第二张图', outputCount: 1, generationDurationMs: 5_000, outputs: ['/second-result.png'] }),
       ]))
     } finally {
       wrapper.unmount()
       now.mockRestore()
+    }
+  })
+
+  it('caps mobile image generation frames at two columns', async () => {
+    listGroups.mockResolvedValue([image2Group])
+    listKeys.mockResolvedValue({ items: [image2Key], total: 1, page: 1, page_size: 100, pages: 1 })
+    listModels.mockResolvedValue([{ id: 'gpt-image-2' }])
+    generateImage.mockImplementation(() => new Promise(() => {}))
+    const wrapper = mount(CreatorStudioView, { global: { stubs: { Icon: IconStub, AppLayout: AppLayoutStub } } })
+    try {
+      await flushPromises()
+      await wrapper.get('#creator-prompt').setValue('四张图布局')
+      for (let index = 1; index < 4; index++) await wrapper.get('button[title="增加数量"]').trigger('click')
+      await wrapper.get('.generate-button').trigger('click')
+      await flushPromises()
+
+      expect(wrapper.findAll('.generation-frame')).toHaveLength(4)
+      expect(wrapper.get('.generation-stage').element.style.getPropertyValue('--generation-mobile-columns')).toBe('2')
+    } finally {
+      wrapper.unmount()
     }
   })
 
@@ -4505,6 +4976,11 @@ describe('CreatorStudioView', () => {
     await items[1].trigger('click')
     await flushPromises()
     expect(wrapper.get('.result-error').text()).toContain('上游超时')
+    const failedHeading = wrapper.get('.result-heading-actions')
+    expect(failedHeading.text()).toContain('删除')
+    expect(failedHeading.text()).toContain('重新生成')
+    expect(failedHeading.text()).toContain('新建创作')
+    expect(failedHeading.text()).not.toContain('一键下载')
     let parameters = wrapper.get('.result-parameters')
     expect(parameters.text()).toContain('gpt-image-2.5-sunburst')
     expect(parameters.text()).toContain('2 张')
@@ -4514,6 +4990,7 @@ describe('CreatorStudioView', () => {
     await items[0].trigger('click')
     await flushPromises()
     expect(wrapper.text()).toContain('正在等待图片结果')
+    expect(wrapper.get('.result-heading-actions').text()).not.toContain('重新生成')
     parameters = wrapper.get('.result-parameters')
     expect(parameters.text()).toContain('提交时间')
     expect(parameters.text()).not.toContain('完成耗时')

@@ -177,6 +177,9 @@ func RegisterAdminRoutes(
 
 		// 操作审计日志
 		registerAuditLogRoutes(admin, h, stepUpAuth)
+
+		// 原生视频结算复核
+		registerNativeVideoReviewRoutes(admin, h)
 	}
 }
 
@@ -200,6 +203,16 @@ func registerPromptAuditRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
 		promptAudit.POST("/events/delete-preview", h.Admin.PromptAudit.DeletePreview)
 		promptAudit.POST("/events/delete-by-filter", h.Admin.PromptAudit.DeleteByFilter)
 	}
+}
+
+func registerNativeVideoReviewRoutes(admin *gin.RouterGroup, h *handler.Handlers) {
+	if h.Admin.NativeVideoReview == nil {
+		return
+	}
+	reviews := admin.Group("/video-settlements/reviews")
+	reviews.GET("", h.Admin.NativeVideoReview.List)
+	reviews.GET("/summary", h.Admin.NativeVideoReview.Summary)
+	reviews.POST("/action", h.Admin.NativeVideoReview.Act)
 }
 
 func registerAuditLogRoutes(admin *gin.RouterGroup, h *handler.Handlers, _ middleware.StepUpAuthMiddleware) {
@@ -751,6 +764,9 @@ func registerSettingsRoutes(admin *gin.RouterGroup, h *handler.Handlers, stepUpA
 		adminSettings.POST("/ip-risk/anonymous-unban", h.Admin.Setting.UnbanAnonymousAPI)
 		adminSettings.POST("/ip-risk/unban", h.Admin.Setting.UnbanIPRisk)
 		adminSettings.POST("/ip-risk/check", h.Admin.Setting.CheckIPRisk)
+		adminSettings.GET("/seedance-catalog", h.Admin.Setting.GetSeedanceCatalog)
+		adminSettings.PUT("/seedance-catalog", h.Admin.Setting.UpdateSeedanceCatalog)
+		adminSettings.DELETE("/seedance-catalog", h.Admin.Setting.ResetSeedanceCatalog)
 		adminSettings.GET("/astra-routing", h.Admin.Setting.GetAstraRouting)
 		adminSettings.PUT("/astra-routing", h.Admin.Setting.UpdateAstraRouting)
 		adminSettings.GET("", h.Admin.Setting.GetSettings)

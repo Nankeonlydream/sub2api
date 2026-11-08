@@ -178,7 +178,7 @@
             <span class="history-copy">
               <strong>{{ historyWorkTitle(work) }}</strong>
               <small v-if="activeGenerations.has(work.id)" class="history-progress">{{ activeGenerations.get(work.id)?.progress || '生成中' }}</small>
-              <small v-else>{{ modelLabel(work.model) }} · {{ work.aspectRatio || '自动' }} · {{ workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
+              <small v-else>{{ work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model) }} · {{ work.aspectRatio || '自动' }} · {{ work.type === 'video' ? videoResolutionTierLabel(work) : workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
             </span>
             <span class="history-item-actions">
               <button
@@ -204,8 +204,43 @@
       </aside>
 
       <main ref="canvasPanelElement" class="canvas-panel">
-        <div v-if="selectedGeneration && selectedWork" class="generation-state">
-          <div class="generation-stage" :class="`is-${generationMode}`">
+        <div v-if="selectedGeneration && selectedWork" class="generation-state" :class="{ 'is-video': generationMode === 'video' }">
+          <section class="generation-panel">
+            <div class="generation-heading">
+              <span class="generation-heading-loader" aria-hidden="true"><Icon name="sparkles" size="sm" /></span>
+              <div class="generation-heading-copy">
+                <h2>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
+                <p>{{ generationProgress }}</p>
+              </div>
+              <button type="button" class="new-creation-link generation-new-creation" @click="newCreation">
+                <Icon name="plus" size="sm" />新建创作
+              </button>
+            </div>
+            <div class="generation-body">
+              <div class="generation-brief">
+                <p v-if="fullPromptText(selectedWork)" class="generation-prompt" :title="fullPromptText(selectedWork)">{{ fullPromptText(selectedWork) }}</p>
+                <ul class="result-tags generation-tags">
+                  <li v-for="(part, partIndex) in generationTags(selectedWork)" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
+              </div>
+              <div class="generation-metrics">
+                <div
+                  class="progress-track"
+                  :class="{ indeterminate: !generationHasExactProgress }"
+                  role="progressbar"
+                  :aria-valuenow="generationHasExactProgress ? generationPercent : undefined"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                >
+                  <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
+                </div>
+                <strong v-if="generationMode === 'video' && generationPhase === 'generating' && generationHasExactProgress" class="generation-percent">{{ generationPercent }}%</strong>
+                <em v-if="generationMode === 'image' && generationFrames.length > 1" class="generation-done-count">已完成 {{ selectedWork.outputs.length }} / {{ generationFrames.length }}</em>
+                <span class="generation-elapsed"><Icon name="clock" size="xs" />已用时<strong>{{ generationElapsedLabel }}</strong></span>
+              </div>
+            </div>
+          </section>
+          <div class="generation-stage" :class="`is-${generationMode}`" :style="generationStageStyle">
             <span
               v-for="frame in generationFrames"
               :key="frame.index"
@@ -214,7 +249,8 @@
               :style="generationFrameStyle"
               :aria-hidden="frame.output ? undefined : 'true'"
             >
-              <img v-if="frame.output" :src="frame.output" alt="" decoding="async" />
+              <img v-if="frame.output && generationMode === 'image'" :src="frame.output" alt="" decoding="async" />
+              <video v-else-if="frame.output && generationMode === 'video'" :src="frame.output" muted loop playsinline autoplay class="generation-frame-video" />
               <!-- Finished images can be previewed, saved or edited while the rest are still drawing. -->
               <template v-if="frame.output && generationMode === 'image'">
                 <button type="button" class="generation-frame-open" :title="`查看第 ${frame.index + 1} 张`" :aria-label="`查看第 ${frame.index + 1} 张`" @click="openPreview(frame.output)" />
@@ -244,62 +280,56 @@
                   ><Icon name="edit" size="xs" /></button>
                 </span>
               </template>
+              <!-- Finished videos can be previewed and downloaded while the rest are still drawing. -->
+              <template v-else-if="frame.output && generationMode === 'video'">
+                <button type="button" class="generation-frame-open" :title="`播放镜头 ${frame.index + 1}`" :aria-label="`播放镜头 ${frame.index + 1}`" @click="previewResult(frame.output, 'video', frame.index)" />
+                <span class="generation-frame-actions">
+                  <button
+                    type="button"
+                    class="generation-frame-action is-preview"
+                    :title="`播放镜头 ${frame.index + 1}`"
+                    :aria-label="`播放镜头 ${frame.index + 1}`"
+                    @click="previewResult(frame.output, 'video', frame.index)"
+                  ><Icon name="play" size="xs" /></button>
+                  <button
+                    type="button"
+                    class="generation-frame-action generation-frame-download"
+                    :title="downloadingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在下载' : `下载镜头 ${frame.index + 1}`"
+                    :aria-label="`下载镜头 ${frame.index + 1}`"
+                    :disabled="Boolean(downloadingOutputKey)"
+                    @click="downloadOutput(frame.output, selectedWork, frame.index)"
+                  ><Icon name="download" size="xs" /></button>
+                </span>
+              </template>
               <span v-if="frame.state === 'failed'" class="generation-frame-failed"><Icon name="exclamationTriangle" size="sm" />未生成</span>
-              <span v-else-if="frame.state === 'current'" class="generation-frame-ring">
-                <Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="sm" />
-              </span>
+              <template v-else-if="frame.state === 'current'">
+                <span class="generation-frame-dots" aria-hidden="true"></span>
+                <span class="generation-frame-loader">
+                  <span class="generation-frame-ring">
+                    <Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="sm" />
+                  </span>
+                </span>
+              </template>
               <span v-else class="generation-frame-index">{{ frame.index + 1 }}</span>
             </span>
           </div>
-          <div class="generation-heading">
-            <h2>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
-            <p>{{ generationProgress }}</p>
-            <ul class="generation-tags">
-              <li>{{ modelLabel(selectedWork.model) }}</li>
-              <li>{{ selectedWork.aspectRatio || '自动' }}</li>
-              <li>{{ workResolutionLabel(selectedWork) }}</li>
-              <li v-if="generationMode === 'image'">{{ generationFrames.length }} 张</li>
-              <li v-else-if="(selectedWork.shotCount || 1) > 1">{{ selectedWork.shotCount }} 个镜头</li>
-            </ul>
-          </div>
-          <div class="generation-progress-card">
-            <div class="generation-metrics">
-              <span><Icon name="clock" size="xs" />已用时</span>
-              <strong>{{ generationElapsedLabel }}</strong>
-              <strong v-if="generationMode === 'video' && generationPhase === 'generating' && generationHasExactProgress" class="generation-percent">{{ generationPercent }}%</strong>
-              <em v-else-if="generationMode === 'image' && generationFrames.length > 1">已完成 {{ selectedWork.outputs.length }} / {{ generationFrames.length }}</em>
-            </div>
-            <div
-              class="progress-track"
-              :class="{ indeterminate: !generationHasExactProgress }"
-              role="progressbar"
-              :aria-valuenow="generationHasExactProgress ? generationPercent : undefined"
-              aria-valuemin="0"
-              aria-valuemax="100"
-            >
-              <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
-            </div>
-            <blockquote v-if="selectedWork.prompt" class="generation-prompt" :title="selectedWork.prompt">{{ selectedWork.prompt }}</blockquote>
-          </div>
-          <button type="button" class="new-creation-link generation-new-creation" @click="newCreation">
-            <Icon name="plus" size="sm" />新建创作
-          </button>
         </div>
 
         <div v-else-if="selectedWork" class="result-workspace">
           <div class="result-heading result-heading-complete">
-            <div>
+            <div class="result-heading-title">
               <p class="eyebrow">{{ selectedWork.status === 'pending' && !hasResultImages(selectedWork) ? '等待生成结果' : selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '生成未完成' : '生成结果' }}</p>
-              <h2>{{ selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '这次没有完成' : '本次创作' }}</h2>
-              <p>{{ resultMeta(selectedWork) }}</p>
+              <div class="result-heading-title-line">
+                <h2>{{ selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '这次没有完成' : '本次创作' }}</h2>
+                <span v-if="hasResultActions(selectedWork)" class="result-count-pill">
+                  {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : hasResultImages(selectedWork) && selectedWork.outputs.length < resultOutputCount(selectedWork) ? `${selectedWork.outputs.length} / ${resultOutputCount(selectedWork)} 张` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
+                </span>
+              </div>
             </div>
             <div class="result-heading-actions">
               <button type="button" class="icon-action danger" title="删除这条作品" aria-label="删除这条作品" @click="removeWork(selectedWork)">
-                <Icon name="trash" size="sm" />
+                <Icon name="trash" size="sm" /><span>删除</span>
               </button>
-              <span v-if="hasResultActions(selectedWork)" class="result-count-pill">
-                {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : hasResultImages(selectedWork) && selectedWork.outputs.length < resultOutputCount(selectedWork) ? `${selectedWork.outputs.length} / ${resultOutputCount(selectedWork)} 张` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
-              </span>
               <button
                 v-if="hasResultActions(selectedWork) && selectedWork.outputs.length"
                 type="button"
@@ -307,22 +337,22 @@
                 :title="selectedWork.type === 'image' ? '下载本页全部图片' : '下载全部视频片段'"
                 :disabled="Boolean(downloadingOutputKey)"
                 @click="downloadAllOutputs(selectedWork)"
-              ><Icon name="download" size="sm" />{{ downloadingOutputKey === `${selectedWork.id}:all` ? '正在下载...' : '一键下载' }}</button>
+              ><Icon name="download" size="sm" /><span>{{ downloadingOutputKey === `${selectedWork.id}:all` ? '正在下载...' : '一键下载' }}</span></button>
               <button
-                v-if="hasResultActions(selectedWork)"
+                v-if="hasRetryActions(selectedWork)"
                 type="button"
                 class="secondary-command"
                 :disabled="Boolean(regeneratingWorkId)"
                 @click="regenerateWork(selectedWork)"
-              >{{ regeneratingWorkId === selectedWork.id ? '准备生成...' : '重新生成' }}</button>
-              <button v-if="hasResultActions(selectedWork)" type="button" class="secondary-command primary-soft" @click="continueCreating">新建创作</button>
+              ><Icon name="refresh" size="sm" /><span>{{ regeneratingWorkId === selectedWork.id ? '准备生成...' : '重新生成' }}</span></button>
+              <button v-if="hasRetryActions(selectedWork)" type="button" class="secondary-command primary-soft" @click="continueCreating"><Icon name="plus" size="sm" /><span>新建创作</span></button>
             </div>
           </div>
 
           <div v-if="selectedWork.status === 'failed' && !hasPartialImages(selectedWork)" class="result-error">
             <Icon name="exclamationTriangle" size="lg" />
             <strong>生成失败</strong>
-            <p>{{ selectedWork.error || '请检查模型与参数后重试。' }}</p>
+            <p>{{ localizeSvgGenerationError(selectedWork.error || '请检查模型与参数后重试。') }}</p>
             <button
               v-if="isVideoDownloadFailure(selectedWork)"
               type="button"
@@ -361,8 +391,8 @@
               <div class="result-actions video-loading-actions">
                 <div class="result-description">
                   <strong>{{ isMultiShotVideo(selectedWork) ? '完整成片' : '视频结果' }}</strong>
-                  <span class="result-model" :title="selectedWork.model">{{ modelLabel(selectedWork.model) }}</span>
-                  <span class="result-meta"><span v-for="(part, partIndex) in metaParts(workResolutionLabel(selectedWork))" :key="partIndex">{{ part }}</span></span>
+                  <span class="result-model" :title="selectedWork.model">{{ videoModelLabel(selectedWork.model) }}</span>
+                  <span class="result-meta"><span v-for="(part, partIndex) in metaParts(videoResolutionTierLabel(selectedWork))" :key="partIndex">{{ part }}</span></span>
                 </div>
               </div>
             </article>
@@ -406,9 +436,9 @@
               />
               <footer>
                 <div>
-                  <strong>完整视频</strong>
+                  <strong>{{ videoProviderLabel(selectedWork.model) }} 视频 · 完整视频</strong>
                   <ul class="result-tags">
-                    <li v-for="(part, partIndex) in metaParts(selectedWork.model, selectedWork.aspectRatio || '自动画幅', workResolutionLabel(selectedWork))" :key="partIndex" :title="part">{{ part }}</li>
+                    <li v-for="(part, partIndex) in completeVideoResultTags(selectedWork)" :key="partIndex" :title="part">{{ part }}</li>
                   </ul>
                 </div>
                 <a :href="selectedWork.mergedOutput" :download="mergedDownloadName(selectedWork)" class="secondary-command primary-soft" title="下载完整视频">
@@ -437,8 +467,8 @@
               <CreatorImage
                 v-if="selectedWork.type === 'image'"
                 class="result-media"
-                :class="{ landscape: resultIsLandscape(selectedWork), fitted: resultIsFitted(selectedWork) }"
-                :style="resultMediaStyle(selectedWork)"
+                :class="{ landscape: resultIsLandscape(selectedWork, index), fitted: resultIsFitted(selectedWork, index) }"
+                :style="resultMediaStyle(selectedWork, index)"
                 :src="output"
                 :cache-key="`${selectedWork.id}:${selectedWork.updatedAt}:${index}`"
                 downscale
@@ -458,7 +488,7 @@
               />
               <div class="result-actions">
                 <div class="result-description">
-                  <strong>{{ selectedWork.type === 'video' ? `镜头 ${shotIndexForOutput(selectedWork, index) + 1}` : selectedWork.provider }}</strong>
+                  <strong>{{ selectedWork.type === 'video' ? videoShotTitle(selectedWork, index) : selectedWork.provider }}</strong>
                   <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -489,8 +519,18 @@
                     <Icon name="plus" size="sm" />
                   </button>
                 </div>
-                <ul class="result-tags">
-                  <li v-for="(part, partIndex) in metaParts(selectedWork.model, workAspectRatio(selectedWork), workResolutionLabel(selectedWork, index))" :key="partIndex" :title="part">{{ part }}</li>
+                <ul v-if="selectedWork.type === 'image'" class="result-tags">
+                  <li v-for="(part, partIndex) in metaParts(
+                    modelLabel(selectedWork.model),
+                    imageAspectRatioLabel(selectedWork, index),
+                    imageDimensionsLabel(selectedWork, index),
+                    outputFormatLabel(output) || selectedWork.outputFormat?.toUpperCase(),
+                    selectedWork.outputFormat === 'gif' && selectedWork.frameCount ? `${selectedWork.frameCount} 帧` : undefined,
+                    selectedWork.referenceCount ? `${selectedWork.referenceCount} 张参考图` : undefined,
+                  )" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
+                <ul v-else class="result-tags">
+                  <li v-for="(part, partIndex) in videoResultTags(selectedWork, index)" :key="partIndex" :title="part">{{ part }}</li>
                 </ul>
               </div>
             </article>
@@ -510,7 +550,7 @@
               />
               <div class="result-actions">
                 <div class="result-description">
-                  <strong>镜头 {{ shotIndexForOutput(selectedWork, index) + 1 }}</strong>
+                  <strong>{{ videoShotTitle(selectedWork, index) }}</strong>
                   <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
                 </div>
                 <div class="result-media-actions">
@@ -525,7 +565,7 @@
                   <button type="button" class="icon-action" title="新建创作" @click="continueCreating"><Icon name="plus" size="sm" /></button>
                 </div>
                 <ul class="result-tags">
-                  <li v-for="(part, partIndex) in metaParts(shotDurationLabel(selectedWork, index), workAspectRatio(selectedWork, index), workResolutionLabel(selectedWork, index), shotGenerationMeta(selectedWork, index))" :key="partIndex" :title="part">{{ part }}</li>
+                  <li v-for="(part, partIndex) in videoResultTags(selectedWork, index)" :key="partIndex" :title="part">{{ part }}</li>
                 </ul>
               </div>
             </article>
@@ -533,8 +573,8 @@
 
           <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
             <Icon :name="checkingVideoHistory ? 'refresh' : 'clock'" size="lg" :class="{ 'status-check-icon': checkingVideoHistory }" />
-            <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在检查任务状态' : '任务仍在处理中' }}</strong>
-            <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在向视频服务查询最新进度，请稍候。' : '任务 ID 已保存在本地，可随时重新检查状态。' }}</p>
+            <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在同步状态' : '视频还在生成中' }}</strong>
+            <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在获取最新进度，请稍候。' : '任务已保存，可随时点击下方按钮同步最新进度。' }}</p>
             <div v-if="selectedWork.type === 'image'" class="pending-image-actions">
               <button type="button" class="secondary-command primary-soft image-refresh-command" @click="refreshImageWork(selectedWork)">刷新生成结果</button>
               <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数</button>
@@ -547,7 +587,7 @@
               @click="refreshVideoWork(selectedWork)"
             >
               <Icon name="refresh" size="xs" />
-              {{ checkingVideoHistory ? '正在检查...' : '检查任务状态' }}
+              {{ checkingVideoHistory ? '同步中...' : '同步状态' }}
             </button>
             <div
               v-if="selectedVideoHistoryFeedback && !checkingVideoHistory"
@@ -770,8 +810,9 @@
               <option v-if="loadingModels && !selectableModelOptions.length" value="">正在读取可用模型...</option>
               <option v-else-if="referenceVideoModelUnavailable" value="">没有支持参考图的视频模型</option>
               <option v-else-if="!selectableModelOptions.length" value="">请先创建 Key</option>
-              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ modelLabel(model) }}</option>
+              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ miniMaxH3Tier(model)?.optionLabel || modelLabel(model) }}</option>
             </select>
+            <small v-if="selectedMiniMaxTierHint" data-testid="minimax-tier-hint">{{ selectedMiniMaxTierHint }}</small>
             <small v-if="selectedSeedanceTier" data-testid="seedance-tier-hint">{{ seedanceTierHint(selectedSeedanceTier) }}</small>
             <small v-if="referenceVideoModelUnavailable" class="model-compatibility-error">当前分组没有 Grok Imagine Video 1.5 或 MiniMax H3，无法使用参考图生视频</small>
           </div>
@@ -881,7 +922,7 @@
               <div><label>{{ referenceFieldLabel }}</label><small>{{ referenceHint }}</small></div>
               <button type="button" class="inline-command" :disabled="processingReferenceImages" @click="openFilePicker"><Icon name="upload" size="sm" /> 添加</button>
             </div>
-            <input ref="fileInput" type="file" class="sr-only" accept="image/png,image/jpeg,image/webp" :multiple="maxReferenceImages > 1" :disabled="processingReferenceImages" @change="handleFileInput" />
+            <input ref="fileInput" type="file" class="sr-only" accept="image/png,image/jpeg,image/webp,image/gif" :multiple="maxReferenceImages > 1" :disabled="processingReferenceImages" @change="handleFileInput" />
             <button
               type="button"
               class="upload-zone"
@@ -929,7 +970,10 @@
                   <option value="png">PNG</option>
                   <option value="jpeg">JPEG</option>
                   <option value="webp">WebP</option>
+                  <option value="gif">GIF</option>
+                  <option value="svg" :disabled="referenceImages.length > 0">SVG{{ referenceImages.length ? '（不支持参考图）' : '' }}</option>
                 </select>
+                <small v-if="outputFormat === 'svg'">SVG 矢量图只支持文生图，每次 1 张；画面质量用于内部参考图。</small>
               </div>
             </div>
 
@@ -942,6 +986,18 @@
                   <option value="medium">中</option>
                   <option value="high">高</option>
                 </select>
+              </div>
+              <div v-if="outputFormat === 'gif'" class="gif-frame-fields">
+                <div class="field-block">
+                  <label for="creator-gif-frames">帧数</label>
+                  <input id="creator-gif-frames" v-model.number="gifFrameCount" type="number" inputmode="numeric" :min="GIF_FRAME_COUNT_RANGE.min" :max="GIF_FRAME_COUNT_RANGE.max" :step="GIF_FRAME_COUNT_RANGE.step" aria-describedby="creator-gif-frames-help" class="studio-input" @change="gifFrameCount = clampGifSetting(gifFrameCount, GIF_FRAME_COUNT_RANGE)" />
+                  <small id="creator-gif-frames-help">范围 {{ GIF_FRAME_COUNT_RANGE.min }}–{{ GIF_FRAME_COUNT_RANGE.max }} 帧，默认 {{ GIF_FRAME_COUNT_RANGE.fallback }} 帧。决定一轮动画包含多少张画面，不是每秒帧数（FPS）。</small>
+                </div>
+                <div class="field-block">
+                  <label for="creator-gif-duration">每帧时长（毫秒）</label>
+                  <input id="creator-gif-duration" v-model.number="gifFrameDurationMs" type="number" inputmode="numeric" :min="GIF_FRAME_DURATION_RANGE.min" :max="GIF_FRAME_DURATION_RANGE.max" :step="GIF_FRAME_DURATION_RANGE.step" aria-describedby="creator-gif-duration-help" class="studio-input" @change="gifFrameDurationMs = clampGifSetting(gifFrameDurationMs, GIF_FRAME_DURATION_RANGE)" />
+                  <small id="creator-gif-duration-help">范围 {{ GIF_FRAME_DURATION_RANGE.min }}–{{ GIF_FRAME_DURATION_RANGE.max }} 毫秒（0.02–2 秒），默认 {{ GIF_FRAME_DURATION_RANGE.fallback }} 毫秒，按 {{ GIF_FRAME_DURATION_RANGE.step }} 毫秒调整。每张画面停留的时间；越小播放越快，越大播放越慢。</small>
+                </div>
               </div>
             </div>
 
@@ -1254,6 +1310,7 @@ import {
   submitCreatorImageTask,
   type ImageGenerationResult,
   getCreatorImagePricing,
+  getCreatorSeedanceCatalog,
   getCreatorVideoPricing,
   type CreatorVideoPricing,
   type CreatorImagePricing,
@@ -1269,7 +1326,7 @@ import {
   MINIMAX_H3_STUDIO_MODELS,
   miniMaxH3Tier,
 } from '@/utils/miniMaxH3'
-import { isSeedanceVideoModel, SEEDANCE_FALLBACK_MODELS, SEEDANCE_VIDEO_PRICE_FAMILY, SEEDANCE_VIDEO_TIERS, seedanceTierHint, seedanceVideoTier, snapSeedanceSeconds } from '@/utils/seedanceVideo'
+import { applySeedanceCatalog, isGrokRelayVideoModel, isSeedanceVideoModel, SEEDANCE_VIDEO_PRICE_FAMILY, seedanceCatalogModels, seedanceFallbackModels, seedanceTierHint, seedanceVideoTier, snapSeedanceSeconds } from '@/utils/seedanceVideo'
 import {
   creatorHistory,
   type CreatorHistoryItem,
@@ -1300,10 +1357,10 @@ const VIDEO_SUBMISSION_RETRY_DELAYS_MS = [2000, 5000] as const
 // A submitted task keeps rendering upstream, so a few failed status checks
 // must not discard it (H3 renders for minutes and one 502 is common).
 const VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES = 5
-// A finished video is only charged once fully delivered, so a broken download
-// is retried against the same task and never needs a new submission.
+// A finished video is charged once, when the upstream completes, so a broken
+// download is retried against the same task and never needs a new submission.
 const VIDEO_CONTENT_RETRY_DELAYS_MS = [3000, 8000] as const
-const VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE = '视频已生成，但下载时连接中断。视频未扣费，点击“重新加载视频”即可继续获取，无需重新生成。'
+const VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE = '视频已生成，但下载时连接中断。点击“重新加载视频”即可继续获取，不会重复扣费，无需重新生成。'
 
 class VideoContentDownloadError extends Error {}
 
@@ -1341,6 +1398,8 @@ interface ImageGenerationSnapshot {
   size: string
   quality: string
   outputFormat: string
+  frameCount?: number
+  frameDurationMs?: number
   background: string
   referenceFiles: File[]
   aspectRatio: string
@@ -1369,7 +1428,6 @@ interface ResumedVideoShots {
   outputBlobs: Blob[]
   failedShots: number[]
   lastError?: unknown
-  nextIndex: number
 }
 
 const imageTemplates: PromptTemplate[] = [
@@ -1681,7 +1739,7 @@ const prompt = ref('')
 const referenceImages = ref<ReferenceImage[]>([])
 const aspectRatio = ref('1:1')
 const imageResolution = ref('1K')
-const imageSizeMode = ref<ImageSizeMode>('ratio')
+const imageSizeMode = ref<ImageSizeMode>('auto')
 const imageCustomWidth = ref(1024)
 const imageCustomHeight = ref(1024)
 const imageSizeDialogOpen = ref(false)
@@ -1699,6 +1757,28 @@ const videoGenerationMethod = ref<VideoGenerationMethod>('text')
 const videoFollowSourceAspect = ref(true)
 const imageQuality = ref('auto')
 const outputFormat = ref('png')
+// GPT Image 2.6 GIF output (official guide): 2–16 frames, default 9; 20–2000ms per frame
+// rounded to 10ms, default 200. `size` is per frame and all frames share one request pixel
+// budget, so a 4K frame size cannot fit; GIF defaults to size "auto".
+const GIF_FRAME_COUNT_RANGE = { min: 2, max: 16, fallback: 9, step: 1 }
+const GIF_FRAME_DURATION_RANGE = { min: 20, max: 2000, fallback: 200, step: 10 }
+const gifFrameCount = ref(GIF_FRAME_COUNT_RANGE.fallback)
+const gifFrameDurationMs = ref(GIF_FRAME_DURATION_RANGE.fallback)
+function clampGifSetting(value: unknown, range: { min: number; max: number; fallback: number; step: number }) {
+  const number = Math.round(Number(value) / range.step) * range.step
+  return Number.isFinite(number) && number > 0 ? Math.min(range.max, Math.max(range.min, number)) : range.fallback
+}
+watch(outputFormat, (format, previous) => {
+  if (format === 'gif' && previous !== 'gif' && imageCapability.value === 'image2') imageSizeMode.value = 'auto'
+})
+// SVG output is generations-only; the edits endpoint (used with reference images) cannot return it.
+watch(() => referenceImages.value.length, count => {
+  if (count > 0 && outputFormat.value === 'svg') {
+    outputFormat.value = 'png'
+    // Reusing a work includes the format change in its success notification.
+    if (!referencingOutputKey.value) appStore.showWarning('SVG 输出不支持参考图，已切换为 PNG')
+  }
+})
 const outputCount = ref(1)
 const videoDuration = ref(8)
 const professionalVideo = ref(false)
@@ -1742,8 +1822,12 @@ interface GenerationTask {
   percent: number
   progress: string
   startedAt: number
-  /** Images of this task that failed; their frames are marked instead of queued. */
+  /** Images of this task that failed; their frames are marked instead of drawing. */
   failedCount?: number
+  /** Video shots that finished; indexed by original shot number. */
+  shotOutputs?: Map<number, string>
+  /** Video shots that failed upstream (not download interruptions). */
+  failedShots?: Set<number>
 }
 // Each request owns its state and immutable inputs. Browsing or starting another
 // creation only changes the selection, never the request that is already running.
@@ -1890,6 +1974,9 @@ const videoDurationRange = computed(() => selectedVideoRelayTier.value
   ? { min: selectedVideoRelayTier.value.minSeconds, max: selectedVideoRelayTier.value.maxSeconds }
   : { min: 1, max: 15 })
 const selectedSeedanceTier = computed(() => studioMode.value === 'video' ? seedanceVideoTier(selectedModel.value) : null)
+const selectedMiniMaxTierHint = computed(() => studioMode.value === 'video'
+  ? miniMaxH3Tier(selectedModel.value)?.label.split(' · ').slice(1).join(' · ') || ''
+  : '')
 const videoAspectRatios = computed(() => selectedVideoRelayTier.value
   ? selectedVideoRelayTier.value.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
   : GROK_VIDEO_ASPECT_RATIOS)
@@ -1986,12 +2073,13 @@ const maxReferenceImages = computed(() => {
   if (imageCapability.value === 'image2') return 16
   return 3
 })
-const maxOutputCount = computed(() => isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
+// GPT Image 2.6 SVG output only allows n=1.
+const maxOutputCount = computed(() => (imageCapability.value === 'image2' && outputFormat.value === 'svg') || isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
 const referenceFieldVisible = computed(() => studioMode.value === 'image' || activeVideoGenerationMethod.value !== 'text')
 const referenceFieldLabel = computed(() => studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image' ? '源图' : '参考图')
 const referenceHint = computed(() => {
   if (studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image') return '必选，仅 1 张，作为当前镜头首帧'
-  if (studioMode.value === 'video') return `必选，最多 ${referenceVideoImageLimit.value} 张，仅支持 Grok Imagine Video 1.5 / MiniMax H3`
+  if (studioMode.value === 'video') return `必选，最多 ${referenceVideoImageLimit.value} 张`
   return `可选，最多 ${maxReferenceImages.value} 张`
 })
 const referenceUploadDescription = computed(() => {
@@ -2246,35 +2334,72 @@ const professionalVideoReferenceError = computed(() => {
     ? `镜头 ${index + 1} 的图生视频需要 1 张源图`
     : `镜头 ${index + 1} 的参考图生视频至少需要 1 张参考图`
 })
-// One placeholder per requested image, shaped like the requested ratio, so
-// finished images appear in place while the next one is still drawing.
+// One placeholder per requested image or video shot, shaped like the requested ratio, so
+// finished items appear in place while the others are still drawing.
 const generationFrames = computed(() => {
   const work = selectedWork.value
-  if (!work || !selectedGeneration.value) return []
-  const count = work.type === 'image' ? Math.max(1, work.outputCount || 1) : 1
-  const failedFrom = count - (selectedGeneration.value.failedCount || 0)
-  return Array.from({ length: count }, (_, index) => {
-    const output = work.type === 'image' ? work.outputs[index] : undefined
-    const state = output ? 'done'
-      : index >= failedFrom ? 'failed'
-        : index === work.outputs.length || work.type === 'video' ? 'current' : 'queued'
+  const task = selectedGeneration.value
+  if (!work || !task) return []
+  if (work.type === 'image') {
+    const count = Math.max(1, work.outputCount || 1)
+    const failedFrom = count - (task.failedCount || 0)
+    return Array.from({ length: count }, (_, index) => {
+      const output = work.outputs[index]
+      // All remaining images are requested at once, so every empty frame is drawing.
+      const state = output ? 'done' : index >= failedFrom ? 'failed' : 'current'
+      return { index, output, state }
+    })
+  }
+  // Video: one frame per shot, showing finished shots immediately.
+  const shotCount = work.shotCount || 1
+  if (shotCount === 1) {
+    return [{ index: 0, output: work.outputs[0], state: work.outputs[0] ? 'done' : 'current' }]
+  }
+  return Array.from({ length: shotCount }, (_, index) => {
+    const output = task.shotOutputs?.get(index)
+    const state = output ? 'done' : task.failedShots?.has(index) ? 'failed' : 'current'
     return { index, output, state }
   })
 })
+// Video shots wrap after two per row; images use the same cap on mobile.
+const generationColumns = computed(() => {
+  const count = generationFrames.value.length || 1
+  return generationMode.value === 'video' ? Math.min(count, 2) : count
+})
+const generationStageStyle = computed(() => ({
+  '--generation-columns': generationColumns.value,
+  '--generation-mobile-columns': Math.min(generationFrames.value.length || 1, 2),
+}))
 const generationFrameStyle = computed(() => {
   const [ratioWidth, ratioHeight] = (selectedWork.value?.aspectRatio || '').split(':').map(Number)
   const width = ratioWidth > 0 ? ratioWidth : 1
   const height = ratioHeight > 0 ? ratioHeight : 1
   const count = generationFrames.value.length || 1
+  const columns = generationColumns.value
+  const rows = Math.ceil(count / columns)
   const ratio = Math.round((width / height) * 10000) / 10000
-  // Row width and frame height come from CSS so the frames scale with the canvas;
-  // a single frame keeps ~86% of the row, multiple frames share it with 12px gaps.
+  const singleImage = generationMode.value === 'image' && count === 1
+  // Row width and frame height come from CSS so the frames scale with the canvas.
+  // Single frames fill the available row so their side gaps match the workspace;
+  // multiple frames share the row with 12px gaps.
   const share = count === 1
-    ? 'var(--generation-row-width) * 0.86'
-    : `(var(--generation-row-width) - ${12 * (count - 1)}px) / ${count}`
+    ? 'var(--generation-row-width)'
+    : `(var(--generation-row-width) - ${12 * (columns - 1)}px) / ${columns}`
+  // Wrapped rows split the frame height so the whole grid stays about one frame tall.
+  // A single portrait image is capped at 72vh so it stays on screen.
+  const frameHeight = rows === 1
+    ? (singleImage ? 'min(var(--generation-frame-height), 72vh)' : 'var(--generation-frame-height)')
+    : `max(140px, (var(--generation-frame-height) - ${12 * (rows - 1)}px) / ${rows})`
+  // Landscape and square single images are not height-capped; the canvas scrolls instead.
+  const frameWidth = singleImage && ratio >= 1
+    ? `calc(${share})`
+    : `min(calc(${share}), calc(${frameHeight} * ${ratio}))`
   return {
-    '--generation-frame-width': `min(calc(${share}), calc(var(--generation-frame-height) * ${ratio}))`,
-    aspectRatio: `${width} / ${height}`,
+    '--generation-frame-width': frameWidth,
+    '--generation-frame-height-ring-size': `${50 * height / width}cqi`,
+    // Desktop video placeholders fill the available canvas; media stays contained.
+    aspectRatio: generationMode.value === 'image' ? `${width} / ${height}` : undefined,
+    '--generation-frame-aspect-ratio': `${width} / ${height}`,
     // Mobile frames stretch to the gutter; cap each at 480px tall so portrait ratios stay on screen.
     '--generation-frame-mobile-max': `${Math.round((width / height) * 480)}px`,
   }
@@ -2314,7 +2439,7 @@ function groupMatchesCurrentCapability(group: Group) {
 function fallbackModels() {
   if (studioMode.value === 'video') {
     if (videoCapability.value === 'minimax') return [...MINIMAX_H3_STUDIO_MODELS]
-    if (videoCapability.value === 'seedance') return [...SEEDANCE_FALLBACK_MODELS]
+    if (videoCapability.value === 'seedance') return seedanceFallbackModels()
     return ['grok-imagine-video', 'grok-imagine-video-1.5']
   }
   if (imageCapability.value === 'grok') return ['grok-imagine-image', 'grok-imagine-image-quality']
@@ -2335,9 +2460,24 @@ function modelLabel(model: string) {
   return miniMaxH3Tier(model)?.label || seedanceVideoTier(model)?.name || model
 }
 
+function videoModelLabel(model: string) {
+  return modelLabel(model).split(' · ')[0]
+}
+
+function videoResolutionTierLabel(work: CreatorHistoryItem, index?: number) {
+  return workResolutionLabel(work, index).split(' · ')[0]
+}
+
+// Grok video IDs name Grok or video; other relay IDs are Seedance lines, even
+// ones since dropped from the administrator's catalog (e.g. OOsd2.5 history).
+function videoCapabilityForModel(model: string): VideoCapability {
+  if (isMiniMaxH3Model(model)) return 'minimax'
+  if (isSeedanceVideoModel(model)) return isGrokRelayVideoModel(model) ? 'grok' : 'seedance'
+  return /grok|video/i.test(model) ? 'grok' : 'seedance'
+}
+
 function videoProviderLabel(model: string) {
-  if (isMiniMaxH3Model(model)) return 'MiniMax H3'
-  return isSeedanceVideoModel(model) ? 'Seedance' : 'Grok'
+  return { minimax: 'MiniMax H3', seedance: 'Seedance', grok: 'Grok' }[videoCapabilityForModel(model)]
 }
 
 function videoGenerationMethodLabelFor(method: VideoGenerationMethod) {
@@ -2367,14 +2507,12 @@ function syncVideoModelForGenerationMethod() {
 function preferredModel() {
   if (studioMode.value === 'video') {
     if (videoCapability.value === 'minimax') return MINIMAX_H3_STUDIO_MODELS[0]
-    return videoCapability.value === 'seedance' ? SEEDANCE_FALLBACK_MODELS[0] : 'grok-imagine-video'
+    return videoCapability.value === 'seedance' ? seedanceFallbackModels()[0] : 'grok-imagine-video'
   }
   if (imageCapability.value === 'grok') return 'grok-imagine-image'
   if (imageCapability.value === 'image2') return 'gpt-image-2'
   return 'gemini-3-pro-image-preview'
 }
-
-const seedanceCatalogOrder = Object.keys(SEEDANCE_VIDEO_TIERS)
 
 function filterModels(models: string[]) {
   const clean = Array.from(new Set(models.map(model => model.trim()).filter(Boolean)))
@@ -2384,15 +2522,27 @@ function filterModels(models: string[]) {
     const prices = selectedGroup.value?.video_model_prices
     const relayPriced = (model: string) => !prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || model.toLowerCase() in prices[SEEDANCE_VIDEO_PRICE_FAMILY]
     if (videoCapability.value === 'minimax') {
-      return clean.filter(model => isMiniMaxH3StudioModel(model) && (!miniMaxH3Tier(model)?.zhongheng || model.toLowerCase() in (prices?.['minimax-h3'] || {})))
+      return clean
+        .filter(model => isMiniMaxH3StudioModel(model) && (!miniMaxH3Tier(model)?.zhongheng || model.toLowerCase() in (prices?.['minimax-h3'] || {})))
+        .sort((a, b) => {
+          const tierA = miniMaxH3Tier(a)
+          const tierB = miniMaxH3Tier(b)
+          const resolutionOrder = (tier: typeof tierA) => tier?.resolution === '768p' ? 0 : 1
+          return resolutionOrder(tierA) - resolutionOrder(tierB)
+            || Number(Boolean(tierA?.zhongheng)) - Number(Boolean(tierB?.zhongheng))
+        })
     }
     // List Seedance in catalog order, so lines of the same model stay together.
     if (videoCapability.value === 'seedance') {
+      const order = seedanceCatalogModels().map(([model]) => model)
       return clean
-        .filter(model => isSeedanceVideoModel(model) && relayPriced(model))
-        .sort((a, b) => seedanceCatalogOrder.indexOf(a.toLowerCase()) - seedanceCatalogOrder.indexOf(b.toLowerCase()))
+        .filter(model => isSeedanceVideoModel(model) && !isGrokRelayVideoModel(model) && relayPriced(model))
+        .sort((a, b) => order.indexOf(a.toLowerCase()) - order.indexOf(b.toLowerCase()))
     }
-    return clean.filter(model => /video/i.test(model) && !isMiniMaxH3Model(model))
+    // Grok groups also sell relay Grok lines priced under the Seedance family.
+    return clean.filter(model => isGrokRelayVideoModel(model)
+      ? model.toLowerCase() in (prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || {})
+      : /video/i.test(model) && !isMiniMaxH3Model(model) && !isSeedanceVideoModel(model))
   }
   if (imageCapability.value === 'grok') return clean.filter(model => /grok.*imag.*image|grok-imagine$/i.test(model))
   if (imageCapability.value === 'image2') {
@@ -2435,6 +2585,15 @@ async function loadModels() {
   }
   loadingModels.value = true
   try {
+    // The administrator's Seedance catalog names the models and their limits;
+    // without it the built-in catalog applies.
+    if (studioMode.value === 'video' && (videoCapability.value === 'seedance' || videoCapability.value === 'grok')) {
+      try {
+        applySeedanceCatalog(await getCreatorSeedanceCatalog(key.key))
+      } catch {
+        // Keep the catalog already in use.
+      }
+    }
     const remoteModels = await listCreatorModels(key.key)
     if (sequence !== modelRequestSequence) return
     const filtered = filterModels(remoteModels.map(model => typeof model === 'string' ? model : model.id))
@@ -2601,7 +2760,6 @@ async function switchMode(mode: StudioMode) {
 function useTemplate(template: PromptTemplate) {
   editorPrompt.value = template.prompt
   appStore.showSuccess(`已填入「${template.title}」，请确认生成参数`)
-  revealSettingsOnMobile()
 }
 
 // On mobile the settings sit below the canvas; take the user straight to them.
@@ -2771,6 +2929,24 @@ function handlePaste(event: ClipboardEvent) {
   if (files.length) void addReferenceFiles(files)
 }
 
+// Generation endpoints take PNG/JPEG/WebP references; an animated GIF is flattened to its first frame.
+async function gifFirstFrameAsPng(file: File): Promise<File> {
+  const bitmap = await createImageBitmap(file)
+  try {
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width
+    canvas.height = bitmap.height
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('无法读取 GIF')
+    context.drawImage(bitmap, 0, 0)
+    const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'))
+    if (!blob) throw new Error('无法读取 GIF')
+    return new File([blob], file.name.replace(/\.gif$/i, '') + '.png', { type: 'image/png' })
+  } finally {
+    bitmap.close()
+  }
+}
+
 async function addReferenceFiles(files: File[]) {
   if (processingReferenceImages.value) return
   const targetReferences = activeReferenceImages.value
@@ -2781,7 +2957,13 @@ async function addReferenceFiles(files: File[]) {
     return
   }
   const validFiles: File[] = []
-  for (const file of files) {
+  for (let file of files) {
+    if (file.type === 'image/gif') {
+      try { file = await gifFirstFrameAsPng(file) } catch {
+        appStore.showError(`${file.name} 无法读取`)
+        continue
+      }
+    }
     if (!['image/png', 'image/jpeg', 'image/webp'].includes(file.type)) {
       appStore.showError(`${file.name} 不是支持的图片格式`)
       continue
@@ -3052,6 +3234,10 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
         size: sizeForImage(),
         quality: imageQuality.value,
         outputFormat: outputFormat.value,
+        ...(outputFormat.value === 'gif' ? {
+          frameCount: clampGifSetting(gifFrameCount.value, GIF_FRAME_COUNT_RANGE),
+          frameDurationMs: clampGifSetting(gifFrameDurationMs.value, GIF_FRAME_DURATION_RANGE),
+        } : {}),
         background: 'auto',
         referenceFiles: referenceImages.value.map(reference => reference.file),
         aspectRatio: taskAspectRatio,
@@ -3089,6 +3275,8 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     imageSizeMode: taskMode === 'image' ? imageSnapshot?.sizeMode : undefined,
     quality: taskMode === 'image' ? imageSnapshot?.quality : undefined,
     outputFormat: taskMode === 'image' ? imageSnapshot?.outputFormat : undefined,
+    frameCount: taskMode === 'image' ? imageSnapshot?.frameCount : undefined,
+    frameDurationMs: taskMode === 'image' ? imageSnapshot?.frameDurationMs : undefined,
     background: taskMode === 'image' ? imageSnapshot?.background : undefined,
     referenceCount: taskReferenceCount,
     videoGenerationMethod: taskMode === 'video' ? videoSnapshot?.shots[0]?.generationMethod : undefined,
@@ -3281,6 +3469,8 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     size: input.size,
     quality: input.quality,
     outputFormat: input.outputFormat,
+    frameCount: input.frameCount,
+    frameDurationMs: input.frameDurationMs,
     background: 'auto',
     // Grok may return temporary cross-origin URLs that browsers cannot save
     // through the download attribute. Base64 keeps the result self-contained.
@@ -3332,7 +3522,42 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   // One failed image must not discard the images that already succeeded.
   let lastError: unknown
   task.failedCount = 0
-  for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
+  if (requestsSingleImage && requestAttempts > 1) {
+    // Single-image requests run all at once; each image is saved as soon as
+    // it finishes, so a slow or failed one never holds back the others.
+    let finished = 0
+    const updateProgress = () => {
+      const failedNote = task.failedCount ? `，${task.failedCount} 张失败` : ''
+      task.progress = `正在同时生成 ${requestAttempts} 张图片（已完成 ${finished} 张${failedNote}）`
+    }
+    updateProgress()
+    let pendingError: ImageTaskPendingError | undefined
+    let saveError: unknown
+    await Promise.all(Array.from({ length: requestAttempts }, async (_, index) => {
+      let generated
+      try {
+        generated = await generateWithRetry(index)
+      } catch (error) {
+        if (error instanceof ImageTaskPendingError) pendingError ??= error
+        else lastError = error
+        task.failedCount = (task.failedCount || 0) + 1
+        updateProgress()
+        return
+      }
+      try {
+        await saveImageBatch(work, generated.result, generated.taskId, input)
+        finished++
+      } catch (error) {
+        saveError ??= error
+      }
+      updateProgress()
+    }))
+    outputs.splice(0, outputs.length, ...work.outputs)
+    // Unfinished server tasks stay in imageTaskIds for a later refresh.
+    if (pendingError) throw pendingError
+    if (saveError) throw saveError
+  }
+  else for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
     const failedNote = task.failedCount ? `（${task.failedCount} 张失败）` : ''
     task.progress = requestCount > 1
       ? `正在生成第 ${initialOutputCount + index + 1} / ${requestCount} 张图片${failedNote}`
@@ -3360,13 +3585,28 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   }
 }
 
-type ImageBatchSettings = Pick<ImageGenerationSnapshot, 'apiKey' | 'capability' | 'outputCount' | 'sizeMode' | 'aspectRatio' | 'size'>
+type ImageBatchSettings = Pick<ImageGenerationSnapshot, 'apiKey' | 'capability' | 'outputCount' | 'sizeMode' | 'aspectRatio' | 'size'> & { outputFormat?: string }
+
+// GIF / SVG cannot be converted in the browser. When the upstream ignores the requested
+// format (e.g. returns a PNG for SVG), tell the user the channel is at fault.
+const SPECIAL_IMAGE_FORMAT_MIME: Record<string, { mime: string; label: string }> = {
+  gif: { mime: 'image/gif', label: 'GIF' },
+  svg: { mime: 'image/svg+xml', label: 'SVG' },
+}
+function warnIgnoredSpecialFormat(outputs: string[], format: string | undefined) {
+  const expected = SPECIAL_IMAGE_FORMAT_MIME[(format || '').toLowerCase()]
+  if (!expected) return
+  const actual = outputs
+    .map(output => /^data:(image\/[a-z0-9.+-]+)[;,]/i.exec(output)?.[1]?.toLowerCase())
+    .find(mime => mime && mime !== expected.mime)
+  if (!actual) return
+  appStore.showWarning(`当前上游渠道没有按 ${expected.label} 输出，实际返回了 ${outputFormatLabel(`data:${actual};`) || actual}。请切换支持 GPT Image 2.6 ${expected.label} 输出的创作分组或渠道。`, 8000)
+}
 
 // Saves one finished request into the work, and forgets its server task in the
 // same write so a refresh never loads the same image twice.
 async function saveImageBatch(work: CreatorHistoryItem, result: ImageGenerationResult, taskId: string | undefined, input: ImageBatchSettings) {
   const requestCount = Math.max(1, input.outputCount || 1)
-  const outputs = [...work.outputs]
   const batchOutputs: string[] = []
   for (const item of result.data) {
     if (!item.url) continue
@@ -3378,18 +3618,19 @@ async function saveImageBatch(work: CreatorHistoryItem, result: ImageGenerationR
       localSaveWarning.value = work.imagePersistenceError
     }
   }
-  if (input.capability !== 'image2') {
-    const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
-    work.upstreamImageSizes = [...(work.upstreamImageSizes || []), ...sourceSizes.slice(0, requestCount - outputs.length)]
-  }
-  const normalizedOutputs = input.sizeMode !== 'auto'
-    ? await Promise.all(batchOutputs.map(output => normalizeCreatorImageOutput(output, input.aspectRatio, input.size)))
-    : batchOutputs
-  outputs.push(...normalizedOutputs.slice(0, requestCount - outputs.length))
-  if (input.sizeMode !== 'auto' && /^\d+x\d+$/.test(input.size)) {
-    work.actualOutputSize = input.capability === 'image2' ? input.size : await readCreatorImageSize(normalizedOutputs[0] || '') || undefined
-  }
-  work.outputs = outputs
+  warnIgnoredSpecialFormat(batchOutputs, input.outputFormat)
+  // Save the provider bytes unchanged. Requested dimensions are generation
+  // parameters; they must never resize, crop or re-encode the finished image.
+  const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
+  // Concurrent requests save into the same work, so read its outputs only
+  // after every await and append synchronously to keep the other images.
+  const remaining = Math.max(0, requestCount - work.outputs.length)
+  const previousSizes = work.outputs.map((_, index) => work.imageOutputSizes?.[index] || '')
+  const previousUpstreamSizes = work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || '')
+  work.imageOutputSizes = [...previousSizes, ...sourceSizes.slice(0, remaining)]
+  work.upstreamImageSizes = [...previousUpstreamSizes, ...sourceSizes.slice(0, remaining)]
+  work.actualOutputSize = work.imageOutputSizes[0] || undefined
+  work.outputs = [...work.outputs, ...batchOutputs.slice(0, remaining)]
   if (taskId) work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
   work.updatedAt = Date.now()
   await persistWork(work)
@@ -3450,6 +3691,7 @@ async function resumeImageWork(work: CreatorHistoryItem) {
     sizeMode: work.imageSizeMode || 'auto',
     aspectRatio: work.aspectRatio || '',
     size: work.outputSize || '',
+    outputFormat: work.outputFormat || 'png',
   }
   const task = reactive<GenerationTask>({
     id: work.id,
@@ -3468,6 +3710,7 @@ async function resumeImageWork(work: CreatorHistoryItem) {
   }
   let lastError: unknown
   let interrupted = false
+  let taskFailed = false
   try {
     for (const taskId of taskIds) {
       try {
@@ -3482,6 +3725,7 @@ async function resumeImageWork(work: CreatorHistoryItem) {
           continue
         }
         lastError = error.cause
+        taskFailed = true
         work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
         await persistWork(work)
       }
@@ -3489,8 +3733,9 @@ async function resumeImageWork(work: CreatorHistoryItem) {
     // Image2 and Grok submit one task per image, so a refresh loses the
     // images that were not submitted yet. Submit them now from the saved
     // settings; reference uploads are not kept, so those works stop here.
+    // A failed task is final: resubmitting it would charge again unasked.
     let continued = false
-    if (!interrupted && work.outputs.length < requestCount && !work.referenceCount && work.model) {
+    if (!interrupted && !taskFailed && work.outputs.length < requestCount && !work.referenceCount && work.model) {
       continued = true
       const platform = groups.value.find(group => group.id === key.group_id)?.platform || key.group?.platform || ''
       try {
@@ -3501,6 +3746,8 @@ async function resumeImageWork(work: CreatorHistoryItem) {
           prompt: work.prompt,
           quality: work.quality || 'auto',
           outputFormat: work.outputFormat || 'png',
+          frameCount: work.frameCount,
+          frameDurationMs: work.frameDurationMs,
           background: work.background || 'auto',
           referenceFiles: [],
           resolution: work.resolution || '',
@@ -3523,7 +3770,9 @@ async function resumeImageWork(work: CreatorHistoryItem) {
     }
     if (work.outputs.length) {
       work.status = 'completed'
-      if (work.outputs.length < requestCount && !continued) {
+      if (work.outputs.length < requestCount && taskFailed) {
+        work.error = `已同步 ${work.outputs.length} / ${requestCount} 张；其余图片生成失败或任务已中断，请带回参数重新生成。`
+      } else if (work.outputs.length < requestCount && !continued) {
         work.error = `已同步 ${work.outputs.length} / ${requestCount} 张；其余图片在页面刷新前未提交，且参考图未保存，请带回参数继续生成。`
       }
     } else {
@@ -3651,43 +3900,42 @@ async function cropSourceImageToRatio(source: string, ratio: string) {
   return normalizeCreatorImageOutput(source, ratio, `${cropWidth}x${cropHeight}`)
 }
 
-async function normalizeHistoricalImageWork(work: CreatorHistoryItem) {
-  if (work.type === 'image' && work.imageCapability !== 'image2') {
-    if (work.upstreamImageSizes || !work.outputs.length) return
-    const sizes = await Promise.all(work.outputs.map(readCreatorImageSize))
-    if (!sizes.some(Boolean)) return
-    work.upstreamImageSizes = sizes
-    work.actualOutputSize = sizes[0] || undefined
-    await persistWork(work)
-    return
-  }
-  if (work.imageCapability !== 'image2' || work.imageSizeMode === 'auto' || !/^\d+x\d+$/.test(work.outputSize || '') || !work.outputs.length) return
-  if (work.actualOutputSize === work.outputSize) return
-  const requestedSize = work.outputSize || ''
-  const normalizedOutputs = await Promise.all(work.outputs.map(output => normalizeCreatorImageOutput(output, work.aspectRatio || '1:1', requestedSize)))
-  const changed = normalizedOutputs.some((output, index) => output !== work.outputs[index])
-  const hadActualSize = work.actualOutputSize === requestedSize
-  work.outputs = normalizedOutputs
-  work.actualOutputSize = requestedSize
-  if (changed || !hadActualSize) {
-    work.updatedAt = Date.now()
-    await persistWork(work)
-  }
+async function readHistoricalImageSizes(work: CreatorHistoryItem) {
+  if (work.type !== 'image' || !work.outputs.length) return
+  if (work.imageOutputSizes?.length === work.outputs.length && work.imageOutputSizes.every(Boolean)) return
+  const sizes = await Promise.all(work.outputs.map(readCreatorImageSize))
+  if (!sizes.some(Boolean)) return
+  // Older versions may have overwritten originals with resized files. Record
+  // the saved file dimensions without changing its bytes or upstream metadata.
+  work.imageOutputSizes = sizes.map((size, index) => size || work.imageOutputSizes?.[index] || '')
+  work.actualOutputSize = work.imageOutputSizes[0] || undefined
+  work.updatedAt = Date.now()
+  await persistWork(work)
   historyItems.value = historyItems.value.map(item => item.id === work.id ? cloneWork(work) : item)
   if (selectedWork.value?.id === work.id) selectedWork.value = cloneWork(work)
 }
 
 function imageDataUrlDimensions(output: string) {
-  // PNG dimensions live in the first 24 bytes. Never decode the entire 4K
+  // PNG / GIF dimensions live in the first 24 bytes. Never decode the entire 4K
   // payload just to read its header on a history selection.
-  const match = /^data:image\/png;base64,/i.exec(output.slice(0, 32))
+  const match = /^data:image\/(png|gif);base64,/i.exec(output.slice(0, 32))
   if (!match) return null
   try {
     const decoded = window.atob(output.slice(match[0].length, match[0].length + 128).replace(/\s/g, '').slice(0, 32))
-    if (decoded.length < 24 || decoded.slice(0, 8) !== '\x89PNG\r\n\x1a\n' || decoded.slice(12, 16) !== 'IHDR') return null
-    const view = new DataView(Uint8Array.from(decoded, character => character.charCodeAt(0)).buffer)
-    const width = view.getUint32(16)
-    const height = view.getUint32(20)
+    const bytes = Uint8Array.from(decoded, character => character.charCodeAt(0))
+    const view = new DataView(bytes.buffer)
+    let width = 0
+    let height = 0
+    if (match[1].toLowerCase() === 'png') {
+      if (decoded.length < 24 || decoded.slice(0, 8) !== '\x89PNG\r\n\x1a\n' || decoded.slice(12, 16) !== 'IHDR') return null
+      width = view.getUint32(16)
+      height = view.getUint32(20)
+    } else {
+      // GIF logical screen size: little-endian uint16 pair right after "GIF87a" / "GIF89a".
+      if (decoded.length < 10 || !/^GIF8[79]a/.test(decoded)) return null
+      width = view.getUint16(6, true)
+      height = view.getUint16(8, true)
+    }
     return width > 0 && height > 0 ? { width, height } : null
   } catch {
     return null
@@ -3700,13 +3948,20 @@ const IMAGE_CAPABILITY_PROVIDER_NAMES: Record<ImageCapability, string> = {
   banner: 'Gemini（Banana）',
 }
 
+function localizeSvgGenerationError(message: string) {
+  if (/svg\s+generation\s+requires\b/i.test(message)) {
+    return 'SVG 生成请求未通过校验。请点击“带回参数重试”；若仍失败，请切换创作分组，或改用 PNG / JPEG / WebP 格式。'
+  }
+  return message
+}
+
 function creatorGenerationErrorMessage(
   error: unknown,
   mode: StudioMode = studioMode.value,
   capability: ImageCapability = imageCapability.value,
   videoModel = '',
 ) {
-  const message = errorMessage(error, '生成失败')
+  const message = localizeSvgGenerationError(errorMessage(error, '生成失败'))
   if (mode === 'video' || capability === 'grok') {
     if (isRetryableGrokTransientError(error)) {
       const videoProvider = videoProviderLabel(videoModel)
@@ -3725,6 +3980,9 @@ function creatorGenerationErrorMessage(
     if (isRetryableGrokTransientError(error)) {
       return `${provider} 上游服务暂时不可用，请稍后点击“带回参数重试”；如果频繁出现，请检查该分组的 ${provider} 账号状态。`
     }
+  }
+  if (/output_format/i.test(message) && /invalid|unsupported|not supported|无效|不支持/i.test(message)) {
+    return `当前上游渠道不支持所选输出格式（GIF / SVG 需要上游支持 GPT Image 2.6 官方参数）。请切换创作分组或渠道，或改用 PNG / JPEG / WebP。上游返回：${message}`
   }
   if (/fixed\s+4K\s+SKU.*size\s+requests/i.test(message)) {
     return '当前创作分组把请求路由到了固定 4K 图片模型，但所选尺寸不是 4K。请重试，或切换创作分组/输出尺寸。'
@@ -3774,144 +4032,195 @@ function isNoAvailableAccountError(error: unknown) {
 async function generateVideoWork(work: CreatorHistoryItem, input: VideoGenerationSnapshot, task: GenerationTask, resumed?: ResumedVideoShots) {
   const key = input.apiKey
   const shots = input.shots
-  const outputBlobs: Blob[] = resumed ? [...resumed.outputBlobs] : []
-  const outputs: string[] = outputBlobs.map(createTrackedObjectUrl)
-  // Request IDs and their original shot positions stay aligned with outputs;
-  // a failed shot is dropped so the finished shots remain usable.
-  const requestIds: string[] = resumed ? [...resumed.requestIds] : []
-  const shotIndexes: number[] = resumed ? [...resumed.shotIndexes] : []
-  const failedShots: number[] = resumed ? [...resumed.failedShots] : []
-  let lastError: unknown = resumed?.lastError
+  const multiShot = shots.length > 1
   const relayVideo = isMiniMaxH3Model(input.model) || isSeedanceVideoModel(input.model)
-  const syncShotState = (nextIndex: number) => {
-    work.requestId = requestIds.join(',') || undefined
-    work.shotOutputIndexes = [...shotIndexes]
+  // Every shot runs at the same time and finishes in any order, so its state is
+  // kept by original shot index. A failed shot is dropped so the finished shots
+  // remain usable.
+  const requestIdByShot = new Map<number, string>()
+  const blobByShot = new Map<number, Blob>()
+  const urlByShot = new Map<number, string>()
+  const failedShots = new Set<number>(resumed?.failedShots)
+  let lastError: unknown = resumed?.lastError
+  for (const [position, shotIndex] of (resumed?.shotIndexes || []).entries()) {
+    requestIdByShot.set(shotIndex, resumed!.requestIds[position])
+    const blob = resumed!.outputBlobs[position]
+    if (blob) {
+      blobByShot.set(shotIndex, blob)
+      urlByShot.set(shotIndex, createTrackedObjectUrl(blob))
+    }
+  }
+  const isSettled = (index: number) => requestIdByShot.has(index) || failedShots.has(index)
+  const syncShotState = () => {
+    const submitted = [...requestIdByShot.keys()].sort((left, right) => left - right)
+    // Finished shots come first, so outputs[i] always belongs to
+    // shotOutputIndexes[i] while later shots are still rendering.
+    const finished = submitted.filter(index => blobByShot.has(index))
+    const ordered = [...finished, ...submitted.filter(index => !blobByShot.has(index))]
+    work.requestId = ordered.map(index => requestIdByShot.get(index)!).join(',') || undefined
+    work.shotOutputIndexes = ordered
+    work.outputs = finished.map(index => urlByShot.get(index)!)
+    work.videoBlobs = finished.map(index => blobByShot.get(index)!)
     // Replace rather than mutate: history copies share this object.
     if (work.shotQueue) {
+      // A refresh resumes the queue until every shot has finished, so shots
+      // that complete out of order are still collected by shot number.
+      const firstOpen = shots.findIndex((_, index) => !blobByShot.has(index) && !failedShots.has(index))
       work.shotQueue = {
-        nextIndex,
-        failedIndexes: [...failedShots],
+        nextIndex: firstOpen === -1 ? shots.length : firstOpen,
+        failedIndexes: [...failedShots].sort((left, right) => left - right),
         failureReason: lastError === undefined ? undefined : errorMessage(lastError, '视频生成失败'),
         // Submitted shots no longer need their reference images.
-        referenceBlobs: work.shotQueue.referenceBlobs.map((blobs, index) => index < nextIndex ? [] : blobs),
+        referenceBlobs: work.shotQueue.referenceBlobs.map((blobs, index) => isSettled(index) ? [] : blobs),
       }
     }
     work.updatedAt = Date.now()
   }
-  const markShotFailed = (shotIndex: number, error: unknown) => {
-    lastError = error
-    failedShots.push(shotIndex)
-    failedShots.sort((left, right) => left - right)
-  }
-  // After a refresh, first collect the shots submitted by the previous page.
-  for (let position = outputBlobs.length; position < requestIds.length;) {
-    const shotIndex = shotIndexes[position]
-    try {
-      const videoBlob = await waitForVideo(key, requestIds[position], shotIndex, shots.length, task, relayVideo ? 450 : 150)
-      outputBlobs.push(videoBlob)
-      outputs.push(createTrackedObjectUrl(videoBlob))
-      work.outputs = [...outputs]
-      work.videoBlobs = [...outputBlobs]
-      work.updatedAt = Date.now()
-      position++
-    } catch (error) {
-      if (disposed) throw error
-      markShotFailed(shotIndex, error)
-      requestIds.splice(position, 1)
-      shotIndexes.splice(position, 1)
-      syncShotState(resumed?.nextIndex ?? 0)
+
+  // A single shot reports straight into the task. Multiple shots each get their
+  // own progress, and the task shows their average.
+  const shotTasks = shots.map((_, index) => multiShot
+    ? reactive<GenerationTask>({
+      id: `${task.id}:${index}`,
+      mode: task.mode,
+      prompt: shots[index].prompt,
+      phase: requestIdByShot.has(index) ? 'generating' : 'submitting',
+      hasExactProgress: false,
+      percent: blobByShot.has(index) || failedShots.has(index) ? 100 : 0,
+      progress: '',
+      startedAt: Date.now(),
+    })
+    : task)
+  // Initialize reactive shot outputs for the UI to track finished shots.
+  if (multiShot) {
+    task.shotOutputs = reactive(new Map())
+    task.failedShots = reactive(new Set(failedShots))
+    for (const [index, url] of urlByShot.entries()) {
+      task.shotOutputs.set(index, url)
     }
-    await persistWork(work)
   }
-  for (let index = resumed?.nextIndex ?? 0; index < shots.length; index++) {
+  const refreshProgress = () => {
+    if (!multiShot) return
+    const finished = blobByShot.size
+    const failedNote = failedShots.size ? `，${failedShots.size} 个失败` : ''
+    task.phase = shotTasks.some(shotTask => shotTask.phase === 'generating') ? 'generating' : 'submitting'
+    task.hasExactProgress = shotTasks.some(shotTask => shotTask.hasExactProgress)
+    const average = shotTasks.reduce((sum, shotTask) => sum + shotTask.percent, 0) / shots.length
+    task.percent = Math.max(task.percent, Math.min(99, Math.round(average)))
+    task.progress = `正在同时生成 ${shots.length} 个镜头（已完成 ${finished} 个${failedNote}）`
+  }
+  const stopProgressWatch = multiShot
+    ? watch(() => shotTasks.map(shotTask => [shotTask.percent, shotTask.phase, shotTask.hasExactProgress]), refreshProgress, { flush: 'sync' })
+    : undefined
+
+  const submitShot = async (index: number, shotTask: GenerationTask) => {
     const shot = shots[index]
-    const failedNote = failedShots.length ? `（${failedShots.length} 个镜头失败）` : ''
-    let created: Awaited<ReturnType<typeof createCreatorVideo>> | undefined
+    const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
+    const sourceImage = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
+    const imageDataUrl = sourceImage && !shot.followSourceAspect
+      ? await cropSourceImageToRatio(sourceImage, shot.aspectRatio)
+      : sourceImage
+    const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
+    shotTask.phase = 'submitting'
+    shotTask.hasExactProgress = false
+    if (!multiShot) task.progress = '正在提交视频任务，请稍候'
+    const request = {
+      model: input.model,
+      prompt: shot.prompt,
+      duration: shot.duration,
+      resolution: shot.resolution,
+      aspectRatio: shot.aspectRatio,
+      imageDataUrl,
+      referenceImageDataUrls,
+    }
+    let created: Awaited<ReturnType<typeof createCreatorVideo>>
+    for (let attempt = 0; ; attempt++) {
+      try {
+        created = await createCreatorVideo(key, request)
+        break
+      } catch (error) {
+        if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
+        const retryNumber = attempt + 1
+        const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
+        const delaySeconds = retryDelay / 1000
+        shotTask.progress = multiShot
+          ? `镜头 ${index + 1} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+          : `${videoProviderLabel(input.model)} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
+        await delay(retryDelay)
+        shotTask.progress = multiShot ? `正在重新提交镜头 ${index + 1}` : '正在重新提交视频任务'
+      }
+    }
+    if (!created.id) throw new Error('视频接口没有返回任务 ID')
+    // Receiving an ID only means the task entered the provider queue. Keep the
+    // percentage hidden until polling confirms that rendering has started.
+    shotTask.phase = 'generating'
+    shotTask.hasExactProgress = false
+    if (!multiShot) task.progress = '任务已提交，正在等待生成'
+    return created.id
+  }
+
+  // Submits (or, after a refresh, picks up) one shot and saves its video to
+  // this browser as soon as it finishes, without waiting for the other shots.
+  const runShot = async (index: number) => {
+    const shotTask = shotTasks[index]
     try {
-      const imageDataUrls = await Promise.all(shot.referenceFiles.map(fileToDataUrl))
-      const sourceImage = shot.generationMethod === 'image' ? imageDataUrls[0] : undefined
-      const imageDataUrl = sourceImage && !shot.followSourceAspect
-        ? await cropSourceImageToRatio(sourceImage, shot.aspectRatio)
-        : sourceImage
-      const referenceImageDataUrls = shot.generationMethod === 'reference' ? imageDataUrls : undefined
-      task.phase = 'submitting'
-      task.hasExactProgress = false
-      task.progress = shots.length > 1 ? `正在提交镜头 ${index + 1} / ${shots.length}${failedNote}` : '正在提交视频任务，请稍候'
-      task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
-      const request = {
-        model: input.model,
-        prompt: shot.prompt,
-        duration: shot.duration,
-        resolution: shot.resolution,
-        aspectRatio: shot.aspectRatio,
-        imageDataUrl,
-        referenceImageDataUrls,
+      let requestId = requestIdByShot.get(index)
+      if (!requestId) {
+        requestId = await submitShot(index, shotTask)
+        requestIdByShot.set(index, requestId)
+        syncShotState()
+        await persistWork(work)
       }
-      for (let attempt = 0; ; attempt++) {
-        try {
-          created = await createCreatorVideo(key, request)
-          break
-        } catch (error) {
-          if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
-          const retryNumber = attempt + 1
-          const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
-          const delaySeconds = retryDelay / 1000
-          task.progress = shots.length > 1
-            ? `镜头 ${index + 1} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
-            : `${videoProviderLabel(input.model)} 上游暂时不可用，${delaySeconds} 秒后自动重试（${retryNumber}/${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length}）`
-          await delay(retryDelay)
-          task.progress = shots.length > 1
-            ? `正在重新提交镜头 ${index + 1} / ${shots.length}`
-            : '正在重新提交视频任务'
-        }
-      }
-      if (!created.id) throw new Error('视频接口没有返回任务 ID')
-      // Receiving an ID only means the task entered the provider queue. Keep the
-      // percentage hidden until polling confirms that rendering has started.
-      task.phase = 'generating'
-      task.hasExactProgress = false
-      task.percent = Math.max(task.percent, Math.round(index / shots.length * 100))
-      task.progress = shots.length > 1
-        ? `镜头 ${index + 1} 已提交，正在等待生成`
-        : '任务已提交，正在等待生成'
-      requestIds.push(created.id)
-      shotIndexes.push(index)
-      syncShotState(index + 1)
-      await persistWork(work)
+      shotTask.phase = 'generating'
       // Relay videos can take up to 30 minutes; keep polling longer than for Grok.
-      const videoBlob = await waitForVideo(key, created.id, index, shots.length, task, relayVideo ? 450 : 150)
-      outputBlobs.push(videoBlob)
-      outputs.push(createTrackedObjectUrl(videoBlob))
-      work.outputs = [...outputs]
-      work.videoBlobs = [...outputBlobs]
-      work.updatedAt = Date.now()
+      const videoBlob = await waitForVideo(key, requestId, multiShot ? 0 : index, multiShot ? 1 : shots.length, shotTask, relayVideo ? 450 : 150)
+      blobByShot.set(index, videoBlob)
+      const url = createTrackedObjectUrl(videoBlob)
+      urlByShot.set(index, url)
+      shotTask.percent = 100
+      // Update task's reactive shot outputs so the UI shows the finished video immediately.
+      if (multiShot && task.shotOutputs) task.shotOutputs.set(index, url)
+      syncShotState()
       await persistWork(work)
     } catch (error) {
       // A single-shot video, or a closed page, still fails as a whole.
-      if (shots.length === 1 || disposed) throw error
-      markShotFailed(index, error)
-      if (created?.id && requestIds[requestIds.length - 1] === created.id) {
-        requestIds.pop()
-        shotIndexes.pop()
-      }
-      syncShotState(index + 1)
+      if (!multiShot || disposed) throw error
+      // Download interruptions keep the requestId so the user can reload later;
+      // upstream failures delete it because retrying won't help.
+      const isDownloadFailure = error instanceof VideoContentDownloadError
+      lastError = error
+      failedShots.add(index)
+      if (!isDownloadFailure) requestIdByShot.delete(index)
+      shotTask.percent = 100
+      // Update task's reactive failed shots so the UI marks the shot as failed immediately.
+      if (task.failedShots) task.failedShots.add(index)
+      syncShotState()
       await persistWork(work)
-      task.progress = index < shots.length - 1
-        ? `镜头 ${index + 1} 生成失败，继续生成下一个镜头`
-        : `镜头 ${index + 1} 生成失败`
     }
+    refreshProgress()
   }
-  work.outputs = outputs
+
+  const pendingShots = shots.map((_, index) => index).filter(index => !blobByShot.has(index) && !failedShots.has(index))
+  refreshProgress()
+  try {
+    const settled = await Promise.allSettled(pendingShots.map(runShot))
+    const fatal = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    if (fatal) throw fatal.reason
+  } finally {
+    stopProgressWatch?.()
+  }
+  syncShotState()
+  const outputBlobs = work.videoBlobs || []
   // Every shot is settled; nothing is left to resume.
   work.shotQueue = undefined
-  if (!outputs.length) throw lastError ?? new Error('视频生成失败')
-  if (failedShots.length) {
+  if (!work.outputs.length) throw lastError ?? new Error('视频生成失败')
+  if (failedShots.size) {
     const reason = creatorGenerationErrorMessage(lastError, 'video', undefined, input.model)
-    const failedLabels = failedShots.map(index => index + 1).join('、')
-    work.error = `已生成 ${outputs.length} / ${shots.length} 段，其余 ${failedShots.length} 段生成失败（镜头 ${failedLabels}）：${reason}`
+    const failedLabels = [...failedShots].sort((left, right) => left - right).map(index => index + 1).join('、')
+    work.error = `已生成 ${work.outputs.length} / ${shots.length} 段，其余 ${failedShots.size} 段生成失败（镜头 ${failedLabels}）：${reason}`
   }
   if (outputBlobs.length > 1) {
-    task.progress = failedShots.length ? '已完成的镜头正在合成完整视频' : '所有镜头已完成，正在合成完整视频'
+    task.progress = failedShots.size ? '已完成的镜头正在合成完整视频' : '所有镜头已完成，正在合成完整视频'
     await composeWorkVideo(work, outputBlobs, false)
   }
 }
@@ -4031,6 +4340,7 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
     ...work,
     outputs: [...work.outputs],
     upstreamImageSizes: work.upstreamImageSizes ? [...work.upstreamImageSizes] : undefined,
+    imageOutputSizes: work.imageOutputSizes ? [...work.imageOutputSizes] : undefined,
     videoBlobs: work.videoBlobs ? [...work.videoBlobs] : undefined,
     shotPrompts: work.shotPrompts ? [...work.shotPrompts] : undefined,
     shotDurations: work.shotDurations ? [...work.shotDurations] : undefined,
@@ -4195,7 +4505,7 @@ async function selectWork(work: CreatorHistoryItem) {
   if (work.type === 'image' && !activeGenerations.has(work.id)) {
     await preserveHistoricalImage(work)
     if (work.imagePersistenceError) localSaveWarning.value = work.imagePersistenceError
-    await normalizeHistoricalImageWork(work)
+    await readHistoricalImageSizes(selectedWork.value?.id === work.id ? selectedWork.value : work)
     // A refreshed page reattaches to the server-side image tasks right away.
     if (work.status === 'pending' && work.imageTaskIds?.length) void resumeImageWork(work)
   }
@@ -4218,7 +4528,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
   if (work.status === 'completed' && !work.outputs.length) loadingVideoWorkId.value = work.id
   const key = findKeyForWork(work)
   if (!key) {
-    const message = '未找到该作品分组对应的可用 Key，暂时无法检查任务状态。'
+    const message = '未找到该作品分组对应的可用 Key，暂时无法同步状态。'
     const alreadyReported = videoHistoryFeedback.value?.workId === work.id
       && videoHistoryFeedback.value.tone === 'error'
       && videoHistoryFeedback.value.message === message
@@ -4302,10 +4612,10 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
     } else if (pending && resume) {
       resumeWork = historyItems.value.find(item => item.id === work.id) || work
     } else if (pending) {
-      const progressNote = pendingProgress === undefined ? '' : `（上游进度 ${pendingProgress}%）`
-      const message = `最近检查 ${formatVideoStatusCheckTime(work.updatedAt)}：任务仍在生成中${progressNote}，请稍后再试。`
+      const progressNote = pendingProgress === undefined ? '' : `，当前进度 ${pendingProgress}%`
+      const message = `${formatVideoStatusCheckTime(work.updatedAt)} 已同步：视频还在生成中${progressNote}，稍后可再次同步。`
       videoHistoryFeedback.value = { workId: work.id, tone: 'pending', message }
-      if (!quiet) appStore.showInfo('任务仍在生成中，请稍后再试')
+      if (!quiet) appStore.showInfo('视频还在生成中，稍后可再次同步')
     } else {
       videoHistoryFeedback.value = null
       if (!quiet) appStore.showSuccess('视频已生成并加载')
@@ -4455,7 +4765,6 @@ async function resumeVideoShotQueue(work: CreatorHistoryItem) {
       outputBlobs,
       failedShots: [...queue.failedIndexes],
       lastError: queue.failureReason ? new Error(queue.failureReason) : undefined,
-      nextIndex: queue.nextIndex,
     })
     target.status = 'completed'
     target.completedAt = Date.now()
@@ -4624,7 +4933,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     clearReferenceImages()
 
     if (work.type === 'video') {
-      videoCapability.value = isMiniMaxH3Model(work.model) ? 'minimax' : isSeedanceVideoModel(work.model) ? 'seedance' : 'grok'
+      videoCapability.value = videoCapabilityForModel(work.model)
     }
     if (work.type === 'image') {
       imageCapability.value = work.imageCapability || inferImageCapability(work)
@@ -4638,6 +4947,8 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       outputCount.value = Math.max(1, Math.min(4, work.outputCount || work.outputs.length || 1))
       imageQuality.value = work.quality || 'auto'
       outputFormat.value = work.outputFormat || 'png'
+      gifFrameCount.value = clampGifSetting(work.frameCount, GIF_FRAME_COUNT_RANGE)
+      gifFrameDurationMs.value = clampGifSetting(work.frameDurationMs, GIF_FRAME_DURATION_RANGE)
     } else {
       aspectRatio.value = work.aspectRatio || '16:9'
       videoResolution.value = historicalVideoResolution
@@ -4772,6 +5083,8 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
   if (referencingOutputKey.value) return
   referencingOutputKey.value = `${work.id}:${index}`
   try {
+    stopSettingsReveal()
+    window.scrollTo?.({ top: 0, behavior: 'instant' })
     let blob: Blob
     if (output.startsWith('data:')) {
       blob = imageDataUrlToBlob(output)
@@ -4791,12 +5104,15 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     const file = new File([blob], `creator-reference-${work.id}-${index + 1}.${extension}`, { type: mimeType })
     await restoreWorkSettings(work)
     const restoreSettingsScroll = captureSettingsScroll()
+    const previousOutputFormat = outputFormat.value
     await addReferenceFiles([file])
+    if (!activeReferenceImages.value.length) return
     selectedWork.value = null
     restoreSettingsScroll()
     await nextTick()
-    revealSettingsOnMobile()
-    appStore.showSuccess('已将作品加入参考图，并带回当时的生成参数')
+    appStore.showSuccess(previousOutputFormat === 'svg' && outputFormat.value === 'png'
+      ? '已加入参考图并带回参数，输出格式已自动切换为 PNG'
+      : '已将作品加入参考图，并带回当时的生成参数')
   } catch (error) {
     appStore.showError(errorMessage(error, '无法将作品加入参考图'))
   } finally {
@@ -4890,6 +5206,11 @@ function hasResultActions(work: CreatorHistoryItem) {
   return work.status === 'completed' || hasPartialImages(work) || (work.status === 'pending' && hasResultImages(work))
 }
 
+// Failed works can be retried as-is or abandoned for a fresh creation.
+function hasRetryActions(work: CreatorHistoryItem) {
+  return hasResultActions(work) || work.status === 'failed'
+}
+
 function missingOutputCount(work: CreatorHistoryItem) {
   if (work.status === 'pending' || !work.outputs.length) return 0
   // Older videos predate per-shot tracking and always held every shot.
@@ -4900,6 +5221,11 @@ function missingOutputCount(work: CreatorHistoryItem) {
 // Output index -> original shot index; failed shots leave gaps in outputs.
 function shotIndexForOutput(work: CreatorHistoryItem, index: number) {
   return work.shotOutputIndexes?.[index] ?? index
+}
+
+function videoShotTitle(work: CreatorHistoryItem, index: number) {
+  const title = `${videoProviderLabel(work.model)} 视频`
+  return isMultiShotVideo(work) ? `${title} · 镜头 ${shotIndexForOutput(work, index) + 1}` : title
 }
 
 function failedShotLabel(work: CreatorHistoryItem) {
@@ -4920,7 +5246,7 @@ function completedVideoDuration(work: CreatorHistoryItem) {
 
 function partialImageReason(work: CreatorHistoryItem) {
   const reason = (work.error || '').replace(/^已生成 \d+ \/ \d+ [张段]，其余 \d+ [张段]生成失败(?:（[^）]*）)?：/, '')
-  return reason ? `失败原因：${reason}` : ''
+  return reason ? `失败原因：${localizeSvgGenerationError(reason)}` : ''
 }
 
 function historyWorkTitle(work: CreatorHistoryItem) {
@@ -4950,7 +5276,7 @@ function isPromptLong(work: CreatorHistoryItem) {
 }
 
 function shotDurationLabel(work: CreatorHistoryItem, index: number) {
-  const duration = work.shotDurations?.[shotIndexForOutput(work, index)]
+  const duration = work.shotDurations?.[shotIndexForOutput(work, index)] || (!isMultiShotVideo(work) ? work.requestedDuration : undefined)
   return duration ? `${duration} 秒` : '分段视频'
 }
 
@@ -4963,41 +5289,135 @@ function workAspectRatio(work: CreatorHistoryItem, index?: number) {
     : work.shotAspectRatios?.[shotIndex] || work.aspectRatio || '自动画幅'
 }
 
-function shotGenerationMeta(work: CreatorHistoryItem, index: number) {
+function shotGenerationMethodLabel(work: CreatorHistoryItem, index: number) {
   const shotIndex = shotIndexForOutput(work, index)
   const method = work.shotGenerationMethods?.[shotIndex] || work.videoGenerationMethod || 'text'
-  const referenceCount = work.shotReferenceCounts?.[shotIndex] || 0
-  return referenceCount
-    ? `${videoGenerationMethodLabelFor(method)} · ${referenceCount} 张参考图`
-    : videoGenerationMethodLabelFor(method)
+  return videoGenerationMethodLabelFor(method)
 }
 
 function mergedDownloadName(work: CreatorHistoryItem) {
   return `creator-complete-${work.id}.mp4`
 }
 
+// The model can return a format other than the one selected (e.g. a GIF when the
+// prompt asks for one), so label results by the bytes that actually came back.
+function outputFormatLabel(output: string) {
+  const type = /^data:image\/([a-z0-9.+-]+)[;,]/i.exec(output.slice(0, 32))?.[1]?.toLowerCase()
+  if (!type) return ''
+  if (type === 'gif') return 'GIF'
+  return type === 'svg+xml' ? 'SVG' : type.toUpperCase()
+}
+
+function workOutputFormatLabel(work: CreatorHistoryItem) {
+  if (work.type === 'video') return 'MP4'
+  const formats = [...new Set(work.outputs.map(outputFormatLabel).filter(Boolean))]
+  return formats.join(' / ') || work.outputFormat?.toUpperCase() || '未知'
+}
+
 function metaParts(...values: Array<string | undefined>) {
   return values.flatMap((value) => (value || '').split(' · ')).map((part) => part.trim()).filter(Boolean)
 }
 
-function resultMeta(work: CreatorHistoryItem) {
-  return `${work.provider} · ${modelLabel(work.model)} · ${work.aspectRatio || '自动画幅'} · ${workResolutionLabel(work)}`
+function videoResultTags(work: CreatorHistoryItem, index: number) {
+  return [
+    videoModelLabel(work.model),
+    workAspectRatio(work, index),
+    videoResolutionTierLabel(work, index),
+    shotDurationLabel(work, index),
+    workOutputFormatLabel(work),
+    shotGenerationMethodLabel(work, index),
+  ]
+}
+
+function completeVideoResultTags(work: CreatorHistoryItem) {
+  return metaParts(
+    videoModelLabel(work.model),
+    workAspectRatio(work),
+    videoResolutionTierLabel(work),
+    `总时长 ${completedVideoDuration(work)} 秒`,
+    `${work.outputs.length} 个镜头`,
+    workOutputFormatLabel(work),
+  )
+}
+
+function imageDimensionsLabel(work: CreatorHistoryItem, index: number) {
+  return imageDisplayedSize(work, index).replace('x', '×')
+}
+
+function imageDisplayedSize(work: CreatorHistoryItem, index = 0) {
+  if (work.type !== 'image') return ''
+  return work.imageOutputSizes?.[index] || work.upstreamImageSizes?.[index] || (index === 0 ? work.actualOutputSize : '') || ''
+}
+
+function simplifyPixelRatio(size: string) {
+  const match = /^(\d+)x(\d+)$/.exec(size)
+  if (!match) return ''
+  let width = Number(match[1])
+  let height = Number(match[2])
+  if (!width || !height) return ''
+  let a = width
+  let b = height
+  while (b) [a, b] = [b, a % b]
+  width /= a
+  height /= a
+  return `${width}:${height}`
+}
+
+function ratioValue(ratio: string) {
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(ratio)
+  if (!match) return 0
+  const width = Number(match[1])
+  const height = Number(match[2])
+  return width > 0 && height > 0 ? width / height : 0
+}
+
+function compactAspectRatio(value: number) {
+  if (!Number.isFinite(value) || value <= 0) return ''
+  const standardRatios = image2RatioOptions.map(option => option.value)
+  const standard = standardRatios.find(ratio => Math.abs(ratioValue(ratio) - value) / value <= 0.02)
+  if (standard) return standard
+
+  let closest = ''
+  let smallestError = Infinity
+  for (let width = 1; width <= 10; width++) {
+    for (let height = 1; height <= 10; height++) {
+      const error = Math.abs(width / height - value) / value
+      if (error < smallestError) {
+        closest = `${width}:${height}`
+        smallestError = error
+      }
+    }
+  }
+  return closest
+}
+
+function imageAspectRatioLabel(work: CreatorHistoryItem, index = 0) {
+  const requestedRatio = work.aspectRatio || ''
+  const actualRatio = simplifyPixelRatio(imageDisplayedSize(work, index))
+  if (!actualRatio) return compactAspectRatio(ratioValue(requestedRatio)) || '自动画幅'
+  const requestedValue = ratioValue(requestedRatio)
+  const actualValue = ratioValue(actualRatio)
+  // Standard output sizes such as 688×1024 are rounded pixel targets for 2:3.
+  // Keep the user-facing ratio as 2:3 when the pixel ratio is within 2% of it.
+  if (requestedValue && actualValue && Math.abs(actualValue - requestedValue) / requestedValue <= 0.02) {
+    return compactAspectRatio(requestedValue)
+  }
+  return compactAspectRatio(actualValue)
 }
 
 function workResolutionLabel(work: CreatorHistoryItem, index?: number) {
   const resolution = index === undefined ? work.resolution : work.shotResolutions?.[shotIndexForOutput(work, index)] || work.resolution
-  if (!resolution) return '默认清晰度'
-  const actualOutputSize = index === undefined || !isMultiShotVideo(work)
-    ? work.actualOutputSize
-    : work.shotActualOutputSizes?.[index]
+  const resolutionLabel = resolution || '默认清晰度'
+  const actualOutputSize = work.type === 'image'
+    ? imageDisplayedSize(work, index)
+    : index === undefined || !isMultiShotVideo(work)
+      ? work.actualOutputSize
+      : work.shotActualOutputSizes?.[index]
   if (actualOutputSize) {
-    const [width, height] = actualOutputSize.split('x').map(Number)
-    const isGrok = work.imageCapability === 'grok' || /^grok-imagine/i.test(work.model)
-    const actualTier = work.type === 'image' && !isGrok && width && height ? customImageResolution(width, height) : resolution
-    return `${actualTier} · ${actualOutputSize.replace('x', '×')}`
+    return `${resolutionLabel} · ${actualOutputSize.replace('x', '×')}`
   }
-  if (work.outputSize) return `${resolution} · ${work.outputSize.replace('x', '×')}`
-  return resolution
+  if (work.outputSize) return `${resolutionLabel} · ${work.outputSize.replace('x', '×')}`
+  return resolutionLabel
 }
 
 function resultAspectRatio(work: CreatorHistoryItem, index?: number) {
@@ -5010,19 +5430,32 @@ function resultAspectRatio(work: CreatorHistoryItem, index?: number) {
       return `${dimensions[1]} / ${dimensions[2]}`
     }
   }
+  if (work.type === 'image') {
+    const ratio = simplifyPixelRatio(imageDisplayedSize(work, index || 0))
+    if (ratio) {
+      const [width, height] = ratio.split(':')
+      return `${width} / ${height}`
+    }
+  }
   const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(workAspectRatio(work, index))
   return match ? `${match[1]} / ${match[2]}` : work.type === 'video' ? '16 / 9' : '1 / 1'
 }
 
-function resultIsLandscape(work: CreatorHistoryItem) {
+function resultIsLandscape(work: CreatorHistoryItem, index?: number) {
+  if (work.type !== 'image') return false
+  const dimensions = /^(\d+)x(\d+)$/.exec(imageDisplayedSize(work, index || 0))
+  if (dimensions) return Number(dimensions[1]) > Number(dimensions[2])
   const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(work.aspectRatio || '')
-  return work.type === 'image' && !!match && Number(match[1]) > Number(match[2])
+  return !!match && Number(match[1]) > Number(match[2])
 }
 
 // Portrait and square images with a known ratio size the frame to the image so
 // narrow grid cards do not letterbox; auto-ratio images keep the fixed frame.
-function resultIsFitted(work: CreatorHistoryItem) {
-  return work.type === 'image' && !resultIsLandscape(work) && /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.test(work.aspectRatio || '')
+function resultIsFitted(work: CreatorHistoryItem, index?: number) {
+  return work.type === 'image' && (
+    /^(\d+)x(\d+)$/.test(imageDisplayedSize(work, index || 0))
+    || /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.test(work.aspectRatio || '')
+  )
 }
 
 function resultMediaStyle(work: CreatorHistoryItem, index?: number) {
@@ -5032,7 +5465,7 @@ function resultMediaStyle(work: CreatorHistoryItem, index?: number) {
       maxHeight: 'min(58vh, 620px)',
     }
   }
-  return resultIsLandscape(work) || resultIsFitted(work) ? { aspectRatio: resultAspectRatio(work) } : undefined
+  return resultIsLandscape(work, index) || resultIsFitted(work, index) ? { aspectRatio: resultAspectRatio(work, index) } : undefined
 }
 
 function handleVideoMetadata(event: Event, work: CreatorHistoryItem, index = 0, scope = 'segment') {
@@ -5071,12 +5504,12 @@ function formatResultTime(timestamp: number) {
 function resultParameterFields(work: CreatorHistoryItem) {
   const [tier, size] = workResolutionLabel(work).split(' · ')
   const fields: Array<{ label: string; value: string; wide?: boolean }> = [
-    { label: '模型', value: modelLabel(work.model), wide: true },
+    { label: '模型', value: work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model), wide: true },
     { label: '类型', value: work.provider },
-    { label: '画幅', value: work.aspectRatio || '自动画幅' },
+    { label: '画幅', value: work.type === 'image' ? imageAspectRatioLabel(work) : work.aspectRatio || '自动画幅' },
     { label: '清晰度', value: tier },
   ]
-  if (size) fields.push({ label: '输出尺寸', value: size })
+  if (size && work.type === 'image') fields.push({ label: '输出尺寸', value: size })
   if (work.type === 'video') {
     fields.push({ label: '镜头数', value: `${work.shotCount || 1} 个` }, { label: '时长', value: `${work.requestedDuration || 0} 秒` })
   }
@@ -5089,10 +5522,31 @@ function resultParameterFields(work: CreatorHistoryItem) {
           { label: '完成耗时', value: formatCompletionDuration(work) },
           { label: '生成时间', value: formatResultTime(work.completedAt || work.updatedAt) },
         ]),
-    { label: '版本', value: work.version || 'v1' },
+    { label: '输出格式', value: workOutputFormatLabel(work) },
     { label: '来源', value: work.source || '初版作品' },
   )
   return fields.filter((field) => field.value)
+}
+
+// Shown while drawing, before real output sizes exist, so the requested size stands in.
+function generationTags(work: CreatorHistoryItem) {
+  if (work.type === 'video') {
+    return metaParts(
+      videoModelLabel(work.model),
+      work.aspectRatio || '自动画幅',
+      videoResolutionTierLabel(work),
+      work.requestedDuration ? `${work.requestedDuration} 秒` : undefined,
+      (work.shotCount || 1) > 1 ? `${work.shotCount} 个镜头` : undefined,
+    )
+  }
+  return metaParts(
+    modelLabel(work.model),
+    imageAspectRatioLabel(work),
+    workResolutionLabel(work).split(' · ')[1],
+    work.outputFormat?.toUpperCase(),
+    work.outputFormat === 'gif' && work.frameCount ? `${work.frameCount} 帧` : undefined,
+    work.referenceCount ? `${work.referenceCount} 张参考图` : undefined,
+  )
 }
 
 function videoShotPrompt(shotPrompt: string) {
@@ -5247,9 +5701,10 @@ function isCrossOriginHttpURL(url: string) {
 }
 
 function imageFileExtension(url: string) {
-  const dataType = url.match(/^data:image\/(png|jpe?g|webp|gif|avif)(?:;|,)/i)?.[1]
-  const pathType = url.split(/[?#]/, 1)[0].match(/\.(png|jpe?g|webp|gif|avif)$/i)?.[1]
+  const dataType = url.match(/^data:image\/(png|jpe?g|webp|gif|avif|svg\+xml)(?:;|,)/i)?.[1]
+  const pathType = url.split(/[?#]/, 1)[0].match(/\.(png|jpe?g|webp|gif|avif|svg)$/i)?.[1]
   const type = (dataType || pathType || outputFormat.value || 'png').toLowerCase()
+  if (type === 'svg+xml') return 'svg'
   return type === 'jpeg' ? 'jpg' : type
 }
 
@@ -5517,6 +5972,7 @@ onBeforeUnmount(() => {
 .mode-switch {
   display: grid;
   grid-template-columns: 1fr 1fr;
+  gap: 4px;
   width: 410px;
   padding: 4px;
   border: 1px solid #cddbd9;
@@ -5574,8 +6030,8 @@ onBeforeUnmount(() => {
 .history-item.generating { border-color: #a5ddd4; }
 .history-copy small.history-progress { color: var(--creator-accent-strong); }
 .pending-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.generation-new-creation { min-height: 40px; gap: 8px; padding: 0 16px; border-color: var(--creator-accent); border-radius: var(--creator-radius); background: var(--creator-accent); color: #fff; font-size: 13px; font-weight: 600; box-shadow: 0 6px 16px rgb(15 159 143 / 20%); transition: background 150ms ease, border-color 150ms ease, box-shadow 150ms ease; }
-.generation-new-creation:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); box-shadow: 0 8px 20px rgb(15 159 143 / 25%); }
+.generation-new-creation { flex: none; min-height: 40px; gap: 7px; padding: 0 18px; border-color: #e3ebe9; border-radius: var(--creator-radius); background: #fff; color: #475569; font-size: 13px; font-weight: 600; box-shadow: 0 1px 2px rgb(16 40 36 / 5%); transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
+.generation-new-creation:hover { border-color: var(--creator-accent); background: #effbf8; color: var(--creator-accent-strong); }
 .ready-status {
   white-space: nowrap;
   display: inline-flex;
@@ -5755,8 +6211,9 @@ onBeforeUnmount(() => {
 /* Delete sits in its own grid column, so the title truncates before it instead of hiding under it.
    The column is reserved even while the button is hidden, so hovering never reflows the text. */
 .history-item-actions { position: relative; z-index: 2; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 160ms ease; }
+/* Only keyboard focus on delete should reveal it after the pointer leaves the card. */
 .history-item:hover .history-item-actions,
-.history-item:focus-within .history-item-actions { opacity: 1; pointer-events: auto; }
+.history-item-actions:has(> .history-delete:focus-visible) { opacity: 1; pointer-events: auto; }
 .history-item-actions .history-delete { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #8295a4; }
 .history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
 .history-item-actions .history-delete:disabled { cursor: not-allowed; opacity: .4; }
@@ -5804,8 +6261,7 @@ onBeforeUnmount(() => {
 .inspiration-intro h2,
 .generation-state h2,
 .result-heading h2 { margin: 0; color: #172033; font-size: 23px; font-weight: 780; }
-.inspiration-intro > p:last-child,
-.generation-heading > p { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
+.inspiration-intro > p:last-child { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
 
 .featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-radius-large); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
 .brief-topline { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; min-height: 60px; margin: 0 24px; border-bottom: 1px solid #2b3e3b; color: #9db3af; font-size: 11px; font-weight: 700; }
@@ -5860,22 +6316,53 @@ onBeforeUnmount(() => {
 @media (hover: none) { .quick-templates button > svg { opacity: .6; transform: none; } }
 @media (prefers-reduced-motion: reduce) { .quick-templates button, .quick-templates button > svg { transition: none; transform: none; } }
 
-.generation-state { --generation-row-width: clamp(320px, 92cqi, 1480px); --generation-frame-height: clamp(200px, calc(100vh - 500px), 720px); position: relative; display: grid; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 22px; padding-block: 32px; text-align: center; isolation: isolate; }
-/* Soft aurora behind the stage; purely decorative. */
-.generation-state::before { position: absolute; z-index: -1; top: -12px; left: 50%; width: min(var(--generation-row-width), 100%); height: calc(var(--generation-frame-height) + 80px); border-radius: 50%; background: radial-gradient(closest-side at 35% 45%, rgb(56 214 189 / 20%), transparent), radial-gradient(closest-side at 68% 55%, rgb(96 165 250 / 13%), transparent); filter: blur(12px); content: ''; transform: translateX(-50%); animation: creatorAurora 7s ease-in-out infinite alternate; }
-.generation-heading { display: grid; justify-items: center; gap: 6px; }
-.generation-heading > p { margin: 0; }
-.generation-stage { display: flex; align-items: center; justify-content: center; gap: 12px; max-width: 100%; margin-bottom: 4px; }
+/* Images and videos share fixed outer gutters, including when history is collapsed. */
+.generation-state { --generation-row-width: calc(100cqi - 2 * var(--creator-workspace-gutter)); --generation-frame-height: clamp(220px, calc(100vh - 360px), 760px); position: relative; display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 20px; margin-block: 0; padding-block: var(--creator-workspace-gutter); text-align: center; isolation: isolate; }
+.generation-state.is-video { flex: 1 0 0; grid-template-rows: auto minmax(220px, 1fr); }
+/* One compact status panel; the frames below carry the main loading animation. */
+.generation-panel { display: grid; gap: 18px; width: 100%; min-width: 0; padding: 22px 24px 20px; border: 1px solid #e6eeec; border-radius: var(--creator-radius-large); background: #fff; box-shadow: 0 1px 2px rgb(16 40 36 / 4%), 0 14px 36px -14px rgb(16 40 36 / 12%); text-align: left; }
+.generation-heading { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.generation-heading-loader { position: relative; display: grid; flex: none; width: 40px; height: 40px; place-items: center; border-radius: 12px; color: var(--creator-accent-strong); background: #f0f8f6; box-shadow: inset 0 0 0 1px #d9eeea; }
+.generation-heading-loader::before { position: absolute; inset: 0; border-radius: inherit; box-shadow: 0 0 0 0 rgb(15 159 143 / 30%); content: ''; animation: creatorLoaderPulse 1.8s ease-out infinite; }
+@media (prefers-reduced-motion: reduce) { .generation-heading-loader::before { animation: none; } }
+.generation-heading-copy { display: grid; flex: 1 1 auto; gap: 2px; min-width: 0; }
+.generation-state .generation-heading-copy h2 { overflow: hidden; color: #0f172a; font-size: 15px; font-weight: 650; letter-spacing: -.01em; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
+/* Prompt and metrics share the title's text column so the icon stands alone on the left. */
+.generation-body { display: grid; gap: 18px; padding-left: 54px; }
+@media (max-width: 640px) { .generation-body { padding-left: 0; } }
+.generation-brief { display: grid; gap: 10px; min-width: 0; padding-left: 14px; border-left: 2px solid #d3ece7; }
+.generation-prompt { display: -webkit-box; margin: 0; overflow: hidden; color: #3a4757; font-size: 13px; line-height: 1.75; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-tags.generation-tags li { padding: 3px 10px; border: 1px solid #e3ebe9; color: #5c6b7a; background: #fff; font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .01em; }
+.result-tags.generation-tags li:first-child { border-color: #cfe9e3; color: var(--creator-accent-strong); background: #f3faf8; }
+.generation-heading-copy p { margin: 0; overflow: hidden; color: #8391a2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
+.generation-stage { display: flex; align-items: center; justify-content: center; gap: 12px; max-width: 100%; }
+.generation-stage.is-image { display: grid; width: 100%; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
+.generation-stage.is-image .generation-frame { width: 100%; }
+/* A single portrait placeholder should follow the requested ratio instead of filling the whole canvas width. */
+.generation-stage.is-image:has(> .generation-frame:only-child) { display: flex; }
+.generation-stage.is-image:has(> .generation-frame:only-child) > .generation-frame {
+  /* Preserve a single image's ratio and portrait height limit within the full-width stage. */
+  width: var(--generation-frame-width);
+  height: auto;
+  max-width: 100%;
+  justify-self: center;
+}
+.generation-stage.is-video { display: grid; width: 100%; grid-template-columns: repeat(var(--generation-columns, 1), minmax(0, 1fr)); grid-auto-rows: minmax(140px, 1fr); align-items: stretch; margin-bottom: 0; }
+.generation-stage.is-video > .generation-frame { width: 100%; min-height: 0; }
 .generation-frame { position: relative; display: grid; flex: 0 1 auto; container-type: inline-size; width: var(--generation-frame-width); min-width: 0; place-items: center; overflow: hidden; border: 1px solid #cfeee8; border-radius: var(--creator-radius-large); background: linear-gradient(110deg, #ecf8f6 30%, #f8fdfc 50%, #ecf8f6 70%) 0 0 / 220% 100%; box-shadow: 0 14px 34px rgb(24 104 93 / 10%), inset 0 0 0 4px rgb(255 255 255 / 55%); }
-.generation-frame.is-current { border-color: #8fdccf; animation: creatorShimmer 1.8s ease-in-out infinite; }
-.generation-frame.is-current::after { position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(180deg, transparent 40%, rgb(15 159 143 / 9%) 50%, transparent 60%) 0 0 / 100% 260%; content: ''; animation: creatorScan 2.6s ease-in-out infinite; }
+.generation-frame.is-current { border-color: #bfe9e1; background: #f3f9f8; box-shadow: 0 20px 50px rgb(24 104 93 / 10%), inset 0 0 0 1px rgb(255 255 255 / 70%); }
 .generation-frame.is-queued { border-style: dashed; background: rgb(255 255 255 / 55%); box-shadow: none; }
 .generation-frame.is-done { border-color: #a5ddd4; animation: creatorFrameIn .45s ease-out; }
 .generation-frame > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.generation-frame-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
 /* Scale with the frame so narrow mobile frames keep the spinner proportional. */
-.generation-frame-ring { position: relative; z-index: 1; display: grid; place-items: center; width: clamp(24px, 34cqi, 44px); height: clamp(24px, 34cqi, 44px); border-radius: 50%; color: var(--creator-accent-strong); background: #fff; box-shadow: 0 6px 16px rgb(24 138 121 / 16%); }
-.generation-frame-ring > svg { width: 40%; height: 40%; }
-.generation-frame-ring::before { position: absolute; inset: -3px; border: 2px solid #d3eee9; border-top-color: var(--creator-accent); border-right-color: var(--creator-accent); border-radius: 50%; content: ''; animation: creatorSpin 1.1s linear infinite; }
+.generation-frame-dots { position: absolute; inset: 0; border-radius: inherit; background-image: radial-gradient(rgb(15 159 143 / 9%) 1px, transparent 1.2px); background-size: 18px 18px; pointer-events: none; }
+.generation-frame-loader { position: relative; z-index: 1; display: grid; justify-items: center; gap: 14px; }
+.generation-frame-ring { position: relative; display: grid; place-items: center; width: clamp(28px, min(calc(34px + 4cqi), calc(var(--generation-frame-height-ring-size) - 6px)), 76px); height: clamp(28px, min(calc(34px + 4cqi), calc(var(--generation-frame-height-ring-size) - 6px)), 76px); border-radius: 50%; color: var(--creator-accent-strong); background: rgb(255 255 255 / 82%); box-shadow: 0 6px 20px rgb(24 138 121 / 16%), inset 0 0 0 1px rgb(255 255 255 / 90%); backdrop-filter: blur(10px); }
+.generation-frame-ring > svg { width: 42%; height: 42%; animation: creatorTwinkle 2.4s ease-in-out infinite; }
+.generation-frame-ring::before { position: absolute; inset: -3px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0 55%, rgb(43 196 172 / 35%) 75%, var(--creator-accent-strong) 100%); content: ''; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)); animation: creatorSpin 1.4s linear infinite; }
+@media (prefers-reduced-motion: reduce) { .generation-frame-ring > svg, .generation-frame-ring::before { animation: none; } }
+.generation-done-count { flex: none; color: #8391a2; font-size: 12px; font-style: normal; font-weight: 500; line-height: 18px; font-variant-numeric: tabular-nums; }
 .generation-frame-index { color: #a7bbb7; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 .generation-frame.is-failed { border-style: dashed; border-color: #ecc9c4; background: #fff6f5; box-shadow: none; }
 .generation-frame-failed { display: grid; justify-items: center; gap: 4px; color: #c0574d; font-size: 11px; font-weight: 600; }
@@ -5894,38 +6381,41 @@ onBeforeUnmount(() => {
 @container (max-width: 160px) {
   .generation-frame-actions { display: none; }
 }
-.generation-tags { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px 0; margin: 2px 0 0; padding: 0; color: #93a3a0; font-size: 11px; font-weight: 500; list-style: none; }
-.generation-tags li + li::before { margin: 0 8px; color: #c3d0cd; content: '·'; }
-.generation-progress-card { display: grid; gap: 10px; width: min(max(440px, calc(var(--generation-row-width) * .6)), 92%); padding: 14px 16px; border: 1px solid #e0eeeb; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 82%); box-shadow: 0 8px 22px rgb(29 61 57 / 6%); }
-.generation-metrics { display: flex; align-items: center; gap: 10px; min-height: 24px; margin: 0; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; }
-.generation-metrics > span,
-.generation-metrics > strong { display: inline-flex; align-items: center; gap: 5px; height: 24px; line-height: 1; }
-.generation-metrics > span { color: #74888a; font-weight: 600; }
-.generation-metrics strong { font-size: 15px; font-variant-numeric: tabular-nums; }
-.generation-metrics em { margin-left: auto; color: #5d716d; font-size: 12px; font-style: normal; font-weight: 600; font-variant-numeric: tabular-nums; }
-.generation-percent { justify-content: center; min-width: 42px; margin-left: auto; padding: 0 10px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; text-align: center; }
-.progress-track { width: 100%; height: 6px; margin: 0; overflow: hidden; border-radius: 999px; background: #e3f4f1; }
+.generation-metrics { display: flex; align-items: center; gap: 16px; min-height: 20px; margin: 0; }
+.generation-metrics > .progress-track { flex: 1 1 auto; height: 3px; }
+.generation-elapsed { display: inline-flex; flex: none; align-items: center; gap: 5px; white-space: nowrap; color: #8391a2; font-size: 12px; line-height: 1; }
+.generation-elapsed strong { margin-left: 2px; color: #0f172a; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.generation-percent { display: inline-flex; flex: none; align-items: center; justify-content: center; min-width: 42px; height: 22px; padding: 0 8px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.progress-track { width: 100%; height: 4px; margin: 0; overflow: hidden; border-radius: 999px; background: #e3f4f1; }
 .progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); transition: width .6s ease; }
 /* 双段伸缩：长段、短段轮流从左端伸出、边走边伸缩、在右端收尾，同一时刻只有一段，前一段走完才从起点再出；位置和长度都按轨道百分比，宽度自适应；用 clip-path 裁出段落，不改 left/right，避免逐帧重排 */
 .progress-track.indeterminate span { position: relative; width: 100%; background: none; transition: none; }
 .progress-track.indeterminate span::before, .progress-track.indeterminate span::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); clip-path: inset(0 100% 0 0 round 999px); animation: creatorProgressLong 2.2s linear infinite; }
 .progress-track.indeterminate span::after { animation-name: creatorProgressShort; }
 @media (prefers-reduced-motion: reduce) { .progress-track.indeterminate span::before { clip-path: none; opacity: .6; animation: none; } .progress-track.indeterminate span::after { display: none; } }
-.generation-prompt { display: -webkit-box; margin: 2px 0 0; padding: 12px 0 0; overflow: hidden; border-top: 1px solid #edf4f2; color: #7b8b8e; font-size: 12px; line-height: 1.7; text-align: left; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-@media (prefers-reduced-motion: reduce) { .generation-state::before, .generation-frame.is-current, .generation-frame.is-current::after, .generation-frame.is-done { animation: none; } }
+@media (prefers-reduced-motion: reduce) { .generation-frame.is-current, .generation-frame.is-done { animation: none; } }
+/* Keep a four-image generation balanced when the canvas can fit three cards per row. */
+@container (min-width: 900px) and (max-width: 1168px) {
+  .generation-stage.is-image:has(> .generation-frame:nth-child(4):last-child) > .generation-frame:last-child {
+    grid-column: 1 / -1;
+    width: min(100%, calc((100% - 24px) / 3));
+    justify-self: center;
+  }
+}
 .result-workspace { padding: 32px 0 24px; }
 .result-heading { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .result-heading > div { min-width: 0; }
 .result-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
-.result-heading > div > p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; overflow: hidden; color: #778498; font-size: 12px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-heading-complete { align-items: flex-end; flex-wrap: wrap; }
 .result-heading-complete > div:first-child { flex: 1 1 240px; }
+.result-heading-title-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
 .result-heading h2 { font-size: 20px; font-weight: 700; line-height: 1.4; }
 .result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; }
-.result-count-pill { display: inline-flex; align-items: center; min-height: 34px; padding: 0 10px; border: 1px solid #d6e4e1; border-radius: var(--creator-radius); white-space: nowrap; color: #728093; background: #fff; font-size: 11px; }
-.result-heading-actions .secondary-command { min-height: 34px; padding: 0 12px; flex-shrink: 0; white-space: nowrap; font-weight: 600; border-color: #d6e4e1; color: #3f5d59; }
-.result-heading-actions .icon-action { flex-shrink: 0; width: 34px; height: 34px; }
-.result-heading-actions .download-all-command { display: inline-flex; align-items: center; gap: 6px; }
+.result-count-pill { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: var(--creator-radius-small); white-space: nowrap; color: #4c756f; background: #e5efec; font-size: 12px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
+.result-heading-actions .secondary-command,
+.result-heading-actions .icon-action { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; width: auto; min-height: 34px; height: 34px; padding: 0 12px; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 1; border-color: #d6e4e1; color: #3f5d59; }
+.result-heading-actions svg { flex: 0 0 auto; }
+.result-heading-actions button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .result-heading-actions .download-all-command:disabled { cursor: wait; opacity: .68; }
 .result-heading-actions .primary-soft { border-color: var(--creator-accent); color: #fff; background: var(--creator-accent); }
 .result-heading-actions .primary-soft:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); }
@@ -5950,8 +6440,8 @@ onBeforeUnmount(() => {
 .video-loading-grid { margin-bottom: 24px; }
 .video-loading-card { box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
 .video-loading-actions { min-height: 76px; }
-/* Bottom padding = header padding (14px) + the eyebrow's half-leading (~3px), so the tag pills sit as far from the bottom edge as the eyebrow text does from the top. */
-.complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 10px 16px 17px; }
+/* Equal vertical padding keeps the download button centered between the video and the card's bottom edge. */
+.complete-video-card > footer { display: flex; align-items: center; justify-content: space-between; gap: 18px; min-height: 66px; padding: 16px; }
 .complete-video-card > footer > div { min-width: 0; flex: 1; }
 .complete-video-card > footer strong { display: block; color: var(--creator-accent-strong); font-size: 14px; line-height: 1.4; }
 .complete-video-card > footer .result-tags { margin-top: 8px; }
@@ -5972,7 +6462,13 @@ onBeforeUnmount(() => {
 /* Media sits flush against the card edge: round only the top corners (outer radius minus the 1px border) so it meets the caption without a gap. */
 .result-card > .result-media,
 .result-card > .video-result-frame { border-radius: calc(var(--creator-radius-large) - 1px) calc(var(--creator-radius-large) - 1px) 0 0; }
-.result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: var(--creator-radius-small); color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); }
+.result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: var(--creator-radius-small); color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); transition: opacity 160ms ease; }
+/* While a segment plays, the number hides like the player's own badge and returns on hover or tap. */
+.result-card:has(.video-result-frame.is-playing) .result-index { opacity: 0; }
+.result-card:has(.video-result-frame.is-playing.controls-visible) .result-index { opacity: 1; }
+@media (hover: hover) {
+  .result-card:has(.video-result-frame.is-playing:hover) .result-index { opacity: 1; }
+}
 .result-media {
   position: relative;
   display: grid;
@@ -6004,13 +6500,13 @@ onBeforeUnmount(() => {
 .result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
 .result-description p.result-prompt { display: -webkit-box; margin-top: 4px; color: #7b8b8e; font-size: 12px; line-height: 1.5; text-overflow: initial; white-space: normal; word-break: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
-/* 标题与按钮同一行，提示词和标签各自占满整行 */
-.result-actions:has(> .result-tags) { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "prompt prompt" "tags tags"; align-items: center; column-gap: 12px; row-gap: 0; }
-.result-actions:has(> .result-tags) > .result-description { display: contents; }
-.result-actions:has(> .result-tags) > .result-description > strong { grid-area: title; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.result-actions:has(> .result-tags) > .result-description > p.result-prompt { grid-area: prompt; margin-top: 8px; }
-.result-actions:has(> .result-tags) > .result-media-actions { grid-area: actions; }
-.result-actions:has(> .result-tags) > .result-tags { grid-area: tags; margin-top: 10px; }
+/* 图片与视频共用卡片排版，不依赖参数标签是否存在。 */
+.result-card > .result-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "prompt prompt" "tags tags"; align-items: center; column-gap: 12px; row-gap: 0; }
+.result-card > .result-actions > .result-description { display: contents; }
+.result-card > .result-actions > .result-description > strong { grid-area: title; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-card > .result-actions > .result-description > p.result-prompt { grid-area: prompt; margin-top: 8px; }
+.result-card > .result-actions > .result-media-actions { grid-area: actions; }
+.result-card > .result-actions > .result-tags { grid-area: tags; margin-top: 10px; }
 .result-tags { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
 .result-tags li { max-width: 100%; overflow: hidden; padding: 2px 8px; border-radius: 999px; color: #5b6b7f; background: #eef3f2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .result-workspace .icon-action,
@@ -6125,7 +6621,7 @@ onBeforeUnmount(() => {
 .settings-scroll::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
 .settings-heading { justify-content: space-between; margin-bottom: 16px; }
 .settings-heading > svg { color: var(--creator-accent-strong); }
-.capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: var(--creator-radius-large); background: #eff5f4; }
+.capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: var(--creator-radius-large); background: #eff5f4; }
 .capability-switch button { min-height: 45px; border-radius: var(--creator-radius); color: #6e7e93; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .capability-switch button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 3px 12px rgb(26 76 70 / 9%); }
 .capability-switch button:disabled { color: #b4c0cc; cursor: not-allowed; }
@@ -6256,6 +6752,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .advanced-grid { grid-template-columns: minmax(0, 1fr); margin-bottom: 16px; padding: 12px; border: 1px solid #e0e7eb; border-radius: var(--creator-radius-large); background: #f8fafb; }
 .advanced-grid .field-block { margin-bottom: 0; }
 .advanced-grid .field-block.wide { grid-column: 1 / -1; }
+.gif-frame-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.gif-frame-fields .field-block > small { color: #73869a; font-size: 11px; line-height: 1.65; }
 .stepper { min-height: 44px; border: 1px solid #d7e0e7; border-radius: var(--creator-radius); overflow: hidden; }
 .stepper button { display: grid; place-items: center; width: 46px; height: 42px; color: var(--creator-accent-strong); background: #fff; }
 .stepper button:first-child { border-right: 1px solid #e0e6eb; }
@@ -6336,9 +6834,9 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .preview-action:disabled { cursor: wait; opacity: .6; }
 
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
+@keyframes creatorTwinkle { 50% { opacity: .55; transform: scale(.88) rotate(-8deg); } }
+@keyframes creatorLoaderPulse { 70%, 100% { box-shadow: 0 0 0 8px rgb(15 159 143 / 0%); } }
 @keyframes creatorShimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-@keyframes creatorAurora { from { opacity: .7; transform: translateX(-50%) scale(.96); } to { opacity: 1; transform: translateX(-50%) scale(1.04); } }
-@keyframes creatorScan { from { background-position: 0 100%; } to { background-position: 0 0; } }
 @keyframes creatorFrameIn { from { opacity: 0; transform: scale(.96); } }
 @keyframes creatorStatusPulse { to { opacity: .35; transform: scale(.92); } }
 /* 头部 = u + s·u(1-u)，尾部 = u - s·u(1-u)：两端都只向右走，长度 200s·u(1-u)% 中段最长（长段 s=1 → 50%，短段 s=.5 → 25%），出右端时收成 0 */
@@ -6425,18 +6923,27 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .history-item.generating { border-color: #357f74; }
 :global(.dark) .generation-frame { border-color: #2f4d48; background-image: linear-gradient(110deg, #16302c 30%, #1f3c37 50%, #16302c 70%); box-shadow: 0 14px 34px rgb(0 0 0 / 28%); }
 :global(.dark) .generation-frame.is-queued { border-color: #33504b; background: rgb(255 255 255 / 3%); }
-:global(.dark) .generation-frame-ring { color: #79dfd0; background: #17322e; }
-:global(.dark) .generation-frame-ring::before { border-color: #2c4a45; border-top-color: #79dfd0; border-right-color: #79dfd0; }
 :global(.dark) .generation-frame.is-failed { border-color: #5a3430; background: rgb(216 75 75 / 8%); }
 :global(.dark) .generation-frame-failed { color: #ff9a90; }
 :global(.dark) .partial-result-notice { border-color: #5b4724; color: #f0c06a; background: #2a2416; }
 :global(.dark) .partial-result-notice strong { color: #f6d39a; }
 :global(.dark) .partial-result-notice p { color: #c9ad7f; }
-:global(.dark) :global(.dark) .generation-tags { color: #8fa29e; }
-:global(.dark) .generation-tags li + li::before { color: #4a5f5b; }
-:global(.dark) .generation-progress-card { border-color: #30413f; background: rgb(19 31 29 / 80%); box-shadow: none; }
+:global(.dark) .generation-panel { border-color: #2a3a38; background: #142220; box-shadow: none; }
+:global(.dark) .generation-state .generation-heading-copy h2 { color: #eef5f4; }
+:global(.dark) .generation-brief { border-left-color: #2b4a45; }
+:global(.dark) .generation-prompt { color: #d3dfdc; }
+:global(.dark) .result-tags.generation-tags li { border-color: #2c3d3b; color: #a5b8b4; background: transparent; }
+:global(.dark) .result-tags.generation-tags li:first-child { border-color: #2b4a45; color: #79dfd0; background: #17302c; }
+:global(.dark) .generation-heading-copy p,
+:global(.dark) .generation-elapsed { color: #93a7a3; }
+:global(.dark) .generation-elapsed strong { color: #e6efed; }
+:global(.dark) .generation-heading-loader { color: #79dfd0; background: #17322e; box-shadow: inset 0 0 0 1px #24423d; }
+:global(.dark) .generation-done-count { color: #93a7a3; }
+:global(.dark) .generation-new-creation { border-color: #344744; color: #c5d6d3; background: #192725; }
+:global(.dark) .generation-new-creation:hover { border-color: #79dfd0; color: #79dfd0; background: #1d2f2c; }
 :global(.dark) .progress-track { background: #213532; }
-:global(.dark) .generation-prompt { border-top-color: #273a37; color: #93a7a3; }
+:global(.dark) .generation-frame-ring { color: #79dfd0; background: rgb(23 50 46 / 80%); box-shadow: 0 10px 30px rgb(0 0 0 / 30%), inset 0 0 0 1px rgb(255 255 255 / 6%); }
+:global(.dark) .generation-frame.is-current { border-color: #2f4d48; background: #152926; }
 :global(.dark) .result-description p.result-prompt { color: #93a7a3; }
 :global(.dark) .history-generating { background-image: linear-gradient(110deg, #1a2a27 30%, #223632 50%, #1a2a27 70%); }
 :global(.dark) .history-generating.has-preview { background: rgb(19 31 29 / 55%); }
@@ -6505,15 +7012,22 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 @media (max-width: 800px) {
   /* Match the settings panel's 16px inline padding stacked above the canvas. */
   .creator-studio { --creator-workspace-gutter: 16px; --creator-workspace-width: calc(100% - 32px); height: auto; min-height: auto; overflow: visible; }
-  /* The settings panel follows directly below; keep the button's lower gap equal to the row gap above it. */
-  .generation-state { padding-bottom: 22px; }
   .generation-stage { width: 100%; }
+  .generation-stage.is-image { display: grid; width: 100%; grid-template-columns: repeat(var(--generation-mobile-columns, 1), minmax(0, 1fr)); }
+  .generation-stage.is-image > .generation-frame:not(:only-child):last-child:nth-child(odd) { grid-column: 1 / -1; width: min(100%, calc((100% - 12px) / 2)); justify-self: center; }
+  .generation-stage.is-image:has(> .generation-frame:only-child) { display: flex; }
+  .generation-stage.is-image:has(> .generation-frame:only-child) > .generation-frame { width: auto; height: min(var(--generation-frame-height), 62vh); }
+  .generation-state.is-video { flex: 0 0 auto; grid-template-rows: auto auto; }
+  .generation-stage.is-video { grid-auto-rows: auto; justify-items: center; }
   .generation-frame { flex: 1 1 0; width: auto; max-width: var(--generation-frame-mobile-max); }
-  .generation-progress-card { width: 100%; }
+  .generation-stage.is-video .generation-frame { width: 100%; aspect-ratio: var(--generation-frame-aspect-ratio); }
+  .generation-panel { width: 100%; }
   /* The card no longer clips (overflow: visible for sticky), so round the toolbar to match it. */
   .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: flex; gap: 8px; align-items: stretch; padding: 8px; border-radius: var(--creator-surface-radius) var(--creator-surface-radius) 0 0; transition: border-radius 160ms ease; }
   .studio-toolbar.is-stuck { border-radius: 0; }
-  .mode-switch { flex: 1 1 auto; min-width: 0; width: auto; }
+  .mode-switch { flex: 0 1 360px; min-width: 0; width: min(360px, 100%); }
+  .mode-option { gap: 6px; min-height: 38px; }
+  .mode-option-icon { flex-basis: 28px; width: 28px; height: 28px; }
   /* Only the history entry stays; status and refresh live on wider layouts. */
   .toolbar-actions { display: flex; flex: none; align-items: center; }
   .toolbar-actions > :not(.history-drawer-toggle) { display: none; }
@@ -6535,7 +7049,9 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .history-panel.is-drawer .history-list { padding-inline: 16px; }
   .studio-grid,
   .studio-grid.history-collapsed { display: flex; flex: none; flex-direction: column; min-height: auto; overflow: visible; }
-  /* Browse a brief or check the current result first, then configure and generate below. */
+  .capability-switch { gap: 4px; padding: 4px; }
+  .capability-switch button { min-height: 40px; font-size: 11px; }
+  /* Show current results above the settings when there is an active creation. */
   /* Fallback only: revealSettingsOnMobile sets the measured toolbar offset inline. */
   /* Bottom of the unclipped card, so it carries the card's lower corners like the toolbar does the upper ones. */
   .settings-panel { order: 2; height: auto; border-top: 1px solid var(--creator-line); border-left: 0; border-radius: 0 0 var(--creator-surface-radius) var(--creator-surface-radius); scroll-margin-top: 136px; }
@@ -6544,7 +7060,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   /* Size to content: a fixed floor leaves a blank band above the settings when the result is short.
      The scroll margin clears the sticky site header (64px) and studio toolbar when scrolled into view. */
   .canvas-panel { order: 1; height: auto; min-height: 0; overflow: visible; scroll-margin-top: 136px; }
-  .inspiration-workspace { padding-top: 30px; }
+  /* New creations open directly on generation settings without an empty canvas gap. */
+  .canvas-panel:has(> .inspiration-workspace) { display: none; }
   .professional-workspace { margin-top: 16px; padding: 13px; }
   .sequence-header { grid-template-columns: minmax(0, 1fr) 36px; }
   .sequence-header dl { display: none; }
@@ -6574,6 +7091,11 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .quick-templates-list::-webkit-scrollbar { display: none; }
   .quick-templates-list button { flex: 0 0 auto; min-width: 124px; scroll-snap-align: start; }
   .result-grid { grid-template-columns: 1fr; }
+  .result-heading-complete { align-items: flex-start; gap: 10px; }
+  .result-heading-complete > .result-heading-title { flex: 1 1 100%; }
+  .result-heading-actions { flex: 0 0 100%; flex-wrap: nowrap; gap: 6px; }
+  .result-heading-actions .secondary-command,
+  .result-heading-actions .icon-action { flex: 1 1 auto; min-width: 0; gap: 4px; padding-inline: 6px; font-size: 11px; }
   .complete-video-card > header { align-items: flex-start; flex-direction: column; gap: 10px; }
   .complete-video-card > footer { align-items: flex-start; flex-direction: column; }
   .result-media { height: clamp(280px, 62vh, 460px); }
@@ -6582,9 +7104,18 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 }
 
 @media (max-width: 480px) {
-  .mode-option { min-height: 40px; }
+  .result-heading-actions { gap: 5px; }
+  .result-heading-actions .secondary-command,
+  .result-heading-actions .icon-action { gap: 2px; padding-inline: 2px; font-size: 10px; }
+  .result-heading-actions svg { width: 14px; height: 14px; }
+  .capability-switch button { min-height: 36px; font-size: 10px; }
+  .mode-switch { flex-basis: 320px; width: min(320px, 100%); }
+  .mode-option { min-height: 36px; }
   .mode-option span { font-size: 11px; }
-  .history-entry-surface { gap: 8px; padding-right: 12px; }
+  .mode-option-copy strong { font-size: 11px; }
+  .history-entry-surface { gap: 7px; min-height: 44px; padding-right: 10px; }
+  .history-entry-icon { flex-basis: 30px; width: 30px; height: 30px; }
+  .history-entry-copy strong { font-size: 12px; }
   .two-column-fields,
   .advanced-grid { grid-template-columns: 1fr; }
   .video-params-result { flex-direction: column; align-items: flex-start; }
