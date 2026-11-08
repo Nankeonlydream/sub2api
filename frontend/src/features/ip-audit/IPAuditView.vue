@@ -27,6 +27,7 @@
 </template>
 <script setup lang="ts">
 import { computed } from 'vue'
+import { createPinia, getActivePinia } from 'pinia'
 import NewFeatureBadge from '@/components/common/NewFeatureBadge.vue'
 import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 import { useAuthStore } from '@/stores/auth'
@@ -39,7 +40,7 @@ import IPAuditPanel from './IPAuditPanel.vue'
 import KeyRiskPanel from './KeyRiskPanel.vue'
 
 const { t } = useI18n()
-const auth = useAuthStore()
+const auth = useAuthStore(getActivePinia() ?? createPinia())
 const route = useRoute(), router = useRouter()
 type IPAuditTab = 'sources' | 'config' | 'keys'
 const activeTab = computed<IPAuditTab>(() => route.query.tab === 'keys' ? 'keys' : route.query.tab === 'config' || route.hash === '#ip-risk-settings' ? 'config' : 'sources')
