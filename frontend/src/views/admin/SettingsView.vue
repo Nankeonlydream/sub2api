@@ -7458,6 +7458,7 @@
 
         <!-- Tab: Features (功能开关) -->
         <div v-show="activeTab === 'features'" class="space-y-6">
+        <h2 id="settings-section-smart-ops-sidebar" class="sr-only">{{ t('admin.settings.features.smartOpsSidebar.title') }}</h2>
         <SmartOpsSidebarSettings v-model="form.smart_ops_hidden_menu_items" />
         <div class="card" data-testid="protocol-feature-switches">
           <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">

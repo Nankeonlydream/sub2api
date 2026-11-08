@@ -1,7 +1,7 @@
 <template>
   <section class="card" data-testid="smart-ops-sidebar-settings">
     <div class="border-b border-gray-100 px-6 py-4 dark:border-dark-700">
-      <h2 id="settings-section-smart-ops-sidebar" tabindex="-1" class="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
+      <h2 class="flex items-center gap-2 text-lg font-semibold text-gray-900 dark:text-white">
         {{ t('admin.settings.features.smartOpsSidebar.title') }}
         <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.smartOpsSidebar" :user-id="authStore.user?.id" />
       </h2>

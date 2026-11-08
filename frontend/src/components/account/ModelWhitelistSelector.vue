@@ -168,6 +168,7 @@ const props = withDefaults(defineProps<{
   accountId?: number
   syncCredentials?: SyncUpstreamPreviewParams
   showSyncButton?: boolean
+  preserveLocalModels?: boolean
 }>(), { showSyncButton: true })
 
 const emit = defineEmits<{
@@ -358,7 +359,13 @@ const syncUpstreamModels = async () => {
     const removedCount = [...previous.keys()].filter(model => !updated.has(model)).length
     const changed = previous.size !== updated.size || [...updated].some(([model, target]) => previous.get(model) !== target)
 
-    emit('update:modelValue', next.allowedModels)
+    const syncedModels = props.preserveLocalModels
+      ? [...new Set([
+        ...props.modelValue.filter(model => model.trim() && !model.includes('*')),
+        ...next.allowedModels
+      ])]
+      : next.allowedModels
+    emit('update:modelValue', syncedModels)
     emit('update:modelMappings', next.modelMappings)
     const warnings = result.warnings ?? []
     const hasPartialMetadata = warnings.some(

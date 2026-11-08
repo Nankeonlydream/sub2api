@@ -405,6 +405,7 @@
               v-model:model-mappings="modelMappings"
               :platform="account?.platform || 'anthropic'"
               :account-id="account?.id"
+              :preserve-local-models="account.platform === 'grok'"
               :show-sync-button="account.platform !== 'grok' || !account.id"
               @upstream-sync-finished="refreshGrokDiagnostics"
             />
@@ -1021,6 +1022,7 @@
             v-model:model-mappings="modelMappings"
             :platform="account?.platform || 'anthropic'"
             :account-id="account?.id"
+            :preserve-local-models="account.platform === 'grok'"
             :show-sync-button="account.platform !== 'grok' || !account.id"
             @upstream-sync-finished="refreshGrokDiagnostics"
           />
