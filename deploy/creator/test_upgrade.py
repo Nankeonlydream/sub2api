@@ -22,6 +22,21 @@ NEW = server.REPOSITORY + '@sha256:' + 'b' * 64
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_consolidated_node_uses_application_project_not_database_project(self):
+        with patch.object(server.socket, 'gethostname', return_value=server.CONSOLIDATED_HOST):
+            consolidated = load('server')
+        self.assertIn(server.CONSOLIDATED_HOST, consolidated.HOSTS)
+        self.assertEqual(consolidated.DEPLOY, Path('/root/catbee-app'))
+        self.assertEqual(consolidated.COMPOSE,
+                         ['docker', 'compose', '-f', '/root/catbee-app/docker-compose.yml',
+                          '-f', '/root/catbee-app/docker-compose.creator.yml'])
+        consolidated.validate_current_image(server.CONSOLIDATED_HOST, OLD)
+        with self.assertRaises(RuntimeError):
+            consolidated.validate_current_image(server.CONSOLIDATED_HOST, server.LEFT_LEGACY_IMAGE)
+        with patch.object(server.socket, 'gethostname', return_value=server.NEW_HOST):
+            application = load('server')
+        self.assertEqual(application.DEPLOY, Path('/root/sub2api-deploy'))
+
     def test_legacy_image_only_allowed_on_registered_left_node(self):
         server.validate_current_image(server.LEFT_HOST, server.LEFT_LEGACY_IMAGE)
         for host in [server.HOST, server.LEFT_HOST]:

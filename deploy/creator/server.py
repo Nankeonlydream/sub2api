@@ -15,11 +15,14 @@ import time
 HOST = 'iZrj92zzv39jbi7n9fz4fuZ'
 LEFT_HOST = 'iZrj9eby63lh2zp7dbipn8Z'
 NEW_HOST = 'iZrj97sgqumwizgptmhvzaZ'
-HOSTS = {HOST: 'right', LEFT_HOST: 'left', NEW_HOST: 'catbee-app'}
+CONSOLIDATED_HOST = 'iZrj98y2r2rfswybuc7r9bZ'
+HOSTS = {HOST: 'right', LEFT_HOST: 'left', NEW_HOST: 'catbee-app',
+         CONSOLIDATED_HOST: 'catbee-app-db'}
 LEFT_LEGACY_IMAGE = 'ghcr.io/ranxi2001/sub2api@sha256:67d3167a638bab1f466384f9db187873e983d776a6a8e741ae6bc2402867e83a'
 LEFT_OFFICIAL_IMAGE = 'ghcr.io/wei-shaw/sub2api@sha256:44b59fc74b0b582750ef5f38146782db177767ef9d3f34351f1c75c157b1bb88'
 REPOSITORY = 'ghcr.io/nankeonlydream/sub2api'
-DEPLOY = Path('/root/sub2api-deploy')
+# The consolidated node keeps its existing database Compose project separate.
+DEPLOY = Path('/root/catbee-app' if socket.gethostname() == CONSOLIDATED_HOST else '/root/sub2api-deploy')
 RELEASES = Path('/root/sub2api-creator-release')
 OVERRIDE = DEPLOY / 'docker-compose.creator.yml'
 COMPOSE = ['docker', 'compose', '-f', str(DEPLOY / 'docker-compose.yml'), '-f', str(OVERRIDE)]
