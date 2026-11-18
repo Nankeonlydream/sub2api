@@ -10,7 +10,7 @@ type AdminHandlers struct {
 	NativeVideoReview      *admin.NativeVideoReviewHandler
 	RequestCapture         *admin.RequestCaptureHandler
 	AccountOps             *admin.AccountOpsHandler
-	AccountTokenGuard      *admin.AccountTokenGuardHandler
+	OpenAIRelogin          *admin.OpenAIReloginHandler
 	AccountTokenGuardV2    *admin.AccountTokenGuardV2Handler
 	Dashboard              *admin.DashboardHandler
 	User                   *admin.UserHandler
