@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"net/mail"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,12 +38,10 @@ func ValidateAccountOpsConfig(c AccountOpsConfig) (err error) {
 	if c.CooldownMinutes < 5 || c.CooldownMinutes > 1440 {
 		return errors.New("cooldown_minutes must be between 5 and 1440")
 	}
-	if c.Recipient != "" {
-		address, err := mail.ParseAddress(c.Recipient)
-		if err != nil || address.Address != c.Recipient || strings.ContainsAny(c.Recipient, "\r\n") || len(c.Recipient) > 254 {
-			return errors.New("recipient must be one email address")
-		}
+	if _, err := parseAccountOpsRecipients(c.Recipient); err != nil {
+		return err
 	}
+
 	if err := validateAccountOpsExtras(c); err != nil {
 		return err
 	}
@@ -101,33 +97,37 @@ type AccountOpsService struct {
 	newAPIGroupReader      interface {
 		GetBinding(context.Context, int64) (*NewAPIAccountBinding, error)
 	}
-	newAPIGroupCache sync.Map
-	accounts         AccountRepository
-	usageCache       *UsageCache
-	encryptor        SecretEncryptor
-	fixedKey         bool
-	timezone         *time.Location
-	robotClient      *http.Client
-	robotMu          sync.Mutex
-	robotLast        map[string]time.Time
-	autoSeen         map[int64]bool
-	autoConfigMu     sync.Mutex
-	autoGroups       GroupRepository
-	autoAccounts     AccountConcurrencyRepository
-	autoConfig       atomic.Value
-	autoBlocked      atomic.Bool
-	autoResults      chan AccountConcurrencyResult
-	settings         SettingRepository
-	repo             AccountOpsRepository
-	email            accountOpsEmailSender
-	config           atomic.Value
-	queue            chan AccountOpsEvent
-	cancel           context.CancelFunc
-	wg               sync.WaitGroup
-	lifecycle        sync.Mutex
-	settingsMu       sync.Mutex
-	dropped          atomic.Uint64
-	failures         atomic.Uint64
+	newAPIGroupCache   sync.Map
+	accounts           AccountRepository
+	usageCache         *UsageCache
+	encryptor          SecretEncryptor
+	fixedKey           bool
+	timezone           *time.Location
+	robotClient        *http.Client
+	robotMu            sync.Mutex
+	robotLast          map[string]time.Time
+	degradationCursor  int64
+	autoSeen           map[int64]bool
+	autoConfigMu       sync.Mutex
+	autoGroups         GroupRepository
+	autoAccounts       AccountConcurrencyRepository
+	autoConfig         atomic.Value
+	autoBlocked        atomic.Bool
+	fallbackSharedJobs atomic.Bool
+	fallbackSLAReader  atomic.Value
+	fallbackStatus     atomic.Value
+	autoResults        chan AccountConcurrencyResult
+	settings           SettingRepository
+	repo               AccountOpsRepository
+	email              accountOpsEmailSender
+	config             atomic.Value
+	queue              chan AccountOpsEvent
+	cancel             context.CancelFunc
+	wg                 sync.WaitGroup
+	lifecycle          sync.Mutex
+	settingsMu         sync.Mutex
+	dropped            atomic.Uint64
+	failures           atomic.Uint64
 }
 
 func NewAccountOpsService(settings SettingRepository, repo AccountOpsRepository, email accountOpsEmailSender) *AccountOpsService {
@@ -182,6 +182,15 @@ func (s *AccountOpsService) Observe(account *Account, status int, headers http.H
 		name = name[:120]
 	}
 	group := accountOpsGroupAssignment(account, c)
+	// Linked wallets use one authoritative balance-threshold episode. Request
+	// failures from individual keys must not send a second low-balance alert.
+	if kind == "balance_low" && accountOpsProviderID(c, account.ID) > 0 {
+		for _, rule := range c.BalanceThresholds {
+			if rule.Enabled && thresholdAccountGroup(nil, rule.AccountID, c).ID == group.ID {
+				return
+			}
+		}
+	}
 	event := AccountOpsEvent{AccountID: account.ID, AccountName: string(name), GroupID: group.ID, GroupName: group.Name, Kind: kind, Signal: signal, HTTPStatus: status}
 	// The hot request path never waits for SMTP or the database. Raw errors and credentials do not enter the queue.
 	select {
@@ -205,11 +214,15 @@ func (s *AccountOpsService) start(runSharedJobs bool) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	s.fallbackSharedJobs.Store(runSharedJobs)
 	s.wg.Add(2)
 	go s.runAutoConfig(ctx)
 	go func() {
 		defer s.wg.Done()
 		s.refreshConfig(ctx, runSharedJobs)
+		if runSharedJobs {
+			s.evaluateOpenAIAPIKeyFallback(ctx)
+		}
 		ticker := time.NewTicker(15 * time.Second)
 		defer ticker.Stop()
 		for {
@@ -227,6 +240,9 @@ func (s *AccountOpsService) start(runSharedJobs bool) {
 					s.failures.Add(1)
 				}
 			case <-ticker.C:
+				if runSharedJobs {
+					s.evaluateOpenAIAPIKeyFallback(ctx)
+				}
 				if s.refreshConfig(ctx, runSharedJobs) && runSharedJobs {
 					s.scanBalances(ctx)
 					s.deliver(ctx)

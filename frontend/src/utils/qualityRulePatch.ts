@@ -12,7 +12,7 @@ export function qualityJudgeConfigured(judge?: QualityJudgeConfig): judge is Qua
 // 新建「降智开 BPS」时的默认勾选；target_group_id = -1 表示还没选 403 后的目标分组。
 export function defaultQualityBPS(): QualityBPSPolicy {
   return { failure_threshold: 2, usage_percent: 0, require_all: false, all_models: false, models: [...DEFAULT_EXCEL_BPS_MODELS],
-    omit_unsupported_tools: false, ignore_encrypted_content: true, auto_disable_on_403: true, auto_recover_on_403: false, recovery_interval_minutes: DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, auto_move_on_403: false,
+    omit_unsupported_tools: false, ignore_encrypted_content: true, web_search: false, web_search_auto: false, auto_disable_on_403: true, auto_recover_on_403: false, recovery_interval_minutes: DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES, auto_move_on_403: false,
     target_group_id: -1, session_proxy: false, proxy_source: 'mihomo', cache_creation_as_input: true, pass_threshold: 2, hold_on_usage: true }
 }
 
@@ -44,6 +44,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
     model_ids: source.model_ids ? [...source.model_ids] : undefined,
     quality: {
       trigger_on_upstream_5xx: policy.trigger_on_upstream_5xx ?? false,
+      oauth_401_max_rounds: policy.oauth_401_max_rounds ?? 0,
       expected_answer: source.question_kind === 'random_reasoning' ? '' : policy.expected_answer,
       action,
       remove_group_ids: qualityUsesGroups(action) ? [...(policy.remove_group_ids || [])] : [],
@@ -55,6 +56,7 @@ export function copyQualityRuleConfig(source: PelicanTestConfig): PelicanTestCon
       bps: bps ? {
         failure_threshold: bps.failure_threshold, usage_percent: bps.usage_percent, require_all: bps.require_all,
         all_models: bps.all_models, models: [...(bps.models || [])], omit_unsupported_tools: bps.omit_unsupported_tools,
+        web_search: bps.web_search === true, web_search_auto: bps.web_search === true && bps.web_search_auto === true,
         ignore_encrypted_content: bps.ignore_encrypted_content, auto_disable_on_403: bps.auto_disable_on_403,
         auto_recover_on_403: bps.auto_recover_on_403, recovery_interval_minutes: bps.recovery_interval_minutes,
         auto_move_on_403: bps.auto_move_on_403, target_group_id: bps.target_group_id,
@@ -84,6 +86,7 @@ export function qualityBPSError(bps: QualityBPSPolicy): string {
 export function qualityBPSPayload(bps: QualityBPSPolicy): QualityBPSPolicy {
   return {
     ...bps,
+    web_search: bps.web_search === true, web_search_auto: bps.web_search === true && bps.web_search_auto === true,
     recovery_interval_minutes: bps.recovery_interval_minutes ?? DEFAULT_BPS_RECOVERY_INTERVAL_MINUTES,
     models: bps.all_models ? [] : [...bps.models],
     target_group_id: bps.auto_move_on_403 ? bps.target_group_id : 0,
@@ -103,9 +106,16 @@ export function qualityUsesRetestRest(action?: QualityPolicy['action']) {
   return action === 'remove_groups' || action === 'disable_scheduling' || qualityUsesModelResults(action)
 }
 
+function oauth401MaxRounds(value?: number): number {
+  const rounds = value ?? 0
+  if (!Number.isInteger(rounds) || rounds < 0 || rounds > 100) throw new Error('qualityOps.invalidOAuth401MaxRounds')
+  return rounds
+}
+
 // Used by single-account creation, templates and bulk editing. Action cleanup
 // and validation belong here so all entry points preserve the same semantics.
 export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
+  oauth401MaxRounds(policy.oauth_401_max_rounds)
   const next = { ...policy, remove_group_ids: qualityUsesGroups(policy.action) ? [...policy.remove_group_ids] : [] }
   const rest = qualityUsesRetestRest(next.action) ? policy.retest_rest_minutes ?? 0 : 0
   if (!Number.isInteger(rest) || rest < 0 || rest > 10080) throw new Error('qualityOps.invalidRetestRest')
@@ -129,7 +139,7 @@ export function qualityActionPayload(policy: QualityPolicy): QualityPolicy {
   return next
 }
 
-export const qualityRuleFields = ['model', 'schedule', 'test', 'action', 'restore', 'retention', 'trigger', 'enabled'] as const
+export const qualityRuleFields = ['model', 'schedule', 'test', 'action', 'restore', 'retention', 'trigger', 'oauth401', 'enabled'] as const
 export type QualityRuleField = typeof qualityRuleFields[number]
 export type QualityRuleDraft = {
   model_id: string
@@ -149,12 +159,13 @@ export function qualityRuleFieldValue(rule: Pick<ScheduledTestPlan, 'model_id' |
     case 'enabled': return rule.enabled
     case 'retention': return rule.max_results
     case 'trigger': return q?.trigger_on_upstream_5xx ?? false
+    case 'oauth401': return q?.oauth_401_max_rounds ?? 0
     case 'test': return [cfg?.question_kind, cfg?.test_channel || 'account', cfg?.prompt, cfg?.reasoning_effort, cfg?.parallel_count,
       q?.expected_answer, q?.judge?.kind || 'llm', q?.judge?.group_id, q?.judge?.model_id, q?.judge?.prompt]
     case 'restore': return [q?.auto_restore, b?.pass_threshold, b?.hold_on_usage]
     case 'action': return [q?.action, q?.remove_group_ids || [], q?.remove_models || [], q?.recovery_concurrency, q?.retest_rest_minutes ?? 0,
       b ? [b.failure_threshold, b.usage_percent, b.require_all, b.all_models, b.models || [], b.omit_unsupported_tools,
-        b.ignore_encrypted_content, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
+        b.ignore_encrypted_content, b.web_search === true, b.web_search_auto === true, b.auto_disable_on_403, b.auto_recover_on_403, b.recovery_interval_minutes,
         b.auto_move_on_403, b.target_group_id, b.session_proxy, b.proxy_source, b.cache_creation_as_input] : null]
   }
 }
@@ -182,7 +193,7 @@ export function buildQualityRulePatch(
   }
   if (fields.includes('enabled')) patch.enabled = draft.enabled
   if (fields.includes('retention') && !fields.includes('test') && !fields.includes('model') && (plan.pelican_config?.model_ids?.length || 1) * (plan.pelican_config?.parallel_count || 1) > patch.max_results!) throw new Error('qualityOps.retentionTooSmall')
-  if (!fields.some(field => ['test', 'action', 'restore', 'trigger'].includes(field)) &&
+  if (!fields.some(field => ['test', 'action', 'restore', 'trigger', 'oauth401'].includes(field)) &&
     !(fields.includes('model') && (draft.pelican_config.model_ids?.length || plan.pelican_config?.model_ids?.length))) return patch
 
   if (!plan.pelican_config?.quality) throw new Error('qualityOps.ruleConfigMissing')
@@ -212,6 +223,7 @@ export function buildQualityRulePatch(
     }
   }
   if (fields.includes('trigger')) config.quality.trigger_on_upstream_5xx = source.quality.trigger_on_upstream_5xx ?? false
+  if (fields.includes('oauth401')) config.quality.oauth_401_max_rounds = oauth401MaxRounds(source.quality.oauth_401_max_rounds)
   if (fields.includes('action')) {
     config.quality = qualityActionPayload({ ...config.quality,
       action: source.quality.action, remove_group_ids: source.quality.remove_group_ids,

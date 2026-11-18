@@ -17,7 +17,7 @@ const plan = (): ScheduledTestPlan => ({
 })
 const bps = (): QualityBPSPolicy => ({
   failure_threshold: 2, usage_percent: 0, require_all: false, all_models: false, models: ['gpt-6-astra'],
-  omit_unsupported_tools: true, ignore_encrypted_content: true, auto_disable_on_403: false,
+  omit_unsupported_tools: true, ignore_encrypted_content: true, web_search: false, web_search_auto: false, auto_disable_on_403: false,
   auto_move_on_403: false, target_group_id: -1, session_proxy: false, proxy_source: 'mihomo', cache_creation_as_input: false,
   pass_threshold: 2, hold_on_usage: true, recovery_interval_minutes: 60,
 })
@@ -27,6 +27,59 @@ const probePlan = () => {
   config.quality!.expected_answer = ''; delete config.quality!.judge
   return rule
 }
+
+describe('OAuth 401 rule cleanup settings', () => {
+  it('copies the explicit limit and keeps legacy rules disabled instead of applying new-rule defaults', () => {
+    const source = draft().pelican_config
+    expect(copyQualityRuleConfig(source).quality.oauth_401_max_rounds).toBe(0)
+    source.quality.oauth_401_max_rounds = 9
+    expect(copyQualityRuleConfig(source).quality.oauth_401_max_rounds).toBe(9)
+    source.quality.oauth_401_max_rounds = 0
+    expect(copyQualityRuleConfig(source).quality.oauth_401_max_rounds).toBe(0)
+  })
+
+  it('changes only the cleanup limit when its independent bulk checkbox is selected', () => {
+    const current = plan(), source = draft()
+    current.pelican_config!.quality!.oauth_401_max_rounds = 12
+    source.pelican_config.quality.oauth_401_max_rounds = 6
+    const original = JSON.stringify(current)
+    const changed = buildQualityRulePatch(current, source, ['oauth401'])
+    expect(changed.pelican_config!.quality).toEqual({ ...current.pelican_config!.quality, oauth_401_max_rounds: 6 })
+    expect(changed).not.toHaveProperty('model_id')
+    expect(JSON.stringify(current)).toBe(original)
+    expect(buildQualityRulePatch(current, source, ['restore']).pelican_config!.quality!.oauth_401_max_rounds).toBe(12)
+    expect(buildQualityRulePatch(current, source, ['action']).pelican_config!.quality!.oauth_401_max_rounds).toBe(12)
+    expect(buildQualityRulePatch(current, source, ['enabled'])).toEqual({ enabled: false })
+    source.pelican_config.quality.oauth_401_max_rounds = 0
+    expect(buildQualityRulePatch(current, source, ['oauth401']).pelican_config!.quality!.oauth_401_max_rounds).toBe(0)
+    delete source.pelican_config.quality.oauth_401_max_rounds
+    expect(buildQualityRulePatch(current, source, ['oauth401']).pelican_config!.quality!.oauth_401_max_rounds).toBe(0)
+  })
+
+  it('compares cleanup independently of the failure action and treats a missing value as disabled', () => {
+    const current = plan(), changed = plan()
+    changed.pelican_config!.quality!.oauth_401_max_rounds = 6
+    expect(qualityRuleFieldValue(current, 'oauth401')).toBe(0)
+    expect(qualityRuleFieldValue(changed, 'oauth401')).toBe(6)
+    expect(qualityRuleFieldValue(current, 'action')).toEqual(qualityRuleFieldValue(changed, 'action'))
+  })
+
+  it.each([0, 1, 6, 100])('accepts a cleanup limit of %s rounds', limit => {
+    const source = draft()
+    source.pelican_config.quality.oauth_401_max_rounds = limit
+    expect(qualityActionPayload(source.pelican_config.quality).oauth_401_max_rounds).toBe(limit)
+    expect(buildQualityRulePatch(plan(), source, ['oauth401']).pelican_config!.quality!.oauth_401_max_rounds).toBe(limit)
+  })
+
+  it.each([-1, 1.5, 101, NaN, Infinity])('rejects an invalid cleanup limit of %s in create and bulk payloads', limit => {
+    const source = draft()
+    source.pelican_config.quality.oauth_401_max_rounds = limit
+    expect(() => qualityActionPayload(source.pelican_config.quality)).toThrow('qualityOps.invalidOAuth401MaxRounds')
+    expect(() => buildQualityRulePatch(plan(), source, ['oauth401'])).toThrow('qualityOps.invalidOAuth401MaxRounds')
+    // An unchecked cleanup field cannot block an unrelated top-level edit.
+    expect(buildQualityRulePatch(plan(), source, ['enabled'])).toEqual({ enabled: false })
+  })
+})
 
 describe('quality rule copy inputs', () => {
   it('preserves quality rest in copies and changes it only with the bulk action field', () => {
@@ -316,5 +369,20 @@ describe('complete template selected fields', () => {
     const copied = copyQualityRuleConfig(source)
     expect(copied.quality.action).toBe('observe_only'); expect(copied.quality.remove_group_ids).toEqual([]); expect(copied.quality.auto_restore).toBe(false)
     expect(copied.quality.remove_models).toBeUndefined(); expect(copied.quality.bps).toBeUndefined()
+  })
+})
+
+
+describe('BPS search rule roundtrip', () => {
+  it('preserves search settings in copies and detects an action edit', () => {
+    const original = plan()
+    original.pelican_config!.quality!.action = 'enable_bps'
+    original.pelican_config!.quality!.bps = { ...bps(), web_search: true, web_search_auto: true }
+    const copied = copyQualityRuleConfig(original.pelican_config!)
+    expect(copied.quality.bps).toMatchObject({ web_search: true, web_search_auto: true })
+    const changed = { ...original, pelican_config: copied }
+    copied.quality.bps!.web_search_auto = false
+    expect(qualityRuleFieldValue(original, 'action')).not.toEqual(qualityRuleFieldValue(changed, 'action'))
+    expect(qualityBPSPayload({ ...bps(), web_search: false, web_search_auto: true })).toMatchObject({ web_search: false, web_search_auto: false })
   })
 })

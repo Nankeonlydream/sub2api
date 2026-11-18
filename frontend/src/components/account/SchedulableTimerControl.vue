@@ -5,6 +5,13 @@
       <NewFeatureBadge v-if="canManageTimers && noticeUserId != null" :notice-id="NEW_FEATURE_NOTICES.accountDailyScheduling" :user-id="noticeUserId" compact />
     </div>
     <p v-if="dailyWindow" data-test="timer-daily-window" class="mt-1 max-w-72 whitespace-normal break-words text-gray-600 dark:text-dark-300">{{ dailyWindow }}</p>
+    <div v-if="pending.length" data-test="timer-pending-summary" class="mt-1 max-w-80 whitespace-normal break-words text-gray-600 dark:text-dark-300">
+      <p class="font-medium">{{ t('admin.accounts.timer.pending') }}</p>
+      <p v-for="task in pending" :key="task.action" :data-test="`timer-summary-${task.action}`" class="mt-1">
+        {{ t(`admin.accounts.timer.${task.action}Action`) }} · {{ task.recurrence === 'daily' ? t('admin.accounts.timer.dailyAt', { time: task.daily_time || task.local_time }) : t('admin.accounts.timer.once') }}<br />
+        {{ taskLocalTime(task) }} · {{ countdown(task) }}
+      </p>
+    </div>
     <p v-if="error && !expanded" class="mt-1 max-w-80 whitespace-normal text-red-600" role="alert">{{ error }}</p>
     <button v-if="loadFailed" type="button" class="text-primary-600 underline" @click="load">{{ t('admin.accounts.timer.reload') }}</button>
     <BaseDialog v-if="expanded" :show="expanded" :title="accountName ? `${t('admin.accounts.timer.manage')} · ${accountName}` : t('admin.accounts.timer.manage')" width="normal" :close-on-escape="!busy && !switching" :show-close-button="!busy && !switching" @close="expanded = false">
@@ -149,7 +156,11 @@ let loadSequence = 0
 watch(form, () => { preview.value = null; dailyPreview.value = null; confirmed.value = false }, { flush: 'sync' })
 watch(action, () => { preview.value = null; confirmed.value = false }, { flush: 'sync' })
 watch(() => props.refreshKey, () => { expanded.value = false; void load() })
-function reasonText(reason: string) { return t(`admin.accounts.timer.errors.${reason}`) }
+function reasonText(reason: string) {
+  if (reason.startsWith('oauth_initial:')) return t('autoConfig.apikeyDisposition.timerSource')
+  if (reason === 'oauth_disposition_superseded') return t('autoConfig.apikeyDisposition.superseded')
+  return t(`admin.accounts.timer.errors.${reason}`)
+}
 function showError(err: unknown) {
   const code = (err as { response?: { data?: { reason?: string } } })?.response?.data?.reason?.replace(/^TIMER_/, '')
   const known = ['timezone', 'datetime', 'dst', 'duration', 'mode', 'past', 'confirmation', 'version', 'conflict', 'request', 'account_deleted']

@@ -47,6 +47,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	// Read request body
 	body, err := readLenientJSONRequestBodyWithPrealloc(c.Request, h.cfg)
 	if err != nil {
+		if middleware2.RejectRequestBodyReadError(c, err) {
+			return
+		}
 		if maxErr, ok := extractMaxBytesError(err); ok {
 			h.chatCompletionsErrorResponse(c, http.StatusRequestEntityTooLarge, "invalid_request_error", buildBodyTooLargeMessage(maxErr.Limit))
 			return
@@ -84,6 +87,12 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 	}
 	if rejectSystemOneOnlyPlatform(c, apiKey, h.chatCompletionsErrorResponse) {
 		return
+	}
+	if cappedBody, changed, err := applyOpenAIReasoningEffortPolicyForRequest(c, apiKey, body); err != nil {
+		respondOpenAIReasoningEffortPolicyError(c, err, h.chatCompletionsErrorResponse)
+		return
+	} else if changed {
+		body = cappedBody
 	}
 	reqStream, ok := parseOpenAICompatibleStream(body)
 	if !ok {
@@ -323,6 +332,9 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 		if accountReleaseFunc != nil {
 			accountReleaseFunc()
 		}
+		if service.IsUpstreamModerationDenied(err) {
+			return
+		}
 
 		// 提交 usage 记录。成功路径与"流中断但 Forward 已观测到 usage 的部分结果"
 		// 错误路径共用；failover 错误恒定 result=nil，不会重复计费。
@@ -392,6 +404,7 @@ func (h *GatewayHandler) ChatCompletions(c *gin.Context) {
 				zap.Bool("upstream_error_response_already_written", upstreamErrorAlreadyCommunicated),
 				zap.Error(err),
 			)
+			h.gatewayService.ReleaseStickySessionAfterCommittedNoContent(context.WithoutCancel(c.Request.Context()), apiKey.GroupID, selectionSessionHash, account.ID, err)
 			if result != nil {
 				submitForwardUsage(result)
 			}

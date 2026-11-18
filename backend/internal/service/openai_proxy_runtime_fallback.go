@@ -163,13 +163,22 @@ func (s *OpenAIGatewayService) doOpenAIProxyAttempt(req *http.Request, account *
 	if err = s.fenceAuthConnectionEgress(req.Context(), req, account); err != nil {
 		return nil, err
 	}
-	if s.pluginManager != nil && account.AuthConnectionID == "" && !s.codexTicketRequestBound(req, account) {
+	if s.pluginManager != nil && !account.OpenAIRequestProxyEnabled() && account.AuthConnectionID == "" && !s.codexTicketRequestBound(req, account) {
 		resp, handled, err := s.pluginManager.RoundTripOpenAIOAuth(req.Context(), req, target.url, account)
 		if handled {
+			if options, ok := pelicanTestOptionsFromContext(req.Context()); ok && options.nativeOAuthTransport != nil && !IsAstraSourceAcquisition(req.Context()) {
+				*options.nativeOAuthTransport = false
+			}
 			return markOpenAIResponseEgress(resp, req, target.proxyID), err
 		}
 	}
 	resp, err = s.httpUpstream.Do(req, target.url, account.ID, account.Concurrency)
+	if options, ok := pelicanTestOptionsFromContext(req.Context()); ok && options.nativeOAuthTransport != nil && !IsAstraSourceAcquisition(req.Context()) {
+		// Fail-open ticket admission may still send natively. Check the final
+		// sent request too: fast admission can install a ticket in the adapter.
+		*options.nativeOAuthTransport = err == nil && resp != nil && !IsAstraSourceAcquisition(req.Context()) && !s.codexTicketRequestBound(req, account) &&
+			(resp.Request == nil || !s.codexTicketRequestBound(resp.Request, account))
+	}
 	return markOpenAIResponseEgress(resp, req, target.proxyID), err
 }
 
@@ -185,7 +194,7 @@ func (s *OpenAIGatewayService) doUpstreamWithProxyFallback(ctx context.Context, 
 		primary.proxyID = account.Proxy.ID
 		primary.proxyName = account.Proxy.Name
 	}
-	if isControlledExperiment(ctx) || s.codexTicketPinsEgress(req, account) || account.Proxy == nil || primaryProxyURL == "" ||
+	if account.OpenAIRequestProxyEnabled() || isControlledExperiment(ctx) || s.codexTicketPinsEgress(req, account) || account.Proxy == nil || primaryProxyURL == "" ||
 		primaryProxyURL != account.Proxy.URL() ||
 		(account.Proxy.FallbackMode != FallbackModeDirect && account.Proxy.FallbackMode != FallbackModeProxy) {
 		return s.doOpenAIProxyAttempt(req, account, primary)

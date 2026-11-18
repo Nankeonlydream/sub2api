@@ -97,7 +97,12 @@ func ProvideRouter(
 		service.SetWebSearchManager(websearch.NewManager(configs, redisClient))
 	})
 
-	manager, err := serverless.New(serverless.Runtime{ID: cfg.Runtime.ServerlessID, Endpoint: cfg.Runtime.ServerlessEndpoint, Region: cfg.Runtime.ServerlessRegion, Secret: cfg.Runtime.ServerlessSecret, Gateway: cfg.Runtime.Role == config.RuntimeRoleGateway, Version: settingService.ServerlessVersion()}, redisClient, settingService.ServerlessStore())
+	manager, err := serverless.New(serverless.Runtime{
+		ID: cfg.Runtime.ServerlessID, Endpoint: cfg.Runtime.ServerlessEndpoint,
+		Region: cfg.Runtime.ServerlessRegion, Secret: cfg.Runtime.ServerlessSecret,
+		Gateway: cfg.Runtime.Role == config.RuntimeRoleGateway, Version: settingService.ServerlessVersion(),
+		ResponseHeaderTimeout: time.Duration(cfg.Runtime.ServerlessResponseHeaderTimeout) * time.Second,
+	}, redisClient, settingService.ServerlessStore())
 	if err != nil {
 		panic(err)
 	}
@@ -108,6 +113,7 @@ func ProvideRouter(
 		settingService.IPRisk.SetMultiAccountNotifier(service.NewIPRiskAlertNotifier(handlers.Admin.AccountOps.Service(), apiKeyService, settingService))
 	}
 	if cfg.Runtime.Role != config.RuntimeRoleGateway && handlers.Admin != nil && handlers.Admin.Setting != nil {
+		handlers.Admin.Setting.SetKeyRiskAPIKeys(apiKeyService)
 		stop, err := handlers.Admin.Setting.StartKeyRisk(cfg.Database.DSN())
 		if err != nil {
 			slog.Warn("key risk initialization failed")

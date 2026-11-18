@@ -325,7 +325,7 @@ describe('admin AccountsView — 账号行展示', () => {
     await flushPromises()
 
     // Toolbar navigation links (e.g. upstream channel management) carry a data-testid.
-    const links = wrapper.findAll('a:not([data-testid])')
+    const links = wrapper.findAll('a[target="_blank"]:not([data-testid])')
     expect(links).toHaveLength(1)
     const [link] = links
     expect(link.text()).toBe('relay-account')

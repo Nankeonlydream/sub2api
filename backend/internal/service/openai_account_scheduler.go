@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"go.uber.org/zap"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -82,6 +84,7 @@ type OpenAIAccountScheduleRequest struct {
 	StickyWeighted          bool
 	SubscriptionPriority    bool
 	PreserveStickyBinding   bool
+	StrictSessionAffinity   bool
 	// DisableStickyEscape keeps task-owner lookups on their account even when
 	// generic sticky health or concurrency heuristics would prefer another.
 	DisableStickyEscape bool
@@ -422,18 +425,42 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	req OpenAIAccountScheduleRequest,
 ) (selection *AccountSelectionResult, decision OpenAIAccountScheduleDecision, err error) {
 	recovery := openAIAgentRecoveryFromContext(ctx)
+	// Preserve the public refusal and admission policy, while allowing operators
+	// to identify the exact owner check without capturing conversation state.
+	ownerUnavailable := func(stage string, ownerID int64) error {
+		logger.FromContext(ctx).Warn("openai.agent_owner_selection_refused",
+			zap.String("stage", stage), zap.Int64("owner_account_id", ownerID))
+		return openAIAgentRecoveryError("owner_unavailable")
+	}
 	if recovery != nil && recovery.lookupErr != nil {
 		return nil, decision, recovery.lookupErr
 	}
 	if recovery != nil && recovery.conflict {
-		return nil, decision, openAIAgentRecoveryError("owner_conflict")
+		return nil, decision, openAIRecoveryDiagnosticError("owner_conflict", recovery.diagnostics.subreason, recovery)
 	}
 	if recovery != nil && recovery.owner != nil {
 		if req.Platform != PlatformOpenAI || req.SessionHash != recovery.session ||
 			derefGroupID(req.GroupID) != recovery.groupID || req.RequestedModel != recovery.model {
-			return nil, decision, openAIAgentRecoveryError("owner_unavailable")
+			return nil, decision, ownerUnavailable("request_scope", recovery.owner.accountID)
 		}
+	}
+	if recovery.ownerBindingRequired() {
 		req.StickyAccountID = recovery.owner.accountID
+		req.StickyWeighted = false
+		req.PreserveStickyBinding = true
+		req.DisableStickyEscape = true
+		req.PreviousResponseCanMove = false
+	}
+	// Agent-history opt-out does not migrate provider-side response pointers.
+	// Keep this independent of the presence of an encrypted item owner.
+	pointerOwner := int64(0)
+	if recovery != nil && recovery.previousResponseID != "" {
+		var pointerErr error
+		pointerOwner, pointerErr = s.service.getOpenAIWSStateStore().GetResponseAccount(ctx, recovery.groupID, recovery.previousResponseID)
+		if pointerErr != nil || pointerOwner <= 0 || req.PreviousResponseID != recovery.previousResponseID {
+			return nil, decision, ownerUnavailable("response_pointer", pointerOwner)
+		}
+		req.StickyAccountID = pointerOwner
 		req.StickyWeighted = false
 		req.PreserveStickyBinding = true
 		req.DisableStickyEscape = true
@@ -442,12 +469,67 @@ func (s *defaultOpenAIAccountScheduler) Select(
 	if s != nil && s.service != nil && s.service.openAIGroupRequiresPrivacySet(ctx, req.GroupID) {
 		req.RequirePrivacySet = true
 	}
+	qwenPreviousOwner := int64(0)
+	if req.Platform == PlatformQwen && strings.TrimSpace(req.PreviousResponseID) != "" {
+		store := s.service.getOpenAIWSStateStore()
+		if store == nil {
+			return nil, decision, strictSessionUnavailable("Qwen response ownership is unavailable")
+		}
+		var ownerErr error
+		qwenPreviousOwner, ownerErr = store.GetResponseAccount(ctx, derefGroupID(req.GroupID), strings.TrimSpace(req.PreviousResponseID))
+		if ownerErr != nil || qwenPreviousOwner <= 0 {
+			return nil, decision, strictSessionUnavailable("Qwen response ownership is unknown")
+		}
+		if strings.TrimSpace(req.SessionHash) == "" {
+			req.SessionHash = "qwen-response:" + DeriveSessionHashFromSeed(req.PreviousResponseID)
+		}
+	}
+	stickyKnown := req.StickyAccountID > 0
+	if !stickyKnown && strings.TrimSpace(req.SessionHash) != "" && s.service.cache != nil {
+		accountID, readErr := s.service.getStickySessionAccountID(ctx, req.GroupID, req.SessionHash)
+		stickyKnown = readErr == nil || errors.Is(readErr, ErrStickySessionNotFound)
+		if readErr == nil {
+			req.StickyAccountID = accountID
+		}
+	}
+	ctx = withOpenAIStickyBindingSnapshot(ctx, req.GroupID, req.SessionHash, req.StickyAccountID, stickyKnown)
+	req.StrictSessionAffinity = qwenPreviousOwner > 0 || s.service.strictOpenAISessionAffinity(req.GroupID, req.Platform, req.RequiredImageCapability)
+	if qwenPreviousOwner > 0 {
+		if req.StickyAccountID > 0 && req.StickyAccountID != qwenPreviousOwner {
+			return nil, decision, strictSessionUnavailable("Qwen response ownership conflicts with the session")
+		}
+		req.StickyAccountID = qwenPreviousOwner
+	}
+	if req.Platform == PlatformQwen && req.StickyAccountID > 0 && req.RequiredImageCapability == "" {
+		owner, ownerErr := s.service.accountRepo.GetByID(ctx, req.StickyAccountID)
+		if ownerErr != nil || owner == nil {
+			return nil, decision, strictSessionUnavailable("Qwen session owner is unavailable")
+		}
+		if qwenPreviousOwner > 0 && !owner.QwenSessionCacheEnabled() {
+			return nil, decision, strictSessionUnavailable("Qwen response owner no longer supports native continuation")
+		}
+		req.StrictSessionAffinity = req.StrictSessionAffinity || owner.QwenStrictSessionAffinity()
+	}
 
 	start := time.Now()
 	latencyOwnerID := int64(0)
 	// 命名返回值保证 defer 写入的耗时同时返回给调用方。
 	defer func() {
 		if err == nil && selection != nil && selection.Account != nil {
+			// Every identified Qwen first turn participates in the atomic claim:
+			// a non-strict candidate must not dispatch past a concurrent strict owner.
+			qwenFirstTurn := req.Platform == PlatformQwen && req.StickyAccountID == 0 && strings.TrimSpace(req.SessionHash) != ""
+			if (selection.Account.QwenStrictSessionAffinity() || qwenFirstTurn) && !req.StrictSessionAffinity && req.RequiredImageCapability == "" {
+				if bindErr := s.service.claimStrictSessionAccount(ctx, req, selection.Account.ID); bindErr != nil {
+					if selection.ReleaseFunc != nil {
+						selection.ReleaseFunc()
+					}
+					selection = nil
+					err = bindErr
+					decision = OpenAIAccountScheduleDecision{}
+					return
+				}
+			}
 			denied := s.service.priorityLatencyAdmission(req, selection.Account)
 			if recoveryErr := s.service.checkOpenAIAgentRecoveryAccount(ctx, selection.Account); recoveryErr != nil {
 				denied = recoveryErr
@@ -474,6 +556,13 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		decision.LatencyMs = time.Since(start).Milliseconds()
 		s.metrics.recordSelect(decision)
 	}()
+
+	if err := s.checkOpenAIAgentRecoveryCooldown(ctx, req, recovery); err != nil {
+		return nil, decision, err
+	}
+	if req.StrictSessionAffinity {
+		return s.selectStrictSessionAccount(ctx, req)
+	}
 
 	if priorityHardStopApplies(s.service.prioritySchedulingRuntimeConfig(), req) {
 		// Failover within this request cannot refill an already opened fallback.
@@ -541,14 +630,18 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			}
 		}
 	}
-	if recovery != nil && recovery.owner != nil {
-		if req.GuardianParentAccountID > 0 && req.GuardianParentAccountID != recovery.owner.accountID {
-			return nil, decision, openAIAgentRecoveryError("owner_unavailable")
+	if recovery.ownerBindingRequired() || pointerOwner > 0 {
+		ownerID := pointerOwner
+		if recovery.ownerBindingRequired() {
+			ownerID = recovery.owner.accountID
+		}
+		if req.GuardianParentAccountID > 0 && req.GuardianParentAccountID != ownerID {
+			return nil, decision, ownerUnavailable("guardian_owner", ownerID)
 		}
 		if previousResponseID != "" {
-			ownerID, readErr := s.service.getOpenAIWSStateStore().GetResponseAccount(ctx, derefGroupID(req.GroupID), previousResponseID)
-			if readErr != nil || ownerID != recovery.owner.accountID {
-				return nil, decision, openAIAgentRecoveryError("owner_unavailable")
+			previousOwner, readErr := s.service.getOpenAIWSStateStore().GetResponseAccount(ctx, derefGroupID(req.GroupID), previousResponseID)
+			if readErr != nil || previousOwner != ownerID {
+				return nil, decision, ownerUnavailable("response_owner", ownerID)
 			}
 		}
 		selection, _, err = s.selectBySessionHash(ctx, req)
@@ -556,7 +649,15 @@ func (s *defaultOpenAIAccountScheduler) Select(
 			return nil, decision, err
 		}
 		if selection == nil || selection.Account == nil {
-			return nil, decision, openAIAgentRecoveryError("owner_unavailable")
+			return nil, decision, ownerUnavailable("owner_selection", ownerID)
+		}
+		// Reject a changed producer route before entering Forward. This also
+		// gives the explicit history-omission policy a pre-send refusal to handle.
+		if recoveryErr := s.service.checkOpenAIAgentRecoveryAccount(ctx, selection.Account); recoveryErr != nil {
+			if selection.ReleaseFunc != nil {
+				selection.ReleaseFunc()
+			}
+			return nil, decision, recoveryErr
 		}
 		decision.Layer = openAIAccountScheduleLayerSessionSticky
 		decision.StickySessionHit = true
@@ -644,8 +745,11 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		}
 	}
 
-	if !req.StickyWeighted {
-		selection, escapedSticky, err := s.selectBySessionHash(ctx, req)
+	// For a new Qwen session, retain the original empty observation until the
+	// atomic claim. Learning a concurrent first turn's owner here would turn a
+	// capacity escape into an authorized overwrite of that fresh binding.
+	if !req.StickyWeighted && (req.Platform != PlatformQwen || req.StickyAccountID != 0 || !stickyKnown) {
+		selection, _, err := s.selectBySessionHash(ctx, req)
 		if err != nil {
 			return nil, decision, err
 		}
@@ -659,9 +763,9 @@ func (s *defaultOpenAIAccountScheduler) Select(
 		if latencyOwnerID > 0 {
 			return nil, decision, priorityLatencyAdmissionError(false)
 		}
-		if escapedSticky {
-			req.PreserveStickyBinding = true
-		}
+		// A successful escape advances the normal session binding through the
+		// acquired-selection path below. PreserveStickyBinding is reserved for
+		// explicit ownership; a failed escape leaves the old binding untouched.
 	}
 
 	selection, candidateCount, topK, loadSkew, err := s.selectByLoadBalance(ctx, req)
@@ -705,6 +809,7 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	if accountID <= 0 {
 		var err error
 		accountID, err = s.service.getStickySessionAccountID(ctx, req.GroupID, sessionHash)
+		observeOpenAIStickyBinding(ctx, req.GroupID, sessionHash, accountID, err)
 		if err != nil || accountID <= 0 {
 			return nil, false, nil
 		}
@@ -793,11 +898,11 @@ func (s *defaultOpenAIAccountScheduler) selectBySessionHash(
 	// Ordinary affinity is a preference. A current measured latency penalty
 	// must enter the same scored pool as a freely routed request, independently
 	// of the optional EWMA/capacity escape setting. Ownership paths stay pinned.
-	if s.shouldYieldPriorityLatencySticky(req, account) {
+	if !req.StrictSessionAffinity && s.shouldYieldPriorityLatencySticky(req, account) {
 		return nil, true, nil
 	}
 	escapeCfg := s.service.openAIStickyEscapeConfig()
-	if escapeCfg.enabled && s.shouldRebalancePrioritySticky(ctx, req, account) {
+	if escapeCfg.enabled && !req.StrictSessionAffinity && s.shouldRebalancePrioritySticky(ctx, req, account) {
 		slog.Info("sticky_escape_triggered", "account_id", accountID, "reason", "priority_capacity_imbalance")
 		return nil, true, nil
 	}
@@ -912,7 +1017,6 @@ type openAIAccountCandidateScore struct {
 	score                              float64
 	priority                           int
 	errorRate                          float64
-	priorityErrors                     PriorityErrorEvidence
 	ttft                               float64
 	hasTTFT                            bool
 	rpmCurrent                         int
@@ -2253,6 +2357,9 @@ func (s *defaultOpenAIAccountScheduler) isAccountRequestCompatibleReason(ctx con
 	if account == nil {
 		return false, "account_nil"
 	}
+	if s != nil && s.service != nil && !s.service.openAI409AccountRouteSupported(ctx, account, req.RequestedModel) {
+		return false, "readable_rebuild_route_unsupported"
+	}
 	if account.IsExcelOAuth() && s != nil && s.service != nil && !s.service.excelBPSGloballyEnabled(ctx) {
 		return false, "excel_bps_disabled"
 	}
@@ -2823,7 +2930,13 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	}
 	priority := s.prioritySchedulingRuntimeConfig()
 	observation := priorityObservationFromContext(ctx, requestedModel)
-	scheduler := s.getOpenAIAccountScheduler(ctx, openAIAgentRecoveryBound(ctx) || (platform == PlatformOpenAI && requiredImageCapability == "" && useUpstreamTokenCost && priorityApplies(priority, OpenAIAccountScheduleRequest{GroupID: groupID, RequestedModel: requestedModel, HistoryModel: observation.model})))
+	var stickyAccountID int64
+	var stickyReadErr error
+	if sessionHash != "" && s.cache != nil {
+		stickyAccountID, stickyReadErr = s.getStickySessionAccountID(ctx, groupID, sessionHash)
+	}
+	ctx = withOpenAIStickyBindingSnapshot(ctx, groupID, sessionHash, stickyAccountID, stickyReadErr == nil || errors.Is(stickyReadErr, ErrStickySessionNotFound))
+	scheduler := s.getOpenAIAccountScheduler(ctx, platform == PlatformQwen || s.strictOpenAISessionAffinity(groupID, platform, requiredImageCapability) || openAIAgentRecoveryBound(ctx) || (platform == PlatformOpenAI && requiredImageCapability == "" && useUpstreamTokenCost && priorityApplies(priority, OpenAIAccountScheduleRequest{GroupID: groupID, RequestedModel: requestedModel, HistoryModel: observation.model})))
 	if scheduler == nil {
 		decision.Layer = openAIAccountScheduleLayerLoadBalance
 		if selection, hit, err := s.selectLegacyAccountByPreviousResponse(ctx, groupID, previousResponseID, sessionHash, requestedModel, excludedIDs, requiredTransport, requiredCapability, requiredImageCapability, requireCompact, platform); err != nil {
@@ -2893,17 +3006,21 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		if preserveGuardianParentBinding {
 			legacySessionHash = ""
 		}
+		acceptLegacyAccount := func(account *Account) bool {
+			return s.isOpenAIAccountTransportCompatible(account, requiredTransport, requestedModel) &&
+				accountSupportsOpenAICapabilitiesForRequest(ctx, account, requestedModel, requiredCapability, requiredImageCapability)
+		}
 		if requiredTransport == OpenAIUpstreamTransportAny || requiredTransport == OpenAIUpstreamTransportHTTPSSE {
 			effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 			for {
-				selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+				selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost, acceptLegacyAccount)
 				if err != nil {
 					return nil, decision, err
 				}
 				if selection == nil || selection.Account == nil {
 					return selection, decision, nil
 				}
-				if accountSupportsOpenAICapabilitiesForRequest(ctx, selection.Account, requestedModel, requiredCapability, requiredImageCapability) {
+				if acceptLegacyAccount(selection.Account) {
 					applyLegacySelectionDecision(&decision, selection)
 					return selection, decision, nil
 				}
@@ -2922,15 +3039,14 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 
 		effectiveExcludedIDs := cloneExcludedAccountIDs(excludedIDs)
 		for {
-			selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost)
+			selection, err := s.selectAccountWithLoadAwareness(ctx, groupID, platform, legacySessionHash, requestedModel, effectiveExcludedIDs, requireCompact, requiredCapability, useUpstreamTokenCost, acceptLegacyAccount)
 			if err != nil {
 				return nil, decision, err
 			}
 			if selection == nil || selection.Account == nil {
 				return selection, decision, nil
 			}
-			if s.isOpenAIAccountTransportCompatible(selection.Account, requiredTransport, requestedModel) &&
-				accountSupportsOpenAICapabilitiesForRequest(ctx, selection.Account, requestedModel, requiredCapability, requiredImageCapability) {
+			if acceptLegacyAccount(selection.Account) {
 				applyLegacySelectionDecision(&decision, selection)
 				return selection, decision, nil
 			}
@@ -2954,12 +3070,6 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 		return nil, decision, fmt.Errorf("%w supporting model: %s (channel pricing restriction)", ErrNoAvailableAccounts, requestedModel)
 	}
 
-	var stickyAccountID int64
-	if sessionHash != "" && s.cache != nil {
-		if accountID, err := s.getStickySessionAccountID(ctx, groupID, sessionHash); err == nil && accountID > 0 {
-			stickyAccountID = accountID
-		}
-	}
 	stickyWeighted := s.isOpenAIAdvancedSchedulerStickyWeightedEnabled(ctx)
 	subscriptionPriority := s.isOpenAIAdvancedSchedulerSubscriptionPriorityEnabled(ctx)
 	stickyPreviousAccountID := int64(0)
@@ -2995,11 +3105,11 @@ func (s *OpenAIGatewayService) selectAccountWithSchedulerOnce(
 	})
 }
 
-func accountSupportsOpenAICapabilities(account *Account, requiredCapability OpenAIEndpointCapability, requiredImageCapability OpenAIImagesCapability) bool {
+func accountSupportsOpenAICapabilities(ctx context.Context, account *Account, requiredCapability OpenAIEndpointCapability, requiredImageCapability OpenAIImagesCapability) bool {
 	if account == nil {
 		return false
 	}
-	return account.SupportsOpenAIEndpointCapability(requiredCapability) &&
+	return account.supportsOpenAIEndpointCapabilityForRequest(ctx, requiredCapability) &&
 		account.SupportsOpenAIImageCapability(requiredImageCapability)
 }
 
@@ -3007,13 +3117,16 @@ func accountSupportsOpenAICapabilitiesForRequest(ctx context.Context, account *A
 	if openAIImageRequestRejection(ctx, account, requestedModel) != "" {
 		return false
 	}
-	if account != nil && requiredImageCapability == "" && account.IsExcelBPSEnabledForModel(requestedModel) {
+	// A managed parent is routed by its selected connection; legacy BPS
+	// switches left on it are replaced by prepareAuthConnection and must not
+	// admit an endpoint that connection cannot serve.
+	if account != nil && !account.HasManagedOpenAIConnections() && requiredImageCapability == "" && account.IsExcelBPSEnabledForModel(requestedModel) {
 		switch requiredCapability {
 		case OpenAIEndpointCapabilityChatCompletions, OpenAIEndpointCapabilityResponses, OpenAIEndpointCapabilityResponsesCompact:
 			return true
 		}
 	}
-	return accountSupportsOpenAICapabilities(account, requiredCapability, requiredImageCapability)
+	return accountSupportsOpenAICapabilities(ctx, account, requiredCapability, requiredImageCapability)
 }
 
 func cloneExcludedAccountIDs(excludedIDs map[int64]struct{}) map[int64]struct{} {
@@ -3064,7 +3177,7 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 	if account == nil {
 		return false
 	}
-	if !success && len(observedErr) > 0 && isGrokRequestScopedFailure(observedErr[0]) {
+	if !success && len(observedErr) > 0 && (isGrokRequestScopedFailure(observedErr[0]) || IsUpstreamModerationDenied(observedErr[0])) {
 		return false
 	}
 	// A failed managed proxy acquisition says nothing about account health.
@@ -3100,7 +3213,7 @@ func (s *OpenAIGatewayService) ReportOpenAIAccountScheduleResult(account *Accoun
 // ObserveOpenAIAccountHealthFailure records failures that cannot reach the
 // scheduler-result path, for example after semantic response bytes were sent.
 func (s *OpenAIGatewayService) ObserveOpenAIAccountHealthFailure(ctx context.Context, account *Account, observedErr error) bool {
-	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) {
+	if s == nil || s.rateLimitService == nil || account == nil || observedErr == nil || isGrokRequestScopedFailure(observedErr) || IsUpstreamModerationDenied(observedErr) {
 		return false
 	}
 	return s.rateLimitService.ObserveOpenAIAPIKeyHealthFailure(ctx, account, observedErr)

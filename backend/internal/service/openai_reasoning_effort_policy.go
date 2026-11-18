@@ -113,11 +113,13 @@ func IsReasoningEffortPolicyDenied(err error) bool {
 	return errors.As(err, &mappingDenied)
 }
 
+var reasoningEffortSeparatorRemover = strings.NewReplacer("-", "", "_", "", " ", "")
+
 // NormalizeMaxReasoningEffort validates and canonicalizes a group policy value.
 // Empty means that the group does not impose a ceiling.
 func NormalizeMaxReasoningEffort(raw string) string {
 	value := strings.ToLower(strings.TrimSpace(raw))
-	value = strings.NewReplacer("-", "", "_", "", " ", "").Replace(value)
+	value = reasoningEffortSeparatorRemover.Replace(value)
 	switch value {
 	case "":
 		return ""
@@ -453,6 +455,25 @@ func WithOpenAIReasoningEffortPolicy(ctx context.Context, maxEffort string, mapp
 	return context.WithValue(ctx, openAIReasoningEffortPolicyContextKey{}, policy)
 }
 
+// WithOpenAIReasoningEffortPolicyForMessages preserves ordinary bridge defaults,
+// but retains ceilings and none mappings for explicitly disabled thinking.
+func WithOpenAIReasoningEffortPolicyForMessages(ctx context.Context, body []byte, maxEffort string, mappings []ReasoningEffortMapping, overLimit string, requestModels ...string) context.Context {
+	effort := gjson.GetBytes(body, "output_config.effort")
+	if effort.Type != gjson.String || strings.TrimSpace(effort.String()) == "" {
+		if gjson.GetBytes(body, "thinking.type").String() != "disabled" {
+			maxEffort = ""
+		}
+		noneMappings := make([]ReasoningEffortMapping, 0, len(mappings))
+		for _, mapping := range mappings {
+			if normalizeReasoningEffortMappingSource(mapping.From) == "none" {
+				noneMappings = append(noneMappings, mapping)
+			}
+		}
+		mappings = noneMappings
+	}
+	return WithOpenAIReasoningEffortPolicy(ctx, maxEffort, mappings, overLimit, requestModels...)
+}
+
 // ApplyOpenAIReasoningEffortPolicyFromContext applies a policy previously bound
 // to the request. An unbound request is returned byte-for-byte unchanged.
 func ApplyOpenAIReasoningEffortPolicyFromContext(ctx context.Context, body []byte) ([]byte, bool, error) {
@@ -474,6 +495,14 @@ type apiKeyForcedReasoningEffortContextKey struct{}
 func WithAPIKeyOpenAIReasoningEffortPolicy(ctx context.Context, forced, maxEffort string, mappings []ReasoningEffortMapping, overLimit string, requestModels ...string) context.Context {
 	ctx = WithOpenAIReasoningEffortPolicy(ctx, maxEffort, mappings, overLimit, requestModels...)
 	return context.WithValue(ctx, apiKeyForcedReasoningEffortContextKey{}, forced)
+}
+
+// The caller normalizes native GLM effort before applying the configured policy.
+// A mapped downgrade is final: normalizing it again can raise low to high and
+// reject a ceiling that the configured value already satisfies. Keep fixed-key
+// precedence and model-scoped mappings in the shared policy implementation.
+func applyOpenAIReasoningEffortPolicyForGLMFromContext(ctx context.Context, body []byte, _ string) ([]byte, bool, error) {
+	return ApplyOpenAIReasoningEffortPolicyFromContext(ctx, body)
 }
 
 func mapReasoningEffort(raw string, mappings []ReasoningEffortMapping, requestModel string) (string, bool) {

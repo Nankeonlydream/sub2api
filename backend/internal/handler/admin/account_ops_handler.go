@@ -22,6 +22,26 @@ func NewAccountOpsHandler(svc *service.AccountOpsService, email *service.EmailSe
 // Service exposes the notification channel to other alert sources.
 func (h *AccountOpsHandler) Service() *service.AccountOpsService { return h.svc }
 
+func (h *AccountOpsHandler) SetOAuthLifecycle(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	var v struct {
+		Lifecycle string `json:"lifecycle"`
+	}
+	if err != nil || id <= 0 || c.ShouldBindJSON(&v) != nil {
+		response.BadRequest(c, "Invalid OAuth lifecycle request")
+		return
+	}
+	if err = h.svc.SetOAuthLifecycle(c.Request.Context(), id, v.Lifecycle); err != nil {
+		if errors.Is(err, service.ErrAccountOpsConfigValidation) {
+			response.BadRequest(c, err.Error())
+		} else {
+			response.ErrorFrom(c, err)
+		}
+		return
+	}
+	response.Success(c, gin.H{"account_id": id, "lifecycle": v.Lifecycle})
+}
+
 func (h *AccountOpsHandler) GetConfig(c *gin.Context) {
 	cfg, err := h.svc.GetConfig(c.Request.Context())
 	if err != nil {

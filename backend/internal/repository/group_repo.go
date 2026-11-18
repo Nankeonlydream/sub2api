@@ -141,7 +141,9 @@ func createGroupRecord(ctx context.Context, client *dbent.Client, groupIn *servi
 		SetAllowMessagesDispatch(groupIn.AllowMessagesDispatch).
 		SetAllowLive(groupIn.AllowLive).
 		SetForceOpenaiFast(groupIn.ForceOpenAIFast).
+		SetForceOpenaiUltrafast(groupIn.ForceOpenAIUltrafast).
 		SetFreeOpenaiFast(groupIn.FreeOpenAIFast).
+		SetFreeOpenaiUltrafast(groupIn.FreeOpenAIUltrafast).
 		SetRequireOauthOnly(groupIn.RequireOAuthOnly).
 		SetRequirePrivacySet(groupIn.RequirePrivacySet).
 		SetDefaultMappedModel(groupIn.DefaultMappedModel).
@@ -330,7 +332,9 @@ func (r *groupRepository) Update(ctx context.Context, groupIn *service.Group) er
 		SetAllowMessagesDispatch(groupIn.AllowMessagesDispatch).
 		SetAllowLive(groupIn.AllowLive).
 		SetForceOpenaiFast(groupIn.ForceOpenAIFast).
+		SetForceOpenaiUltrafast(groupIn.ForceOpenAIUltrafast).
 		SetFreeOpenaiFast(groupIn.FreeOpenAIFast).
+		SetFreeOpenaiUltrafast(groupIn.FreeOpenAIUltrafast).
 		SetRequireOauthOnly(groupIn.RequireOAuthOnly).
 		SetRequirePrivacySet(groupIn.RequirePrivacySet).
 		SetDefaultMappedModel(groupIn.DefaultMappedModel).
@@ -1139,6 +1143,22 @@ func (r *groupRepository) BindAccountsToGroup(ctx context.Context, groupID int64
 	if err := lockLiveGroups(ctx, exec, []int64{groupID}); err != nil {
 		return err
 	}
+
+	// Account locks serialize bulk binding with a concurrently committed
+	// degradation action. Use a stable order for overlapping bulk operations.
+	accountIDs = uniquePositiveInt64s(accountIDs)
+	sort.Slice(accountIDs, func(i, j int) bool { return accountIDs[i] < accountIDs[j] })
+	allowedAccounts := make([]int64, 0, len(accountIDs))
+	for _, id := range accountIDs {
+		allowed, err := lockOAuthDegradationGroupBindings(ctx, exec, id, []int64{groupID})
+		if err != nil {
+			return err
+		}
+		if len(allowed) > 0 {
+			allowedAccounts = append(allowedAccounts, id)
+		}
+	}
+	accountIDs = allowedAccounts
 
 	// 使用 INSERT ... ON CONFLICT DO NOTHING 忽略已存在的绑定
 	_, err = exec.ExecContext(

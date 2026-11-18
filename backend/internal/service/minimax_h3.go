@@ -488,6 +488,9 @@ func (s *OpenAIGatewayService) ForwardMiniMaxH3(ctx context.Context, c *gin.Cont
 }
 
 func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *gin.Context, relay openAIVideosRelay, account *Account, endpoint GrokMediaEndpoint, taskID string, body []byte) (*OpenAIForwardResult, error) {
+	if err := CheckUpstreamModeration(ctx, c, account); err != nil {
+		return nil, err
+	}
 	if (endpoint != relay.Create && endpoint != relay.Status && endpoint != relay.Content) || !account.SupportsOpenAIEndpointCapability(relay.Capability) {
 		return nil, fmt.Errorf("%s", relay.AccountRequirementErrMsg)
 	}

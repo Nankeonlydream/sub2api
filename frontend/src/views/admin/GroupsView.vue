@@ -17,7 +17,8 @@
                 v-model="searchQuery"
                 type="text"
                 :placeholder="t('admin.groups.searchGroups')"
-                class="input pl-10"
+                class="input scroll-mt-20 pl-10"
+                @focus="handleSearchFocus"
                 @input="handleSearch"
               />
             </div>
@@ -543,6 +544,7 @@
             @change="createForm.copy_accounts_from_group_ids = []"
           />
           <p class="input-hint">{{ t("admin.groups.platformHint") }}</p>
+          <QwenPlatformNotice :user-id="authStore.user?.id" />
         </div>
         <!-- 从分组复制账号 -->
         <div v-if="!authStore.isSimpleMode && copyAccountsGroupOptions.length > 0">
@@ -1583,7 +1585,7 @@
             <span><span class="block text-sm text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.longContext") }}</span><span class="block text-xs text-gray-500">{{ t("admin.groups.modelPricing.longContextHint") }}</span></span>
           </label>
           <div class="mt-3 space-y-2">
-            <PricingEntryCard v-for="(entry, index) in createForm.model_pricing" :key="index" :entry="entry" :platform="createForm.platform" hide-token-intervals @update="createForm.model_pricing[index] = $event" @remove="createForm.model_pricing.splice(index, 1)" />
+            <PricingEntryCard :notice-user-id="authStore.user?.id" v-for="(entry, index) in createForm.model_pricing" :key="index" :entry="entry" :platform="createForm.platform" hide-token-intervals @update="createForm.model_pricing[index] = $event" @remove="createForm.model_pricing.splice(index, 1)" />
           </div>
         </div>
 
@@ -1672,6 +1674,20 @@
           </p>
           <div class="flex items-center justify-between gap-4 mt-4">
             <label class="text-sm text-gray-600 dark:text-gray-400">
+              {{ t("admin.groups.openaiFast.forceUltrafast") }}
+              <NewFeatureBadge v-if="authStore.user?.id != null" :notice-id="NEW_FEATURE_NOTICES.groupForceUltrafast" :user-id="authStore.user?.id" />
+            </label>
+            <Toggle
+              data-testid="create-force-openai-ultrafast"
+              :aria-label="t('admin.groups.openaiFast.forceUltrafast')"
+              v-model="createForm.force_openai_ultrafast"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiFast.ultrafastHint") }}
+          </p>
+          <div class="flex items-center justify-between gap-4 mt-4">
+            <label class="text-sm text-gray-600 dark:text-gray-400">
               {{ t("admin.groups.openaiFast.free") }}
             </label>
             <Toggle
@@ -1682,6 +1698,26 @@
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
             {{ t("admin.groups.openaiFast.freeHint") }}
+          </p>
+          <div class="flex items-center justify-between gap-4 mt-4">
+            <div class="flex items-center gap-2">
+              <label class="text-sm text-gray-600 dark:text-gray-400">
+                {{ t("admin.groups.openaiFast.freeUltrafast") }}
+              </label>
+              <NewFeatureBadge
+                v-if="authStore.user?.id != null"
+                :notice-id="NEW_FEATURE_NOTICES.groupFreeUltrafast"
+                :user-id="authStore.user?.id"
+              />
+            </div>
+            <Toggle
+              data-testid="create-free-openai-ultrafast"
+              :aria-label="t('admin.groups.openaiFast.freeUltrafast')"
+              v-model="createForm.free_openai_ultrafast"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiFast.freeUltrafastHint") }}
           </p>
         </div>
 
@@ -2249,6 +2285,7 @@
             data-tour="group-form-platform"
           />
           <p class="input-hint">{{ t("admin.groups.platformNotEditable") }}</p>
+          <QwenPlatformNotice v-if="editForm.platform === 'qwen'" :user-id="authStore.user?.id" />
         </div>
         <template v-if="!authStore.isSimpleMode">
         <!-- 从分组复制账号（编辑时） -->
@@ -3297,7 +3334,7 @@
             <span><span class="block text-sm text-gray-700 dark:text-gray-300">{{ t("admin.groups.modelPricing.longContext") }}</span><span class="block text-xs text-gray-500">{{ t("admin.groups.modelPricing.longContextHint") }}</span></span>
           </label>
           <div class="mt-3 space-y-2">
-            <PricingEntryCard v-for="(entry, index) in editForm.model_pricing" :key="index" :entry="entry" :platform="editForm.platform" hide-token-intervals @update="editForm.model_pricing[index] = $event" @remove="editForm.model_pricing.splice(index, 1)" />
+            <PricingEntryCard :notice-user-id="authStore.user?.id" v-for="(entry, index) in editForm.model_pricing" :key="index" :entry="entry" :platform="editForm.platform" hide-token-intervals @update="editForm.model_pricing[index] = $event" @remove="editForm.model_pricing.splice(index, 1)" />
           </div>
         </div>
 
@@ -3386,6 +3423,20 @@
           </p>
           <div class="flex items-center justify-between gap-4 mt-4">
             <label class="text-sm text-gray-600 dark:text-gray-400">
+              {{ t("admin.groups.openaiFast.forceUltrafast") }}
+              <NewFeatureBadge v-if="authStore.user?.id != null" :notice-id="NEW_FEATURE_NOTICES.groupForceUltrafast" :user-id="authStore.user?.id" />
+            </label>
+            <Toggle
+              data-testid="edit-force-openai-ultrafast"
+              :aria-label="t('admin.groups.openaiFast.forceUltrafast')"
+              v-model="editForm.force_openai_ultrafast"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiFast.ultrafastHint") }}
+          </p>
+          <div class="flex items-center justify-between gap-4 mt-4">
+            <label class="text-sm text-gray-600 dark:text-gray-400">
               {{ t("admin.groups.openaiFast.free") }}
             </label>
             <Toggle
@@ -3396,6 +3447,26 @@
           </div>
           <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
             {{ t("admin.groups.openaiFast.freeHint") }}
+          </p>
+          <div class="flex items-center justify-between gap-4 mt-4">
+            <div class="flex items-center gap-2">
+              <label class="text-sm text-gray-600 dark:text-gray-400">
+                {{ t("admin.groups.openaiFast.freeUltrafast") }}
+              </label>
+              <NewFeatureBadge
+                v-if="authStore.user?.id != null"
+                :notice-id="NEW_FEATURE_NOTICES.groupFreeUltrafast"
+                :user-id="authStore.user?.id"
+              />
+            </div>
+            <Toggle
+              data-testid="edit-free-openai-ultrafast"
+              :aria-label="t('admin.groups.openaiFast.freeUltrafast')"
+              v-model="editForm.free_openai_ultrafast"
+            />
+          </div>
+          <p class="text-xs text-gray-500 dark:text-gray-400 mt-1">
+            {{ t("admin.groups.openaiFast.freeUltrafastHint") }}
           </p>
         </div>
 
@@ -4429,6 +4500,7 @@
 </template>
 
 <script setup lang="ts">
+import QwenPlatformNotice from '@/components/common/QwenPlatformNotice.vue'
 import { ref, reactive, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useAppStore } from "@/stores/app";
@@ -4561,6 +4633,7 @@ const emptyGroupPricing = (): PricingFormEntry => ({
   output_price: null,
   cache_write_price: null,
   cache_write_1h_price: null,
+  cache_write_12h_price: null,
   cache_read_price: null,
   reasoning_effort_multipliers: null,
   image_input_price: null,
@@ -4583,6 +4656,7 @@ const groupPricingFromAPI = (
     output_price: perTokenToMTok(entry.output_price),
     cache_write_price: perTokenToMTok(entry.cache_write_price),
     cache_write_1h_price: perTokenToMTok(entry.cache_write_1h_price),
+    cache_write_12h_price: perTokenToMTok(entry.cache_write_12h_price),
     cache_read_price: perTokenToMTok(entry.cache_read_price),
     reasoning_effort_multipliers: entry.reasoning_effort_multipliers
       ? { ...entry.reasoning_effort_multipliers }
@@ -4608,6 +4682,7 @@ const groupPricingToAPI = (
       output_price: mTokToPerToken(entry.output_price),
       cache_write_price: mTokToPerToken(entry.cache_write_price),
       cache_write_1h_price: mTokToPerToken(entry.cache_write_1h_price),
+      cache_write_12h_price: mTokToPerToken(entry.cache_write_12h_price),
       cache_read_price: mTokToPerToken(entry.cache_read_price),
       reasoning_effort_multipliers: formReasoningEffortMultipliersToAPI(
         entry.reasoning_effort_multipliers,
@@ -5126,7 +5201,9 @@ const createForm = reactive({
   monthly_limit_usd: null as number | null,
   long_context_pricing_enabled: true,
   force_openai_fast: false,
+  force_openai_ultrafast: false,
   free_openai_fast: false,
+  free_openai_ultrafast: false,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5497,7 +5574,9 @@ const editForm = reactive({
   monthly_limit_usd: null as number | null,
   long_context_pricing_enabled: true,
   force_openai_fast: false,
+  force_openai_ultrafast: false,
   free_openai_fast: false,
+  free_openai_ultrafast: false,
   model_pricing: [] as PricingFormEntry[],
   // 图片生成计费配置
   allow_image_generation: false,
@@ -5927,6 +6006,15 @@ const loadCapacitySummary = async () => {
   }
 };
 
+const handleSearchFocus = (event: FocusEvent) => {
+  const input = event.target as HTMLInputElement;
+  const topInset = parseFloat(getComputedStyle(input).scrollMarginTop) || 0;
+  // Nearest scrolling can leave an input inside the viewport but behind AppHeader.
+  if (input.getBoundingClientRect().top < topInset) {
+    input.scrollIntoView({ block: "start", behavior: "auto" });
+  }
+};
+
 let searchTimeout: ReturnType<typeof setTimeout>;
 const handleSearch = () => {
   clearTimeout(searchTimeout);
@@ -5993,7 +6081,9 @@ const closeCreateModal = () => {
   createForm.video_model_prices = createVideoModelPricesForm();
   createForm.long_context_pricing_enabled = true;
   createForm.force_openai_fast = false;
+  createForm.force_openai_ultrafast = false;
   createForm.free_openai_fast = false;
+  createForm.free_openai_ultrafast = false;
   createForm.model_pricing = [];
   createForm.web_search_price_per_call = null;
   createForm.search_price_per_1k = null;
@@ -6122,9 +6212,17 @@ const handleCreateGroup = async () => {
         createForm.platform,
         createForm.force_openai_fast,
       ),
+      force_openai_ultrafast: normalizeGroupOpenAIFast(
+        createForm.platform,
+        createForm.force_openai_ultrafast,
+      ),
       free_openai_fast: normalizeGroupOpenAIFast(
         createForm.platform,
         createForm.free_openai_fast,
+      ),
+      free_openai_ultrafast: normalizeGroupOpenAIFast(
+        createForm.platform,
+        createForm.free_openai_ultrafast,
       ),
       model_pricing: groupPricingToAPI(
         createForm.model_pricing,
@@ -6271,7 +6369,9 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.long_context_pricing_enabled =
     group.long_context_pricing_enabled ?? true;
   editForm.force_openai_fast = group.force_openai_fast ?? false;
+  editForm.force_openai_ultrafast = group.force_openai_ultrafast ?? false;
   editForm.free_openai_fast = group.free_openai_fast ?? false;
+  editForm.free_openai_ultrafast = group.free_openai_ultrafast ?? false;
   editForm.model_pricing = groupPricingFromAPI(group.model_pricing);
   editForm.allow_image_generation = group.allow_image_generation ?? false;
   editForm.allow_batch_image_generation =
@@ -6409,7 +6509,9 @@ const closeEditModal = () => {
   editForm.video_model_prices = createVideoModelPricesForm();
   editForm.long_context_pricing_enabled = true;
   editForm.force_openai_fast = false;
+  editForm.force_openai_ultrafast = false;
   editForm.free_openai_fast = false;
+  editForm.free_openai_ultrafast = false;
   editForm.model_pricing = [];
   editForm.web_search_price_per_call = null;
   editForm.search_price_per_1k = null;
@@ -6469,9 +6571,17 @@ const handleUpdateGroup = async () => {
         editForm.platform,
         editForm.force_openai_fast,
       ),
+      force_openai_ultrafast: normalizeGroupOpenAIFast(
+        editForm.platform,
+        editForm.force_openai_ultrafast,
+      ),
       free_openai_fast: normalizeGroupOpenAIFast(
         editForm.platform,
         editForm.free_openai_fast,
+      ),
+      free_openai_ultrafast: normalizeGroupOpenAIFast(
+        editForm.platform,
+        editForm.free_openai_ultrafast,
       ),
       model_pricing: groupPricingToAPI(
         editForm.model_pricing,

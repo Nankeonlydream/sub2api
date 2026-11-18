@@ -23,6 +23,21 @@
               :options="statusFilterOptions"
               @update:model-value="onStatusFilterChange"
             />
+            <div class="relative flex flex-wrap items-center gap-2" data-test="key-usage-date-range">
+              <span class="text-sm text-gray-600 dark:text-gray-300">{{ t('keys.usageDateRange') }}</span>
+              <DateRangePicker
+                class="key-usage-range-picker"
+                :start-date="usageStartDate"
+                :end-date="usageEndDate"
+                :show-last24-hours="false"
+                @change="onUsageDateRangeChange"
+              />
+              <NewFeatureBadge
+                v-if="authStore.isAdmin"
+                :notice-id="NEW_FEATURE_NOTICES.apiKeyUsageDateRange"
+                :user-id="authStore.user?.id"
+              />
+            </div>
           </div>
           <EndpointPopover
             v-if="publicSettings?.api_base_url || (publicSettings?.custom_endpoints?.length ?? 0) > 0"
@@ -108,7 +123,7 @@
           :selection-label="(key: ApiKey) => t('keys.bulkEdit.selectKey', { name: key.name })"
           @update:selected-keys="handleSelectionChange"
           :server-side-sort="true"
-          default-sort-key="created_at"
+          default-sort-key="usage"
           default-sort-order="desc"
           @sort="handleSort"
         >
@@ -261,14 +276,16 @@
             <div class="key-usage-cell text-sm">
               <div class="flex items-center gap-1.5">
                 <span class="key-usage-label text-gray-500 dark:text-gray-400">{{ t('keys.today') }}:</span>
-                <span class="key-usage-amount font-medium text-gray-900 dark:text-white">
-                  ${{ (usageStats[row.id]?.today_actual_cost ?? 0).toFixed(4) }}
+                <span v-if="usageLoading && !usageStats[row.id]" data-test="usage-pending"
+                  class="inline-block h-3 w-14 animate-pulse rounded bg-gray-200 dark:bg-dark-600" />
+                <span v-else class="key-usage-amount font-medium text-gray-900 dark:text-white">
+                  {{ formatUsageCost(row.id, 'today_actual_cost') }}
                 </span>
               </div>
               <div class="mt-0.5 flex items-center gap-1.5">
-                <span class="key-usage-label text-gray-500 dark:text-gray-400">{{ t('keys.total') }}:</span>
-                <span class="key-usage-amount font-medium text-gray-900 dark:text-white">
-                  ${{ (usageStats[row.id]?.total_actual_cost ?? 0).toFixed(4) }}
+                <span class="key-usage-label text-gray-500 dark:text-gray-400">{{ t(usagePreset === '30days' ? 'keys.total' : 'keys.selectedPeriod') }}:</span>
+                <span class="key-usage-amount font-medium text-gray-900 dark:text-white" :title="`${usageStartDate} ~ ${usageEndDate}`">
+                  {{ formatUsageCost(row.id, 'total_actual_cost') }}
                 </span>
               </div>
               <!-- Quota progress (if quota is set) -->
@@ -469,6 +486,17 @@
               >
                 <Icon name="upload" size="sm" />
                 <span class="text-xs">{{ t('keys.importToCcSwitch') }}</span>
+              </button>
+              <button
+                type="button"
+                @click="importToMagpie(row)"
+                :disabled="publicSettingsLoading"
+                data-testid="magpie-import-button"
+                class="flex flex-col items-center gap-0.5 rounded-lg p-1.5 text-gray-500 transition-colors hover:bg-blue-50 hover:text-blue-600 disabled:opacity-50 dark:hover:bg-blue-900/20 dark:hover:text-blue-400"
+                :title="t('keys.magpieImport.preview')"
+              >
+                <Icon name="externalLink" size="sm" />
+                <span class="text-xs">{{ t('keys.importToMagpie') }}</span>
               </button>
               <!-- Toggle Status Button -->
               <button
@@ -703,6 +731,7 @@
             </button>
             <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.apiKeyModelPolicy" :user-id="authStore.user?.id" />
             <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.apiKeyLongContext" :user-id="authStore.user?.id" compact />
+            <NewFeatureBadge :notice-id="NEW_FEATURE_NOTICES.apiKeyContextTokenLimit" :user-id="authStore.user?.id" compact />
           </div>
           <p class="mt-2 text-sm text-gray-500 dark:text-dark-300">{{ t('apiKeyModelPolicy.scopeHint') }}</p>
         </div>
@@ -1340,6 +1369,7 @@ import BulkEditKeysModal from '@/components/keys/BulkEditKeysModal.vue'
 import ApiKeyModelPolicyDialog from '@/components/admin/user/ApiKeyModelPolicyDialog.vue'
 import { useAuthStore } from '@/stores/auth'
 import NewFeatureBadge from '@/components/common/NewFeatureBadge.vue'
+import DateRangePicker from '@/components/common/DateRangePicker.vue'
 import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 	import DataTable from '@/components/common/DataTable.vue'
 	import Pagination from '@/components/common/Pagination.vue'
@@ -1357,7 +1387,7 @@ import { NEW_FEATURE_NOTICES } from '@/constants/newFeatureNotices'
 	import type { ApiKey, ApiKeyConcurrencySnapshot, Group, PublicSettings, SubscriptionType, GroupPlatform, UpdateApiKeyRequest } from '@/types'
 import type { Column } from '@/components/common/types'
 import type { BatchApiKeyUsageStats } from '@/api/usage'
-import { formatDateTime } from '@/utils/format'
+import { formatDateTime, formatDateLocalInput, getBrowserTimeZone } from '@/utils/format'
 import { maskApiKey } from '@/utils/maskApiKey'
 import PlatformIcon from '@/components/common/PlatformIcon.vue'
 import { platformBadgeLightClass } from '@/utils/platformColors'
@@ -1368,6 +1398,7 @@ import {
   type CcSwitchClientType
 } from '@/utils/ccswitchImport'
 import { isCodexQuickConfigPlatform } from '@/utils/codexQuickConfig'
+import { buildMagpieImportLink } from '@/utils/magpieImport'
 
 // Helper to format date for datetime-local input
 const formatDateTimeLocal = (isoDate: string): string => {
@@ -1401,7 +1432,7 @@ const allColumns = computed<Column[]>(() => [
   { key: 'key', label: t('keys.apiKey'), sortable: false },
   { key: 'group', label: t('keys.group'), sortable: true },
   { key: 'current_concurrency', label: t('keys.concurrencyAndWaiting'), sortable: true },
-  { key: 'usage', label: t('keys.usage'), sortable: false },
+  { key: 'usage', label: t('keys.usage'), sortable: true },
   { key: 'rate_limit', label: t('keys.rateLimitColumn'), sortable: false },
   { key: 'expires_at', label: t('keys.expiresAt'), sortable: true },
   { key: 'status', label: t('common.status'), sortable: true },
@@ -1511,6 +1542,30 @@ const submitting = ref(false)
 const now = ref(new Date())
 let resetTimer: ReturnType<typeof setInterval> | null = null
 const usageStats = ref<Record<string, BatchApiKeyUsageStats>>({})
+const defaultUsageEnd = new Date()
+const defaultUsageStart = new Date(defaultUsageEnd)
+defaultUsageStart.setDate(defaultUsageStart.getDate() - 29)
+const usageEndDate = ref(formatDateLocalInput(defaultUsageEnd))
+const usageStartDate = ref(formatDateLocalInput(defaultUsageStart))
+const usagePreset = ref<string | null>('30days')
+const usageLoading = ref(false)
+const usageFailed = ref(false)
+const formatUsageCost = (keyID: number, field: 'today_actual_cost' | 'total_actual_cost') => {
+  if (usageLoading.value || usageFailed.value) return '—'
+  return `$${(usageStats.value[keyID]?.[field] ?? 0).toFixed(4)}`
+}
+const onUsageDateRangeChange = (range: { startDate: string; endDate: string; preset: string | null }) => {
+  if (!range.startDate || !range.endDate || range.startDate > range.endDate) {
+    appStore.showError(t('keys.invalidUsageDateRange'))
+    return
+  }
+  usageStartDate.value = range.startDate
+  usageEndDate.value = range.endDate
+  usagePreset.value = range.preset
+  selectedIds.value = []
+  pagination.value.page = 1
+  void loadApiKeys()
+}
 const userGroupRates = ref<Record<number, number>>({})
 
 // Policy and counts always belong to one completed refresh, never to editable key data.
@@ -1608,7 +1663,7 @@ const pagination = ref({
   pages: 0
 })
 const sortState = ref({
-  sort_by: 'created_at',
+  sort_by: 'usage',
   sort_order: 'desc' as 'asc' | 'desc'
 })
 
@@ -1636,6 +1691,7 @@ const selectedCodexQuickConfigPlatform = computed(() => {
 const copiedKeyId = ref<number | null>(null)
 const groupSelectorKeyId = ref<number | null>(null)
 const publicSettings = ref<PublicSettings | null>(null)
+const publicSettingsLoading = ref(true)
 const dropdownRef = ref<HTMLElement | null>(null)
 const columnDropdownRef = ref<HTMLElement | null>(null)
 const dropdownPosition = ref<{ top?: number; bottom?: number; left: number } | null>(null)
@@ -1832,6 +1888,14 @@ const loadApiKeys = async () => {
   abortController = controller
   const { signal } = controller
   loading.value = true
+  usageLoading.value = true
+  usageFailed.value = false
+  usageStats.value = {}
+  const range = {
+    start_date: usageStartDate.value,
+    end_date: usageEndDate.value,
+    timezone: getBrowserTimeZone()
+  }
   try {
     // Build filters
     const filters: {
@@ -1840,12 +1904,16 @@ const loadApiKeys = async () => {
       group_id?: number | string
       sort_by?: string
       sort_order?: 'asc' | 'desc'
+      start_date?: string
+      end_date?: string
+      timezone?: string
     } = {}
     if (filterSearch.value) filters.search = filterSearch.value
     if (filterStatus.value) filters.status = filterStatus.value
     if (filterGroupId.value !== '') filters.group_id = filterGroupId.value
     filters.sort_by = sortState.value.sort_by
     filters.sort_order = sortState.value.sort_order
+    if (sortState.value.sort_by === 'usage') Object.assign(filters, range)
 
     const response = await keysAPI.list(pagination.value.page, pagination.value.page_size, filters, {
       signal
@@ -1856,23 +1924,17 @@ const loadApiKeys = async () => {
     pagination.value.total = response.total
     pagination.value.pages = response.pages
 
-    // Load usage stats for all API keys in the list
+    usageLoading.value = response.items.length > 0
     if (response.items.length > 0) {
-      const keyIds = response.items.map((k) => k.id)
-      try {
-        const usageResponse = await usageAPI.getDashboardApiKeysUsage(keyIds, { signal })
-        if (signal.aborted) return
-        usageStats.value = usageResponse.stats
-      } catch (e) {
-        if (!isAbortError(e)) {
-          console.error('Failed to load usage stats:', e)
-        }
-      }
+      void loadUsageStats(response.items.map((k) => k.id), controller, range)
     }
+
   } catch (error) {
-    if (isAbortError(error)) {
+    if (signal.aborted || isAbortError(error)) {
       return
     }
+    usageFailed.value = true
+    usageLoading.value = false
     appStore.showError(t('keys.failedToLoad'))
   } finally {
     if (abortController === controller) {
@@ -1880,6 +1942,27 @@ const loadApiKeys = async () => {
       concurrencyPageReady = true
       void refreshConcurrency()
     }
+  }
+}
+
+const loadUsageStats = async (
+  keyIds: number[],
+  controller: AbortController,
+  range: { start_date: string; end_date: string; timezone: string }
+) => {
+  const { signal } = controller
+  try {
+    const response = await usageAPI.getDashboardApiKeysUsage(keyIds, { signal, ...range })
+    if (signal.aborted || abortController !== controller || disposed) return
+    usageStats.value = response.stats
+  } catch (error) {
+    if (signal.aborted || abortController !== controller || disposed) return
+    if (!isAbortError(error)) {
+      usageFailed.value = true
+      appStore.showError(t('keys.failedToLoadUsage'))
+    }
+  } finally {
+    if (!signal.aborted && abortController === controller && !disposed) usageLoading.value = false
   }
 }
 
@@ -1920,6 +2003,8 @@ const loadPublicSettings = async () => {
     publicSettings.value = await authAPI.getPublicSettings()
   } catch (error) {
     console.error('Failed to load public settings:', error)
+  } finally {
+    publicSettingsLoading.value = false
   }
 }
 
@@ -2309,6 +2394,33 @@ const resetRateLimitUsage = async () => {
   }
 }
 
+const importToMagpie = (row: ApiKey) => {
+  const settings = publicSettings.value
+  if (!settings) {
+    appStore.showError(t('keys.magpieImport.settingsUnavailable'))
+    return
+  }
+  const result = buildMagpieImportLink({
+    dashboardOrigin: window.location.origin,
+    baseUrl: settings.api_base_url,
+    siteName: settings.site_name,
+    row
+  })
+  if ('error' in result) {
+    appStore.showError(t(`keys.magpieImport.${result.error}`))
+    return
+  }
+
+  // Launch from the click itself. Browsers cannot confirm whether the app opened.
+  try {
+    window.open(result.url, '_self')
+  } catch {
+    appStore.showError(t('keys.magpieImport.openHelp'))
+    return
+  }
+  appStore.showInfo(t('keys.magpieImport.openHelp'), 6500)
+}
+
 const importToCcswitch = (row: ApiKey) => {
   const platform = row.group?.platform || 'anthropic'
 
@@ -2399,6 +2511,23 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+@media (max-width: 639px) {
+  .key-usage-range-picker {
+    position: static;
+  }
+
+  .key-usage-range-picker :deep(.date-picker-dropdown) {
+    left: 0;
+    min-width: 0;
+    width: min(320px, calc(100vw - 2rem));
+  }
+
+  .key-usage-range-picker :deep(.date-picker-field),
+  .key-usage-range-picker :deep(.date-picker-input) {
+    min-width: 0;
+  }
+}
+
 @media (min-width: 1024px) {
   .keys-page-layout :deep(.layout-section-scrollable) {
     min-height: 14rem;

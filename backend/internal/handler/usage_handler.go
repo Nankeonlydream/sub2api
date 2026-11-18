@@ -480,6 +480,9 @@ func (h *UsageHandler) Stats(c *gin.Context) {
 	}
 	if !isObserverUsageRequest(c) {
 		stats.TotalAccountCost = nil
+		for i := range stats.Endpoints {
+			stats.Endpoints[i].AccountCost = 0
+		}
 		stats.UpstreamEndpoints = nil
 		stats.EndpointPaths = nil
 	}
@@ -702,6 +705,9 @@ func parseBoolQueryWithDefault(c *gin.Context, key string, fallback bool) (bool,
 // BatchAPIKeysUsageRequest represents the request for batch API keys usage
 type BatchAPIKeysUsageRequest struct {
 	APIKeyIDs []int64 `json:"api_key_ids" binding:"required"`
+	StartDate string  `json:"start_date"`
+	EndDate   string  `json:"end_date"`
+	Timezone  string  `json:"timezone"`
 }
 
 // DashboardAPIKeysUsage handles getting usage stats for user's own API keys
@@ -716,6 +722,14 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 	var req BatchAPIKeysUsageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+
+	// Omitted dates preserve the existing rolling 30-day total. Explicit dates
+	// include both calendar days in the caller's timezone, including DST changes.
+	startTime, endTime, err := parseAPIKeyUsageRange(req.StartDate, req.EndDate, req.Timezone)
+	if err != nil {
+		response.BadRequest(c, err.Error())
 		return
 	}
 
@@ -741,7 +755,7 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 		return
 	}
 
-	stats, err := h.usageService.GetBatchAPIKeyUsageStats(c.Request.Context(), validAPIKeyIDs, time.Time{}, time.Time{})
+	stats, err := h.usageService.GetBatchAPIKeyUsageStats(c.Request.Context(), validAPIKeyIDs, startTime, endTime)
 	if err != nil {
 		response.ErrorFrom(c, err)
 		return

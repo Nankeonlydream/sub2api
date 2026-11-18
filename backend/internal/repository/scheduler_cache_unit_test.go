@@ -217,9 +217,48 @@ func TestSchedulerCacheSnapshotAccountIDReuseKeepsEmptySnapshotSemantics(t *test
 		require.Equal(t, "1", ready)
 		snapshot, hit, err := cache.GetSnapshot(ctx, bucket)
 		require.NoError(t, err)
-		require.False(t, hit, bucket.String())
-		require.Nil(t, snapshot)
+		require.True(t, hit, bucket.String())
+		require.Empty(t, snapshot)
 	}
+}
+
+func TestOAuthDegradationNativeEmptySchedulerSnapshotIsReady(t *testing.T) {
+	ctx := context.Background()
+	cache := newSchedulerCacheUnit(t)
+	bucket := service.SchedulerBucket{GroupID: 325, Platform: service.PlatformOpenAI, Mode: service.SchedulerModeForced}
+	token, err := cache.CaptureBucketWriteToken(ctx, bucket)
+	require.NoError(t, err)
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{{ID: 325, Platform: service.PlatformOpenAI}}))
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, nil))
+	fresh := NewSchedulerCache(cache.rdb)
+	snapshot, hit, err := fresh.GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit, "pausing the last native account must publish a ready empty pool")
+	require.Empty(t, snapshot)
+	reader := service.NewSchedulerSnapshotService(fresh, nil, nil, nil, nil)
+	accounts, _, err := reader.ListSchedulableAccounts(ctx, &bucket.GroupID, bucket.Platform, true)
+	require.NoError(t, err, "a reader with no database fallback must accept the empty publication")
+	require.Empty(t, accounts)
+
+	require.NoError(t, cache.SetSnapshotByAccountIDs(ctx, bucket, token, nil))
+	snapshot, hit, err = NewSchedulerCache(cache.rdb).GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.True(t, hit, "account-ID reuse must retain the empty publication marker")
+	require.Empty(t, snapshot)
+
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, []service.Account{{ID: 325, Platform: service.PlatformOpenAI}}))
+	active, err := cache.rdb.Get(ctx, schedulerBucketKey(schedulerActivePrefix, bucket)).Result()
+	require.NoError(t, err)
+	require.NoError(t, cache.rdb.Del(ctx, schedulerSnapshotKey(bucket, active)).Err())
+	_, hit, err = NewSchedulerCache(cache.rdb).GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.False(t, hit, "a lost nonempty snapshot must not be mistaken for a published empty pool")
+
+	require.NoError(t, cache.SetSnapshot(ctx, bucket, token, nil))
+	require.NoError(t, cache.RetireBucket(ctx, bucket))
+	_, hit, err = NewSchedulerCache(cache.rdb).GetSnapshot(ctx, bucket)
+	require.NoError(t, err)
+	require.False(t, hit, "retirement still removes readiness for an empty snapshot")
 }
 
 func TestSchedulerCacheSetSnapshotByAccountIDsKeepsFencing(t *testing.T) {
@@ -1161,6 +1200,33 @@ func TestBuildSchedulerMetadataAccount_KeepsOpenAIPassthroughForModelGate(t *tes
 			require.Equal(t, map[string]any{"gpt-5.5": "gpt-5.5"}, restored.Credentials["model_mapping"])
 		})
 	}
+}
+
+// 透传账号显式开启"按模型筛选"后，候选过滤同样读的是本投影；裁掉
+// openai_passthrough_model_filter 会让账号在选号阶段退回"透传放行全部模型"，
+// 而模型列表等读完整账号的路径仍按白名单收窄，两边口径分裂。
+func TestBuildSchedulerMetadataAccount_KeepsOpenAIPassthroughModelFilter(t *testing.T) {
+	account := service.Account{
+		ID:       8748,
+		Platform: service.PlatformOpenAI,
+		Type:     service.AccountTypeAPIKey,
+		Credentials: map[string]any{
+			"model_mapping": map[string]any{"qwen3.8-max": "qwen3.8-max"},
+			"api_key":       "drop-me",
+		},
+		Extra: map[string]any{"openai_passthrough": true, "openai_passthrough_model_filter": true},
+	}
+	require.False(t, account.IsModelSupported("gpt-6.1-sol"), "前置条件：开启筛选的透传账号应拒绝白名单外模型")
+
+	payload, err := json.Marshal(buildSchedulerMetadataAccount(account))
+	require.NoError(t, err)
+	var restored service.Account
+	require.NoError(t, json.Unmarshal(payload, &restored))
+
+	require.Equal(t, true, restored.Extra["openai_passthrough_model_filter"])
+	require.True(t, restored.IsOpenAIPassthroughModelFilterEnabled())
+	require.False(t, restored.IsModelSupported("gpt-6.1-sol"))
+	require.True(t, restored.IsModelSupported("qwen3.8-max"))
 }
 
 // 调度投影必须保留账号的 RPM 配置。

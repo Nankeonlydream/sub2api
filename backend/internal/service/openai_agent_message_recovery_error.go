@@ -1,13 +1,19 @@
 package service
 
-import "errors"
+import (
+	"errors"
+	"net/http"
+	"time"
+)
 
 var errOpenAIAgentRecoveryUnavailable = errors.New("encrypted agent continuation has no unchanged compatible route")
 
 // OpenAIAgentRecoveryError is a local compatibility refusal, not a failure of
 // the entire account pool. Reasons contain no route IDs, credentials or input.
 type OpenAIAgentRecoveryError struct {
-	Reason string
+	diagnostic *openAIRecoveryDiagnostics
+	Reason     string
+	RetryAt    time.Time
 }
 
 func (e *OpenAIAgentRecoveryError) Error() string { return e.ClientMessage() }
@@ -15,9 +21,44 @@ func (e *OpenAIAgentRecoveryError) Unwrap() error { return errOpenAIAgentRecover
 func (e *OpenAIAgentRecoveryError) ClientCode() string {
 	return "encrypted_agent_recovery_" + e.Reason
 }
+func (e *OpenAIAgentRecoveryError) HTTPStatus() int {
+	switch e.Reason {
+	case "readable_intent_missing", "readable_history_unsupported":
+		return http.StatusUnprocessableEntity
+	case "owner_rate_limited":
+		return http.StatusTooManyRequests
+	case "owner_overloaded":
+		return http.StatusServiceUnavailable
+	default:
+		return http.StatusConflict
+	}
+}
+func (e *OpenAIAgentRecoveryError) ClientType() string {
+	switch e.HTTPStatus() {
+	case http.StatusTooManyRequests:
+		return "rate_limit_error"
+	case http.StatusServiceUnavailable:
+		return "server_error"
+	default:
+		return "invalid_request_error"
+	}
+}
 func (e *OpenAIAgentRecoveryError) ClientMessage() string {
 	var reason, action string
 	switch e.Reason {
+	case "readable_intent_missing":
+		return "The current request has no readable task or summary from which a new provider conversation can be built. The opaque contents are unavailable; no generation or tool was replayed."
+	case "readable_history_unsupported":
+		return "The supplied history has an unsupported readable representation. No provider state was transferred and no generation or tool was replayed."
+	case "http_previous_response_unsupported":
+		reason = "HTTP previous_response_id continuation is unsupported for this encrypted agent owner."
+		action = "For HTTP continuation, send the complete original history without previous_response_id; current permissions and route compatibility still apply. Waiting alone will not make this request supported. Do not replay tool results while an earlier delivery is uncertain."
+	case "owner_rate_limited", "owner_overloaded":
+		reason = "The proven encrypted agent owner is temporarily rate limited."
+		if e.Reason == "owner_overloaded" {
+			reason = "The proven encrypted agent owner is temporarily overloaded."
+		}
+		action = "Wait until " + e.RetryAt.UTC().Format(time.RFC3339) + " (estimated), then resume this same conversation with its complete history. Compatibility records are retained through that window; current permissions and route compatibility will be checked again. Do not resubmit tool results while an earlier delivery is uncertain."
 	case "owner_conflict":
 		reason = "The encrypted agent items have conflicting compatible owners."
 		action = "Ask the administrator to verify the original compatible owner; do not switch accounts or replay tool results."
@@ -50,3 +91,11 @@ type openAINonStreamingDeliveryError struct{ err error }
 
 func (e *openAINonStreamingDeliveryError) Error() string { return e.err.Error() }
 func (e *openAINonStreamingDeliveryError) Unwrap() error { return e.err }
+
+// InternalSubreason exposes only a fixed diagnostic category for persistence.
+func (e *OpenAIAgentRecoveryError) InternalSubreason() string {
+	if e == nil || e.diagnostic == nil {
+		return "unknown"
+	}
+	return safeOpenAIRecoverySubreason(e.diagnostic.subreason)
+}

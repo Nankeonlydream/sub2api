@@ -42,6 +42,14 @@ import type {
   OpenCodeGoUsageState
 } from '@/types'
 
+/** Current account slots in use, independent of dashboard history and ops settings. */
+export async function getConcurrencySummary(): Promise<{ current_concurrency: number }> {
+  const { data } = await apiClient.get<{ current_concurrency: number }>(
+    '/admin/accounts/concurrency-summary'
+  )
+  return data
+}
+
 /**
  * List all accounts with pagination
  * @param page - Page number (default: 1)
@@ -472,9 +480,9 @@ export async function resetTempUnschedulable(id: number): Promise<{ message: str
  */
 export async function generateAuthUrl(
   endpoint: string,
-  config: { proxy_id?: number }
-): Promise<{ auth_url: string; session_id: string }> {
-  const { data } = await apiClient.post<{ auth_url: string; session_id: string }>(endpoint, config)
+  config: { proxy_id?: number; proxy_mode?: 'single' | 'request'; proxy_ids?: number[] }
+): Promise<{ auth_url: string; session_id: string; proxy_mode?: 'single' | 'request'; proxy_id?: number }> {
+  const { data } = await apiClient.post<{ auth_url: string; session_id: string; proxy_mode?: 'single' | 'request'; proxy_id?: number }>(endpoint, config)
   return data
 }
 
@@ -486,7 +494,7 @@ export async function generateAuthUrl(
  */
 export async function exchangeCode(
   endpoint: string,
-  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number }
+  exchangeData: { session_id: string; code: string; state?: string; proxy_id?: number; proxy_mode?: 'single' | 'request'; proxy_ids?: number[] }
 ): Promise<Record<string, unknown>> {
   const { data } = await apiClient.post<Record<string, unknown>>(endpoint, exchangeData)
   return data
@@ -672,10 +680,7 @@ export async function syncUpstreamModels(
   options?: SyncUpstreamModelsOptions,
   request?: { signal?: AbortSignal }
 ): Promise<SyncUpstreamModelsResult> {
-  const url = `/admin/accounts/${id}/models/sync-upstream`
-  const { data } = options === undefined && request === undefined
-    ? await apiClient.post<SyncUpstreamModelsResult>(url)
-    : await apiClient.post<SyncUpstreamModelsResult>(url, options, request)
+  const { data } = await apiClient.post<SyncUpstreamModelsResult>(`/admin/accounts/${id}/models/sync-upstream`, options, request)
   return data
 }
 
@@ -805,9 +810,10 @@ export async function importData(payload: {
   return data
 }
 
-export async function importCodexSession(payload: CodexSessionImportRequest): Promise<CodexSessionImportResult> {
+export async function importCodexSession(payload: CodexSessionImportRequest, options?: { signal?: AbortSignal }): Promise<CodexSessionImportResult> {
   const { data } = await apiClient.post<CodexSessionImportResult>('/admin/accounts/import/codex-session', payload, {
-    timeout: 120000 // 120s timeout for large session imports
+    timeout: 120000, // 120s timeout for large session imports
+    signal: options?.signal
   })
   return data
 }
@@ -1475,6 +1481,7 @@ export async function getOpenAIRequestTimezones(): Promise<{ default: string; ti
 }
 
 export const accountsAPI = {
+  getConcurrencySummary,
  getPerformance, savePerformance, releasePerformance, getPerformanceEvents,
   getOpenAIRequestTimezones,
   list,

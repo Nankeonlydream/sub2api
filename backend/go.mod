@@ -1,6 +1,6 @@
 module github.com/Wei-Shaw/sub2api
 
-go 1.27.3
+go 1.27.4
 
 // The embedded engine uses gin.H only. Keep Sub2API's Context.Get(string)
 // contract; upstream's Gin 1.12 HTTP router is not included in this integration.
@@ -39,6 +39,7 @@ require (
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/gofrs/flock v0.12.1
 	github.com/golang-jwt/jwt/v5 v5.3.1
+	github.com/google/jsonschema-go v0.4.2
 	github.com/google/uuid v1.6.0
 	github.com/google/wire v0.7.0
 	github.com/gorilla/websocket v1.5.3
