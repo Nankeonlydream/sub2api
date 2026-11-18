@@ -258,3 +258,8 @@ tools/local-worker/
 
 !docs/free-ultrafast-billing.md
 !/.github/scripts/free-ultrafast-browser.mjs
+
+# Local runtime artifacts
+.playwright-cli/
+/data/
+backend/internal/service/data/
