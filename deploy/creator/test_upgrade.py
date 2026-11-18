@@ -22,6 +22,34 @@ NEW = server.REPOSITORY + '@sha256:' + 'b' * 64
 
 
 class UpgradeTests(unittest.TestCase):
+    def test_current_catbee_node_uses_only_registered_compose_project(self):
+        host = server.CATBEE_PRODUCTION_HOST
+        with patch.object(server.socket, 'gethostname', return_value=host):
+            production = load('server')
+        self.assertIn(host, production.HOSTS)
+        self.assertEqual(production.COMPOSE, ['docker', 'compose', '-p', 'catbee-production',
+                                             '-f', '/root/catbee-production/compose.json'])
+        labels = {'com.docker.compose.project': 'catbee-production',
+                  'com.docker.compose.service': 'sub2api',
+                  'com.docker.compose.project.config_files': str(production.OVERRIDE)}
+        production.validate_production_project({'Config': {'Labels': labels}})
+        for label in labels:
+            wrong = dict(labels, **{label: 'wrong'})
+            with self.subTest(label=label), self.assertRaisesRegex(RuntimeError, 'registered production'):
+                production.validate_production_project({'Config': {'Labels': wrong}})
+
+    def test_json_replacement_changes_only_application_image(self):
+        config = {'services': {'sub2api': {'image': OLD, 'environment': {'EXAMPLE': OLD}},
+                               'postgres': {'image': 'postgres:18'}, 'redis': {'image': 'redis:8'}},
+                  'networks': {'default': {'name': 'catbee-network'}}}
+        original = json.dumps(config)
+        config['services']['sub2api']['image'] = NEW
+        self.assertEqual(json.loads(server.replace_json_image(original, OLD, NEW)), config)
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected sub2api image'):
+            server.replace_json_image(original, NEW, OLD)
+        with self.assertRaisesRegex(RuntimeError, 'Duplicate key'):
+            server.replace_json_image('{"services": {}, "services": {}}', OLD, NEW)
+
     def test_consolidated_node_uses_application_project_not_database_project(self):
         with patch.object(server.socket, 'gethostname', return_value=server.CONSOLIDATED_HOST):
             consolidated = load('server')

@@ -16,16 +16,23 @@ HOST = 'iZrj92zzv39jbi7n9fz4fuZ'
 LEFT_HOST = 'iZrj9eby63lh2zp7dbipn8Z'
 NEW_HOST = 'iZrj97sgqumwizgptmhvzaZ'
 CONSOLIDATED_HOST = 'iZrj98y2r2rfswybuc7r9bZ'
+CATBEE_PRODUCTION_HOST = 'ser109767888688'
 HOSTS = {HOST: 'right', LEFT_HOST: 'left', NEW_HOST: 'catbee-app',
-         CONSOLIDATED_HOST: 'catbee-app-db'}
+         CONSOLIDATED_HOST: 'catbee-app-db', CATBEE_PRODUCTION_HOST: 'catbee-production'}
 LEFT_LEGACY_IMAGE = 'ghcr.io/ranxi2001/sub2api@sha256:67d3167a638bab1f466384f9db187873e983d776a6a8e741ae6bc2402867e83a'
 LEFT_OFFICIAL_IMAGE = 'ghcr.io/wei-shaw/sub2api@sha256:44b59fc74b0b582750ef5f38146782db177767ef9d3f34351f1c75c157b1bb88'
 REPOSITORY = 'ghcr.io/nankeonlydream/sub2api'
-# The consolidated node keeps its existing database Compose project separate.
-DEPLOY = Path('/root/catbee-app' if socket.gethostname() == CONSOLIDATED_HOST else '/root/sub2api-deploy')
 RELEASES = Path('/root/sub2api-creator-release')
-OVERRIDE = DEPLOY / 'docker-compose.creator.yml'
-COMPOSE = ['docker', 'compose', '-f', str(DEPLOY / 'docker-compose.yml'), '-f', str(OVERRIDE)]
+HOSTNAME = socket.gethostname()
+if HOSTNAME == CATBEE_PRODUCTION_HOST:
+    DEPLOY = Path('/root/catbee-production')
+    OVERRIDE = DEPLOY / 'compose.json'
+    COMPOSE = ['docker', 'compose', '-p', 'catbee-production', '-f', str(OVERRIDE)]
+else:
+    # The consolidated node keeps its existing database Compose project separate.
+    DEPLOY = Path('/root/catbee-app' if HOSTNAME == CONSOLIDATED_HOST else '/root/sub2api-deploy')
+    OVERRIDE = DEPLOY / 'docker-compose.creator.yml'
+    COMPOSE = ['docker', 'compose', '-f', str(DEPLOY / 'docker-compose.yml'), '-f', str(OVERRIDE)]
 
 
 def run(args, timeout=300):
@@ -85,6 +92,32 @@ def replace_image(original, old, new):
     pattern = r'(?m)^([ \t]+image:[ \t]*)' + re.escape(old) + r'[ \t]*$'
     require(len(re.findall(pattern, original)) == 1, 'Unexpected image entry in Creator override')
     return re.sub(pattern, lambda m: m[1] + new, original)
+
+
+def unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        require(key not in result, 'Duplicate key in production Compose JSON')
+        result[key] = value
+    return result
+
+
+def replace_json_image(original, old, new):
+    config = json.loads(original, object_pairs_hook=unique_json_object)
+    require(isinstance(config, dict) and isinstance(config.get('services'), dict),
+            'Expected a JSON Compose project with services')
+    service = config['services'].get('sub2api')
+    require(isinstance(service, dict) and service.get('image') == old, 'Unexpected sub2api image entry')
+    service['image'] = new
+    return json.dumps(config, indent=2, ensure_ascii=False) + '\n'
+
+
+def validate_production_project(container):
+    labels = container['Config'].get('Labels') or {}
+    require(labels.get('com.docker.compose.project') == 'catbee-production' and
+            labels.get('com.docker.compose.service') == 'sub2api' and
+            labels.get('com.docker.compose.project.config_files') == str(OVERRIDE),
+            'Running application does not match the registered production Compose project')
 
 
 def atomic_write(path, text):
@@ -191,6 +224,8 @@ def main():
     with open(RELEASES / 'creator-upgrade.lock', 'w') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         old = inspect('sub2api')
+        if host == CATBEE_PRODUCTION_HOST:
+            validate_production_project(old)
         if args.status:
             log(json.dumps({'node': HOSTS[host], 'hostname': host, 'image': old['Config']['Image'],
                             'health': old['State'].get('Health', {}).get('Status')}))
@@ -216,7 +251,8 @@ def main():
         validate_metadata(metadata, image)
         version = run(['docker', 'run', '--rm', '--network', 'none', '--entrypoint', '/app/sub2api', pinned, '-version'])
         require(metadata['version'] in version and metadata['revision'] in version, 'Binary metadata mismatch')
-        replacement = replace_image(original, old['Config']['Image'], pinned)
+        replace = replace_json_image if host == CATBEE_PRODUCTION_HOST else replace_image
+        replacement = replace(original, old['Config']['Image'], pinned)
         before = migrations()
         validate_migration_compatibility(before, metadata['migrations'])
         expected = {n: c for n, c in metadata['migrations'].items() if n not in before}
@@ -244,7 +280,8 @@ def main():
             return
         root = RELEASES / (metadata['version'] + '-' + time.strftime('%Y%m%dT%H%M%S') + '-' + str(os.getpid()))
         root.mkdir()
-        (root / 'docker-compose.creator.before.yml').write_text(original)
+        before_name = 'compose.before.json' if host == CATBEE_PRODUCTION_HOST else 'docker-compose.creator.before.yml'
+        (root / before_name).write_text(original)
         (root / 'release.json').write_text(json.dumps(metadata, indent=2) + '\n')
         require(inspect('sub2api')['Id'] == old['Id'] and OVERRIDE.read_text() == original,
                 'Production changed during preflight; retry after inspecting it')

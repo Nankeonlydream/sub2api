@@ -1,5 +1,7 @@
 # 创作中心日常升级入口
 
+> 当前指定左侧节点 `154.37.208.216`：VNC 核对主机名 `ser109767888688`，生产 Compose 项目 `catbee-production`，文件 `/root/catbee-production/compose.json`。升级器在该节点核对运行容器的 Compose 标签，只替换 `services.sub2api.image`，用 `--no-deps` 重建子服务；不会重建 PostgreSQL 或 Redis。此地址与下方阿里云历史节点不同，不要从历史记录推断升级目标。
+
 > 2026-11-10 22:36:58（北京时间）右侧 Nginx 过渡转发已通过 SIGQUIT 平滑停止，并取消开机自启；右侧 80/443 已无监听。两侧旧任务退场记录均已核实通过。停止后主域名、www、登录页面和左侧实际 API 访问记录验证通过；当前域名入口不再经过右侧。右侧云实例及原文件保留，未关机、未释放。恢复右侧转发：`sudo systemctl enable --now nginx`。详见 `DEPLOYMENT-2026-11-09-application-consolidation.md` 的 11 月 10 日退场验收。本条覆盖下列关于右侧仍保留转发和旧应用兼容的历史状态。
 
 > 2026-11-09 应用已从右侧迁至左侧 `CatBee数据库` 节点 `iZrj98y2r2rfswybuc7r9bZ`（公网 `43.110.24.140`、私网 `172.18.29.103`）。当前生产应用目录为 `/root/catbee-app`；原 PostgreSQL / Redis 仍由 `/root/sub2api-deploy` 管理，升级应用时不要操作数据库 Compose 项目。`catbee.online` 与 `www.catbee.online` 均已解析到左侧。沿用原 GHCR 固定摘要的 `2.20.1-creator.1`，未升级版本、未执行数据库迁移、未备份数据库。右侧保留 HTTPS 转发与 17 条旧图片任务的进程兼容；两侧已安装退场定时器，最早于 2026-11-10 15:38:55（北京时间）检查任务过期后停止旧应用并移除兼容路由。不可将“已安排”当作“已停止”，释放右侧前须核对退场记录。详见 `DEPLOYMENT-2026-11-09-application-consolidation.md`。本条覆盖下列历史拓扑中的应用部署位置。
