@@ -240,6 +240,12 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 
 	// Track if we've started streaming (for error handling)
 	streamStarted := false
+	var restoreClaudeHeaderWait func()
+	defer func() {
+		if restoreClaudeHeaderWait != nil {
+			restoreClaudeHeaderWait()
+		}
+	}()
 
 	// 绑定错误透传服务，允许 service 层在非 failover 错误场景复用规则。
 	if h.errorPassthroughService != nil {
@@ -914,11 +920,16 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 			if fs.ForceCacheBilling {
 				requestCtx = service.WithForceCacheBilling(requestCtx)
 			}
-			// 记录 Forward 前已写入字节数，Forward 后若增加则说明 SSE 内容已发，禁止 failover
-			writerSizeBeforeForward := c.Writer.Size()
+			// 记录 Forward 前已写入字节数（扣除上游等待心跳），Forward 后若增加则说明 SSE 内容已发，禁止 failover
+			writerSizeBeforeForward := service.GatewayKeepaliveAdjustedWrittenSize(c)
 			if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
 				result, err = h.antigravityGatewayService.Forward(requestCtx, c, account, attemptBody, hasBoundSession)
 			} else {
+				// 流式请求等待上游响应头期间发 SSE 心跳，避免 CDN 读超时（524）；
+				// 心跳提交 200 后的 JSON 错误由包装 writer 改写为流内 error 事件。
+				if restoreClaudeHeaderWait == nil {
+					restoreClaudeHeaderWait = service.WrapClaudeMessagesHeaderWait(c, reqStream)
+				}
 				result, err = h.gatewayService.Forward(requestCtx, c, account, attemptParsedReq)
 			}
 
@@ -1056,7 +1067,7 @@ func (h *GatewayHandler) Messages(c *gin.Context) {
 				var failoverErr *service.UpstreamFailoverError
 				if errors.As(err, &failoverErr) {
 					// 流式内容已写入客户端，无法撤销，禁止 failover 以防止流拼接腐化
-					if c.Writer.Size() != writerSizeBeforeForward {
+					if service.GatewayKeepaliveAdjustedWrittenSize(c) != writerSizeBeforeForward {
 						h.handleFailoverExhausted(c, failoverErr, account.Platform, true)
 						return
 					}
@@ -2006,7 +2017,7 @@ func gatewayForwardErrorAlreadyCommunicated(c *gin.Context, writerSizeBeforeForw
 	if err == nil || c == nil || c.Writer == nil {
 		return false
 	}
-	if c.Writer.Size() == writerSizeBeforeForward {
+	if service.GatewayKeepaliveAdjustedWrittenSize(c) == writerSizeBeforeForward {
 		return false
 	}
 
