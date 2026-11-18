@@ -21,6 +21,8 @@ export interface SeedanceVideoTier {
 
 const SEEDANCE_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9']
 const ZHONGHENG_RATIOS = ['16:9', '9:16', '1:1']
+// Ratios an administrator may list for a catalog model (the backend checks the same set).
+export const SEEDANCE_CATALOG_ASPECT_RATIOS = ['16:9', '9:16', '1:1', '4:3', '3:4', '21:9', '3:2', '2:3']
 
 function tier(resolution: SeedanceVideoTier['resolution'], minSeconds: number, maxSeconds: number, perRequest: boolean, maxReferenceImages: number, label: string, name: string, note: string, allowedSeconds?: number[]): SeedanceVideoTier {
   return { resolution, minSeconds, maxSeconds, perRequest, aspectRatios: SEEDANCE_RATIOS, supportsUploadedReferences: false, maxReferenceImages, label, name, note, ...(allowedSeconds ? { allowedSeconds } : {}) }
@@ -43,12 +45,14 @@ export const SEEDANCE_VIDEO_TIERS: Record<string, SeedanceVideoTier> = {
   '00sd2.0': { ...zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 720p · 低价按条', '价格最低；上游提示不要频繁提交，降低频率时成功率高'), allowedSeconds: [5, 10, 15] },
   // Zhongheng /v1/models?include_capabilities=1 observed 2026-10-30. Models
   // offering several resolutions are sold at the highest one.
-  'xseadanco2.0': zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 720p · 满血 · 按条', '满血不卡脸，可大并发'),
+  // Zhongheng lists aspect_ratio_options ["9:16"] only for this line.
+  'xseadanco2.0': { ...zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 720p · 满血 · 按条', '满血不卡脸，可大并发；仅支持 9:16 竖屏'), aspectRatios: ['9:16'] },
   'aseedance2.0': zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 720p · 满血 · 全天有货', '满血，全天有货'),
   'xxseadanco2.0m': zhTier('720p', 5, 15, false, 9, 'Seedance 2.0 720p · 满血 · 按秒', '原生不卡脸满血'),
   'ttsedanco2.0-720': zhTier('720p', 5, 15, false, 9, 'Seedance 2.0 720p · 官转 · 按秒', '官转真实满血，原生不卡脸'),
   'a-sd2.0': { ...zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 Fast 720p · 按条', 'Fast 版，原生不卡脸，长期稳定'), allowedSeconds: [5, 10, 15] },
-  'fseadanco2.0mini': zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 Mini 720p · 按条', 'Mini 版，稳定大并发'),
+  // Ignores the ratio parameter and always renders 9:16 (checked 2026-11-13).
+  'fseadanco2.0mini': { ...zhTier('720p', 5, 15, true, 9, 'Seedance 2.0 Mini 720p · 按条', 'Mini 版，稳定大并发；仅出 9:16 竖屏'), aspectRatios: ['9:16'] },
   'ttsedanco2.0-480': zhTier('480p', 5, 15, false, 9, 'Seedance 2.0 480p · 官转 · 按秒', '官转真实满血，全天稳定'),
   'sedanco2.0-300秒必出': zhTier('480p', 15, 15, true, 9, 'Seedance 2.0 480p · 300 秒必出', '固定 15 秒，上游承诺 300 秒内出片'),
   'oosd2.5': zhTier('720p', 15, 15, true, 9, 'Seedance 2.5 720p · 固定 15 秒', '含真人面部的内容容易被拦截'),
@@ -64,6 +68,10 @@ export const SEEDANCE_VIDEO_TIERS: Record<string, SeedanceVideoTier> = {
   'tseadanco2.5-1080yt': zhTier('1080p', 5, 30, true, 30, 'Seedance 2.5 1080p · 满参 · 按条', '原生不卡脸；失败可重新提交'),
   'ttseadanco2.5-1080': zhTier('1080p', 5, 30, false, 30, 'Seedance 2.5 1080p · 稳定 · 按秒', '稳定大并发'),
   'bbseadanco-1080': zhTier('1080p', 5, 30, false, 30, 'Seedance 2.5 1080p · 卡脸 · 按秒', '含真人面部的内容容易被拦截'),
+  // XinAI Muse: sold from Grok groups (Muse tab). A paid check on 2026-11-14
+  // showed one image is used as the first frame; several images are untested,
+  // so uploads stay closed and the view offers first-frame mode instead.
+  'muse-video': { ...zhTier('720p', 1, 10, false, 0, 'Muse 视频 720p · 按秒', '1–10 秒，支持 1 张首帧图'), supportsUploadedReferences: false },
 }
 
 // Fallback list when the key's model list cannot be read.
@@ -85,6 +93,8 @@ export interface SeedanceCatalogEntry {
   allowed_seconds?: number[]
   per_request: boolean
   max_reference_images: number
+  // Empty or missing means the default 16:9, 9:16 and 1:1.
+  aspect_ratios?: string[]
 }
 
 export interface SeedanceCatalogState {
@@ -100,7 +110,7 @@ export function seedanceEntryToTier(entry: SeedanceCatalogEntry): SeedanceVideoT
     maxSeconds: entry.max_seconds,
     ...(entry.allowed_seconds?.length ? { allowedSeconds: [...entry.allowed_seconds] } : {}),
     perRequest: entry.per_request,
-    aspectRatios: ZHONGHENG_RATIOS,
+    aspectRatios: entry.aspect_ratios?.length ? [...entry.aspect_ratios] : ZHONGHENG_RATIOS,
     supportsUploadedReferences: refs > 0,
     maxReferenceImages: refs,
     label: '纵横',
@@ -120,6 +130,7 @@ export function seedanceTierToEntry(model: string, tier: SeedanceVideoTier): See
     ...(tier.allowedSeconds?.length ? { allowed_seconds: [...tier.allowedSeconds] } : {}),
     per_request: tier.perRequest,
     max_reference_images: tier.supportsUploadedReferences ? tier.maxReferenceImages : 0,
+    ...(tier.aspectRatios.join() !== ZHONGHENG_RATIOS.join() ? { aspect_ratios: [...tier.aspectRatios] } : {}),
   }
 }
 
@@ -160,6 +171,26 @@ export function seedanceTierHint(tier: SeedanceVideoTier): string {
 
 export const SEEDANCE_VIDEO_PRICE_FAMILY = 'seedance'
 
+const RESOLUTION_RANK: Record<SeedanceVideoTier['resolution'], number> = { '480p': 0, '720p': 1, '1080p': 2 }
+
+// Display order for catalog models: by resolution, per-request before
+// per-second, cheapest first; unpriced models last in their group, then
+// catalog order. Shared by the admin price list and the Creator picker.
+export function sortSeedanceModels(models: string[], prices: Record<string, unknown> = {}): string[] {
+  const order = [...activeTiers.value.keys()]
+  const price = (model: string) => {
+    const raw = prices[model] ?? prices[model.toLowerCase()]
+    const value = raw === '' || raw == null ? NaN : Number(raw)
+    return Number.isFinite(value) ? value : Number.POSITIVE_INFINITY
+  }
+  const rank = (model: string) => {
+    const tier = seedanceVideoTier(model)
+    return tier ? RESOLUTION_RANK[tier.resolution] * 2 + (tier.perRequest ? 0 : 1) : Number.POSITIVE_INFINITY
+  }
+  const index = (model: string) => order.indexOf(model.toLowerCase())
+  return [...models].sort((a, b) => (rank(a) - rank(b)) || (price(a) - price(b)) || (index(a) - index(b)))
+}
+
 export function seedanceVideoTier(model: string): SeedanceVideoTier | null {
   return activeTiers.value.get(model.trim().replace(/^models\//i, '').toLowerCase()) || null
 }
@@ -168,10 +199,16 @@ export function isSeedanceVideoModel(model: string): boolean {
   return seedanceVideoTier(model) !== null
 }
 
-// Relay catalog models that Grok groups sell (e.g. heavy-grok-720p) belong to
+// XinAI's muse-video is sold from Grok groups but has its own Creator Studio tab.
+export function isMuseVideoModel(model: string): boolean {
+  return /^muse-video$/i.test(model.trim().replace(/^models\//i, ''))
+}
+
+// Muse takes exactly one image and XinAI uses it as the video's first frame
+// (checked 2026-11-14). Other relay tiers take reference images instead. (e.g. heavy-grok-720p) belong to
 // Creator Studio's Grok tab; the rest of the catalog is Seedance.
 export function isGrokRelayVideoModel(model: string): boolean {
-  return isSeedanceVideoModel(model) && /grok/i.test(model)
+  return isSeedanceVideoModel(model) && /grok/i.test(model.trim().replace(/^models\//i, ''))
 }
 
 // Snap a duration to the tier: clamp to its range, then to the nearest sold

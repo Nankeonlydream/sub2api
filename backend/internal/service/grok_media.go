@@ -1422,7 +1422,8 @@ func grokMediaUsageFromResponse(endpoint GrokMediaEndpoint, requestInfo GrokMedi
 	meta := grokMediaUsageMetadata{Usage: usage}
 	switch endpoint {
 	case GrokMediaEndpointImagesGenerations, GrokMediaEndpointImagesEdits:
-		meta.ImageCount = countOpenAIResponseImageOutputsFromJSONBytes(responseBody)
+		// Extra images the upstream returned beyond the requested n are not billed.
+		meta.ImageCount = capImageCountToRequested(countOpenAIResponseImageOutputsFromJSONBytes(responseBody), requestInfo.N)
 		meta.ImageSize = requestInfo.SizeTier
 		meta.ImageInputSize = requestInfo.Size
 		meta.ImageOutputSizes = collectOpenAIResponseImageOutputSizesFromJSONBytes(responseBody)

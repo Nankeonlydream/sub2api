@@ -17,54 +17,51 @@ import (
 func miniMaxH3TestAccount() *Account {
 	return &Account{ID: 9, Platform: PlatformMiniMax, Type: AccountTypeAPIKey, Credentials: map[string]any{
 		"api_key": "test-upstream-key", "base_url": "https://relay.example/v1", "account_mode": AccountModePayG,
-		"model_mapping": map[string]any{"Minimax-H3-768p-933-10s-15s": "Minimax-H3-768p-933-10s-15s", "MiniMax-H3-933-1440p-15s": "MiniMax-H3-933-1440p-15s"},
+		"model_mapping": map[string]any{"Xminimex-h3": "Xminimex-h3", "MinimaxH3-768": "MinimaxH3-768"},
 	}}
 }
 
-func TestMiniMaxH3ForwardUsesDeepKeyProtocol(t *testing.T) {
-	body := []byte(`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"waves","duration":12,"aspect_ratio":"9:16","size":"1344x768","resolution":"720p","metadata":{"video_urls":["https://example.com/reference.mp4"]},"future":{"keep":true}}`)
-	upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(`{"id":"task_1","task_id":"task_1","object":"video","status":"queued","progress":0}`)}
+func TestMiniMaxH3ForwardUsesZhonghengProtocol(t *testing.T) {
+	body := []byte(`{"model":"Xminimex-h3","prompt":"waves","seconds":12,"aspect_ratio":"9:16","size":"1344x768","resolution":"720p","future":{"keep":true}}`)
+	upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(`{"task_id":"task_1","status":"processing"}`)}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	c, w := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
 	result, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", body)
 	require.NoError(t, err)
 	require.Equal(t, "https://relay.example/v1/videos", upstream.request.URL.String())
 	require.Equal(t, "Bearer test-upstream-key", upstream.request.Header.Get("Authorization"))
-	require.Empty(t, upstream.request.Header.Get("Idempotency-Key"))
+	require.NotEmpty(t, upstream.request.Header.Get("Idempotency-Key"), "each gateway create is a new Zhongheng order")
 	require.True(t, HTTPUpstreamRedirectsDisabled(upstream.request.Context()))
 	forwarded, err := io.ReadAll(upstream.request.Body)
 	require.NoError(t, err)
-	require.JSONEq(t, `{"model":"Minimax-H3-768p-933-10s-15s","prompt":"waves","seconds":12,"aspect_ratio":"9:16","metadata":{"video_urls":["https://example.com/reference.mp4"]},"future":{"keep":true}}`, string(forwarded))
+	require.JSONEq(t, `{"model":"Xminimex-h3","prompt":"waves","duration":12,"resolution":"2k","ratio":"9:16","future":{"keep":true}}`, string(forwarded))
 	require.Equal(t, "minimax-h3:task_1", result.ResponseID)
-	require.Equal(t, "Minimax-H3-768p-933-10s-15s", result.BillingModel)
-	require.Equal(t, "768p", result.VideoResolution)
+	require.Equal(t, "Xminimex-h3", result.BillingModel)
+	require.Equal(t, "1440p", result.VideoResolution)
 	require.Equal(t, 12, result.VideoDurationSeconds)
 	require.Zero(t, result.VideoCount, "async acceptance must not charge")
-	require.JSONEq(t, `{"id":"task_1","task_id":"task_1","object":"video","status":"queued","progress":0}`, w.Body.String())
+	require.JSONEq(t, `{"task_id":"task_1","status":"processing"}`, w.Body.String())
 
-	// Fixed tiers take no duration field; the model ID decides the length.
-	info, err := ParseMiniMaxH3Request([]byte(`{"model":"MiniMax-H3-933-1440p-15s","prompt":"x","ratio":"21:9"}`))
-	require.NoError(t, err)
-	require.Equal(t, "1440p", info.Resolution)
-	require.Equal(t, 15, info.DurationSeconds)
-	forwarded, err = prepareMiniMaxH3CreateBody([]byte(`{"model":"MiniMax-H3-933-1440p-15s","prompt":"x","ratio":"21:9","seconds":15}`), info, "MiniMax-H3-933-1440p-15s")
-	require.NoError(t, err)
-	require.JSONEq(t, `{"model":"MiniMax-H3-933-1440p-15s","prompt":"x","aspect_ratio":"21:9"}`, string(forwarded))
+	// Zhongheng takes no reference videos.
+	_, err = svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"x","metadata":{"video_urls":["https://example.com/r.mp4"]}}`))
+	require.Error(t, err)
 }
 
 func TestMiniMaxH3ValidationAndURLs(t *testing.T) {
 	for _, body := range []string{`{`, `[]`, `{}`, `{"model":"MiniMax-H3","prompt":"x","seconds":5}`,
-		`{"model":"MinimaxH3-768","prompt":"x","seconds":8,"images":["https://e.example/a.jpg"]}`, `{"model":"MinimaxH3-768","prompt":"x","seconds":10}`, `{"model":"Minimax-H3-768p-933-10s-15s","prompt":"x","seconds":9}`,
-		`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"x","seconds":16}`, `{"model":"Minimax-H3-768p-933-10s","prompt":"x","seconds":15}`,
-		`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"x","seconds":10.5}`, `{"model":"Minimax-H3-768p-933-10s-15s","prompt":"x","seconds":11,"duration":12}`,
-		`{"model":"Minimax-H3-768p-933-10s","prompt":" "}`, `{"model":"Minimax-H3-768p-933-10s","prompt":"x","n":2}`} {
+		// DeepKey's IDs are no longer sold.
+		`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"x","seconds":10}`,
+		`{"model":"MinimaxH3-768","prompt":"x","seconds":8,"images":["https://e.example/a.jpg"]}`, `{"model":"MinimaxH3-768","prompt":"x","seconds":10}`, `{"model":"Xminimex-h3","prompt":"x","seconds":4}`,
+		`{"model":"Xminimex-h3","prompt":"x","seconds":16}`,
+		`{"model":"Xminimex-h3","prompt":"x","seconds":10.5}`, `{"model":"Xminimex-h3","prompt":"x","seconds":11,"duration":12}`,
+		`{"model":"Xminimex-h3","prompt":" "}`, `{"model":"Xminimex-h3","prompt":"x","n":2}`} {
 		_, err := ParseMiniMaxH3Request([]byte(body))
 		require.Error(t, err, body)
 	}
-	info, err := ParseMiniMaxH3Request([]byte(`{"model":"minimax-h3-768p-933-10s-15s","prompt":"x"}`))
+	info, err := ParseMiniMaxH3Request([]byte(`{"model":"xminimex-h3","prompt":"x"}`))
 	require.NoError(t, err)
-	require.Equal(t, 10, info.DurationSeconds, "duration defaults to the tier minimum")
-	info, err = ParseMiniMaxH3Request([]byte(`{"model":"MiniMax-H3-933-1440p-10-15s","prompt":"x","seconds":"13"}`))
+	require.Equal(t, 5, info.DurationSeconds, "duration defaults to the tier minimum")
+	info, err = ParseMiniMaxH3Request([]byte(`{"model":"Xminimex-h3","prompt":"x","seconds":"13"}`))
 	require.NoError(t, err)
 	require.Equal(t, 13, info.DurationSeconds)
 	require.Equal(t, "1440p", info.Resolution)
@@ -108,30 +105,6 @@ func TestMiniMaxH3StatusStates(t *testing.T) {
 	}
 }
 
-func TestMiniMaxH3ContentStreamsDeepKeyVideo(t *testing.T) {
-	video := grokMediaContentStatusResponse("mp4-bytes")
-	video.Header.Set("Content-Type", "video/mp4")
-	video.ContentLength = int64(len("mp4-bytes"))
-	upstream := &grokMediaContentUpstreamStub{response: video}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	c, w := grokMediaContentTestContext(http.MethodGet, "/v1/videos/task_1/content", nil)
-	result, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("task_1"), nil)
-	require.NoError(t, err)
-	require.Len(t, upstream.requests, 1)
-	require.Equal(t, "https://relay.example/v1/videos/task_1/content", upstream.requests[0].URL.String())
-	require.Equal(t, http.StatusOK, w.Code)
-	require.Equal(t, "mp4-bytes", w.Body.String())
-	require.Equal(t, 1, result.VideoCount)
-	require.True(t, result.VideoContentDelivered)
-}
-
-// The media upload and status download paths stay for Zhongheng-style relays.
-func zhonghengStyleRelay() openAIVideosRelay {
-	relay := miniMaxH3Relay
-	relay.UploadDataImages, relay.ContentFromStatus = true, true
-	return relay
-}
-
 const zhonghengSucceeded = `{"task_id":"vid_1","status":"succeeded","video_url":"https://relay.example/api/video-content/vid_1","download_url":"https://relay.example/api/video-content/vid_1?download=1"}`
 
 func TestMiniMaxH3ContentDownloadsStatusVideoWithoutKey(t *testing.T) {
@@ -141,7 +114,7 @@ func TestMiniMaxH3ContentDownloadsStatusVideoWithoutKey(t *testing.T) {
 	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{grokMediaContentStatusResponse(zhonghengSucceeded), video}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	c, w := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
-	result, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+	result, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, "https://relay.example/v1/videos/vid_1", upstream.requests[0].URL.String())
@@ -163,7 +136,7 @@ func TestMiniMaxH3ContentRejectsUnreadyVideo(t *testing.T) {
 		upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(status)}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		c, _ := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
-		_, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+		_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
 		require.Error(t, err, status)
 		require.Len(t, upstream.requests, 1, status)
 	}
@@ -182,7 +155,7 @@ func TestMiniMaxH3ContentForeignVideoUsesRelayContentRoute(t *testing.T) {
 		upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{grokMediaContentStatusResponse(status), video}}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		c, w := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
-		result, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+		result, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
 		require.NoError(t, err, status)
 		require.Len(t, upstream.requests, 2)
 		require.Equal(t, "https://relay.example/v1/videos/vid_1/content", upstream.requests[1].URL.String(), "must not download from %s", status)
@@ -201,7 +174,7 @@ func TestMiniMaxH3ContentForeignVideoUsesRelayContentRoute(t *testing.T) {
 		upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{grokMediaContentStatusResponse(`{"task_id":"vid_1","status":"succeeded","video_url":"https://evil.example/vid_1.mp4"}`), fallback}}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		c, _ := grokMediaContentTestContext(http.MethodGet, "/v1/videos/vid_1/content", nil)
-		_, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
+		_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointContent, MiniMaxH3TaskKey("vid_1"), nil)
 		require.Error(t, err)
 		require.False(t, c.Writer.Written(), "the handler writes the gateway error")
 	}
@@ -213,8 +186,8 @@ func TestMiniMaxH3UploadsDataImagesBeforeCreate(t *testing.T) {
 	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{upload, grokMediaContentStatusResponse(`{"task_id":"vid_2","status":"processing"}`)}}
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	c, _ := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
-	body := `{"model":"MiniMax-H3-933-1440p-15s","prompt":"x","images":["` + png + `","https://example.com/keep.jpg","` + png + `"]}`
-	_, err := svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(body))
+	body := `{"model":"Xminimex-h3","prompt":"x","images":["` + png + `","https://example.com/keep.jpg","` + png + `"]}`
+	_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(body))
 	require.NoError(t, err)
 	require.Len(t, upstream.requests, 2)
 	require.Equal(t, "https://relay.example/v1/media", upstream.requests[0].URL.String())
@@ -227,9 +200,27 @@ func TestMiniMaxH3UploadsDataImagesBeforeCreate(t *testing.T) {
 	upload = grokMediaContentStatusResponse(`{"data":[{"url":"https://evil.example/a.png"}]}`)
 	upstream = &grokMediaContentUpstreamStub{responses: []*http.Response{upload}}
 	svc = &OpenAIGatewayService{httpUpstream: upstream}
-	_, err = svc.forwardOpenAIVideosRelay(context.Background(), c, zhonghengStyleRelay(), miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"MiniMax-H3-933-1440p-15s","prompt":"x","images":["`+png+`"]}`))
+	_, err = svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"x","images":["`+png+`"]}`))
 	require.Error(t, err)
 	require.Len(t, upstream.requests, 1)
+}
+
+// A gateway relay (another sub2api) has no /v1/media: the data: image goes
+// inline so the next hop uploads it.
+func TestMiniMaxH3ForwardsDataImagesInlineWithoutRelayMedia(t *testing.T) {
+	png := "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+	notFound := grokMediaContentStatusResponse(`{"error":"not found"}`)
+	notFound.StatusCode = http.StatusNotFound
+	upstream := &grokMediaContentUpstreamStub{responses: []*http.Response{notFound, grokMediaContentStatusResponse(`{"id":"vid_3","status":"queued"}`)}}
+	svc := &OpenAIGatewayService{httpUpstream: upstream}
+	c, _ := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
+	_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"MinimaxH3-768","prompt":"x","seconds":5,"images":["`+png+`"]}`))
+	require.NoError(t, err)
+	require.Len(t, upstream.requests, 2)
+	require.Equal(t, "https://relay.example/v1/videos", upstream.requests[1].URL.String())
+	forwarded, err := io.ReadAll(upstream.requests[1].Body)
+	require.NoError(t, err)
+	require.Equal(t, png, gjson.GetBytes(forwarded, "images.0").String())
 }
 
 func TestMiniMaxH3UpstreamErrorIsNotRetried(t *testing.T) {
@@ -238,7 +229,7 @@ func TestMiniMaxH3UpstreamErrorIsNotRetried(t *testing.T) {
 		upstream.response.StatusCode = status
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		c, w := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
-		_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"waves","seconds":10}`))
+		_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"waves","seconds":10}`))
 		require.Error(t, err)
 		require.Equal(t, status, w.Code)
 		require.Len(t, upstream.requests, 1)
@@ -250,7 +241,7 @@ func TestMiniMaxH3MasksRelayQuotaError(t *testing.T) {
 	upstream.response.StatusCode = http.StatusForbidden
 	svc := &OpenAIGatewayService{httpUpstream: upstream}
 	c, w := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
-	_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Minimax-H3-768p-933-10s-15s","prompt":"waves","seconds":10}`))
+	_, err := svc.ForwardMiniMaxH3(context.Background(), c, miniMaxH3TestAccount(), MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"waves","seconds":10}`))
 	require.Error(t, err)
 	require.Equal(t, http.StatusForbidden, w.Code)
 	require.JSONEq(t, `{"error":{"message":"上游渠道余额不足，请联系管理员","type":"new_api_error","code":"upstream_insufficient_quota"}}`, w.Body.String())
@@ -269,21 +260,22 @@ func TestMiniMaxH3MasksRelayQuotaError(t *testing.T) {
 }
 
 func TestMiniMaxH3TariffsAndBillingSnapshot(t *testing.T) {
-	perSecond := map[string]map[string]float64{MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: 0.02}}
-	perRequest := map[string]map[string]float64{MiniMaxH3PriceFamily: {"request_5s": 0.08}}
-	base, err := QuoteMiniMaxH3Video(perSecond, "768p", 5)
+	prices := map[string]map[string]float64{MiniMaxH3PriceFamily: {"xminimex-h3": 0.02, "minimaxh3-768": 0.08}}
+	base, err := QuoteMiniMaxH3Model(prices, "Xminimex-h3", 5)
 	require.NoError(t, err)
-	require.InDelta(t, 0.1, base, 1e-9)
-	base, err = QuoteMiniMaxH3Video(perRequest, "768p", 5)
+	require.InDelta(t, 0.1, base, 1e-9, "per-second models charge each second")
+	base, err = QuoteMiniMaxH3Model(prices, "MinimaxH3-768", 5)
 	require.NoError(t, err)
-	require.InDelta(t, 0.08, base, 1e-9)
-	_, err = QuoteMiniMaxH3Video(perRequest, "768p", 15)
-	require.ErrorContains(t, err, `seconds="5"`)
-	for _, tariff := range []map[string]map[string]float64{nil, {MiniMaxH3PriceFamily: {"480p": 0.1}}, {MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: -1}}, {MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: math.Inf(1)}}, {MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: 0.1, "request_5s": 0.3}}} {
-		_, err := QuoteMiniMaxH3Video(tariff, "768p", 5)
+	require.InDelta(t, 0.08, base, 1e-9, "per-request models charge once")
+	for _, tariff := range []map[string]map[string]float64{nil, {MiniMaxH3PriceFamily: {"xminimex-h3": -1}}, {MiniMaxH3PriceFamily: {"xminimex-h3": math.Inf(1)}}} {
+		_, err := QuoteMiniMaxH3Model(tariff, "Xminimex-h3", 5)
 		require.Error(t, err)
 	}
-	require.Equal(t, perRequest, NormalizeVideoModelPrices(perRequest))
+	require.Equal(t, prices, NormalizeVideoModelPrices(prices))
+	// The retired DeepKey shared tariff keys are dropped.
+	require.Equal(t, prices, NormalizeVideoModelPrices(map[string]map[string]float64{MiniMaxH3PriceFamily: {
+		"xminimex-h3": 0.02, "minimaxh3-768": 0.08, "768p": 0.15, "1440p": 0.25, "per_second": 0.1, "request_5s": 0.3, "minimax-h3-933-1440p-10-15s": 0.2,
+	}}))
 	svc := &OpenAIGatewayService{}
 	result := &OpenAIForwardResult{VideoCount: 1, MiniMaxH3BaseCost: &base, VideoDurationSeconds: 5}
 	cost := svc.calculateOpenAIVideoCost(context.Background(), "mapped-name", &APIKey{}, result, 0.1)
@@ -296,16 +288,16 @@ func TestMiniMaxH3TariffsAndBillingSnapshot(t *testing.T) {
 
 func TestMiniMaxH3MappingMustKeepModel(t *testing.T) {
 	for _, mapping := range []map[string]any{
-		{"Minimax-H3-768p-933-10s": "MiniMax-H3-933-1440p-10s"},
-		{"Minimax-H3-768p-933-10s": "MiniMax-H3"},
-		{"Minimax-H3-768p-933-10s": "gpt-5"},
+		{"Xminimex-h3": "MinimaxH3-768"},
+		{"Xminimex-h3": "MiniMax-H3"},
+		{"Xminimex-h3": "gpt-5"},
 	} {
 		a := miniMaxH3TestAccount()
 		a.Credentials["model_mapping"] = mapping
 		upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(`{"id":"task_1"}`)}
 		svc := &OpenAIGatewayService{httpUpstream: upstream}
 		c, _ := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
-		_, err := svc.ForwardMiniMaxH3(context.Background(), c, a, MiniMaxH3EndpointCreate, "", []byte(`{"model":"Minimax-H3-768p-933-10s","prompt":"x"}`))
+		_, err := svc.ForwardMiniMaxH3(context.Background(), c, a, MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"x"}`))
 		require.Error(t, err)
 		require.Empty(t, upstream.requests, "a changed model must not reach the upstream")
 	}
@@ -328,48 +320,27 @@ func TestMiniMaxH3ZhonghengStatusCompletion(t *testing.T) {
 	}
 }
 
-func TestMiniMaxH3ResolutionTariff(t *testing.T) {
-	prices := map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.1, "1440p": 0.15}}
-	base, err := QuoteMiniMaxH3Video(prices, "1440p", 12)
-	require.NoError(t, err)
-	require.InDelta(t, 1.8, base, 1e-9)
-	base, err = QuoteMiniMaxH3Video(prices, "768p", 10)
-	require.NoError(t, err)
-	require.InDelta(t, 1.0, base, 1e-9)
-	_, err = QuoteMiniMaxH3Video(map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.1}}, "1440p", 10)
-	require.ErrorContains(t, err, "1440p")
-	_, err = QuoteMiniMaxH3Video(map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.1, MiniMaxH3PerSecond: 0.2}}, "768p", 10)
-	require.Error(t, err)
-	// A legacy single per_second price applies to every resolution.
-	base, err = QuoteMiniMaxH3Video(map[string]map[string]float64{MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: 0.15}}, "1440p", 15)
-	require.NoError(t, err)
-	require.InDelta(t, 2.25, base, 1e-9)
-	require.Equal(t, prices, NormalizeVideoModelPrices(prices))
-}
-
 func TestCreatorVideoPricingMiniMaxH3Tiers(t *testing.T) {
 	svc := newOpenAIRecordUsageServiceForTest(&openAIRecordUsageLogRepoStub{}, &openAIRecordUsageUserRepoStub{}, &openAIRecordUsageSubRepoStub{}, nil)
 	key := &APIKey{GroupID: i64p(6), Group: &Group{ID: 6, Platform: PlatformMiniMax, RateMultiplier: 2,
-		VideoModelPrices: map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.12, "1440p": 0.13}}}}
-	quote, err := svc.CreatorVideoPricing(context.Background(), key, 3, "MiniMax-H3-933-1440p-10-15s")
+		VideoModelPrices: map[string]map[string]float64{MiniMaxH3PriceFamily: {"xminimex-h3": 0.13, "minimaxh3-768": 2.6}}}}
+	quote, err := svc.CreatorVideoPricing(context.Background(), key, 3, "Xminimex-h3")
 	require.NoError(t, err)
 	require.Len(t, quote.Prices, 1)
 	prices := quote.Prices["1440p"]
 	require.Len(t, prices, 15)
-	require.Nil(t, prices[8], "9 seconds is below the tier minimum")
+	require.Nil(t, prices[3], "4 seconds is below the tier minimum")
 	require.InDelta(t, 0.13*12*2, *prices[11], 1e-9)
 	require.InDelta(t, 0.13*15*2, *prices[14], 1e-9)
-	quote, err = svc.CreatorVideoPricing(context.Background(), key, 3, "Minimax-H3-768p-933-15s")
+	quote, err = svc.CreatorVideoPricing(context.Background(), key, 3, "MinimaxH3-768")
 	require.NoError(t, err)
-	require.Nil(t, quote.Prices["768p"][9], "the fixed 15s tier only sells 15 seconds")
-	require.InDelta(t, 0.12*15*2, *quote.Prices["768p"][14], 1e-9)
+	require.Nil(t, quote.Prices["768p"][7], "8 seconds is not sold")
+	require.InDelta(t, 2.6*2, *quote.Prices["768p"][14], 1e-9)
+	require.InDelta(t, 2.6*2, *quote.Prices["768p"][4], 1e-9)
 }
 
-// Zhongheng H3 tiers sit in the same group as DeepKey's, each with its own
-// model price, and are sent in Zhongheng's request shape.
 func TestMiniMaxH3ZhonghengTiers(t *testing.T) {
-	prices := map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.15, "1440p": 0.225, "xminimex-h3": 0.26, "minimaxh3-768": 2.6}}
-	require.Equal(t, prices, NormalizeVideoModelPrices(prices))
+	prices := map[string]map[string]float64{MiniMaxH3PriceFamily: {"xminimex-h3": 0.26, "minimaxh3-768": 2.6}}
 	for _, tc := range []struct {
 		model   string
 		seconds int
@@ -378,7 +349,6 @@ func TestMiniMaxH3ZhonghengTiers(t *testing.T) {
 		{"Xminimex-h3", 15, 3.9},
 		{"MinimaxH3-768", 15, 2.6},
 		{"MinimaxH3-768", 5, 2.6},
-		{"MiniMax-H3-933-1440p-10-15s", 12, 2.7},
 	} {
 		base, err := QuoteMiniMaxH3Model(prices, tc.model, tc.seconds)
 		require.NoError(t, err, tc.model)
@@ -389,26 +359,69 @@ func TestMiniMaxH3ZhonghengTiers(t *testing.T) {
 	require.Equal(t, 10, info.DurationSeconds)
 	_, err = QuoteMiniMaxH3Model(prices, "MinimaxH3-768", 8)
 	require.Error(t, err, "8 seconds is not sold")
-	_, err = QuoteMiniMaxH3Model(map[string]map[string]float64{MiniMaxH3PriceFamily: {"768p": 0.15}}, "Xminimex-h3", 10)
+	_, err = QuoteMiniMaxH3Model(map[string]map[string]float64{MiniMaxH3PriceFamily: {"minimaxh3-768": 2.6}}, "Xminimex-h3", 10)
 	require.ErrorContains(t, err, "not configured")
+	require.True(t, isZhonghengAccount(miniMaxH3TestAccount()))
+}
 
-	account := &Account{ID: 10, Platform: PlatformMiniMax, Type: AccountTypeAPIKey, Credentials: map[string]any{
-		"api_key": "k", "base_url": "https://zh.example/v1", "model_mapping": map[string]any{"Xminimex-h3": "Xminimex-h3"},
-	}}
-	require.True(t, isZhonghengAccount(account))
-	require.False(t, isZhonghengAccount(miniMaxH3TestAccount()))
-	upstream := &grokMediaContentUpstreamStub{response: grokMediaContentStatusResponse(`{"task_id":"vid_1","status":"processing"}`)}
-	svc := &OpenAIGatewayService{httpUpstream: upstream}
-	c, _ := grokMediaContentTestContext(http.MethodPost, "/v1/videos", nil)
-	result, err := svc.ForwardMiniMaxH3(context.Background(), c, account, MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"x","seconds":12,"aspect_ratio":"9:16"}`))
+func customMiniMaxCatalog(t *testing.T, entries ...MiniMaxCatalogEntry) {
+	t.Helper()
+	normalized, err := NormalizeMiniMaxCatalog(entries)
 	require.NoError(t, err)
-	require.Equal(t, MiniMaxH3TaskKey("vid_1"), result.ResponseID)
-	require.NotEmpty(t, upstream.request.Header.Get("Idempotency-Key"))
-	forwarded, err := io.ReadAll(upstream.request.Body)
+	applyMiniMaxCatalogState(MiniMaxCatalogState{Customized: true, Entries: normalized})
+	t.Cleanup(func() { applyMiniMaxCatalogState(emptyMiniMaxCatalogState()) })
+}
+
+func TestMiniMaxCatalogReplacesBuiltInModels(t *testing.T) {
+	require.True(t, IsMiniMaxH3Model("xminimex-h3"))
+	customMiniMaxCatalog(t, MiniMaxCatalogEntry{
+		Model: " New-H3 ", Name: "新 H3", Note: "原生不卡脸", Resolution: "2k", MinSeconds: 6, MaxSeconds: 10, PerRequest: true,
+		MaxReferenceImages: 3, RequiresReference: true, AspectRatios: []string{"9:16", "16:9", "9:16"},
+	})
+	require.True(t, IsMiniMaxH3Model("NEW-H3"))
+	require.False(t, IsMiniMaxH3Model("xminimex-h3"), "a model missing from the saved catalog is no longer sold")
+	state := CurrentMiniMaxCatalog()
+	require.True(t, state.Customized)
+	require.Equal(t, "new-h3", state.Entries[0].Model)
+	require.Equal(t, "1440p", state.Entries[0].Resolution, "2k is the 1440p class")
+	require.Equal(t, []string{"9:16", "16:9"}, state.Entries[0].AspectRatios)
+
+	prices := map[string]map[string]float64{MiniMaxH3PriceFamily: {"new-h3": 1.5}}
+	require.Equal(t, prices, NormalizeVideoModelPrices(map[string]map[string]float64{MiniMaxH3PriceFamily: {"new-h3": 1.5, "xminimex-h3": 0.2}}))
+	total, err := QuoteMiniMaxH3Model(prices, "New-H3", 8)
 	require.NoError(t, err)
-	require.Equal(t, "Xminimex-h3", gjson.GetBytes(forwarded, "model").String())
-	require.Equal(t, int64(12), gjson.GetBytes(forwarded, "duration").Int())
-	require.Equal(t, "2k", gjson.GetBytes(forwarded, "resolution").String())
-	require.Equal(t, "9:16", gjson.GetBytes(forwarded, "ratio").String())
-	require.False(t, gjson.GetBytes(forwarded, "seconds").Exists())
+	require.Equal(t, 1.5, total)
+	_, err = QuoteMiniMaxH3Model(prices, "new-h3", 11)
+	require.Error(t, err)
+	_, err = ParseMiniMaxH3Request([]byte(`{"model":"new-h3","prompt":"x","seconds":8}`))
+	require.ErrorContains(t, err, "reference image")
+
+	applyMiniMaxCatalogState(emptyMiniMaxCatalogState())
+	require.True(t, IsMiniMaxH3Model("xminimex-h3"))
+	require.False(t, IsMiniMaxH3Model("new-h3"))
+	require.False(t, CurrentMiniMaxCatalog().Customized)
+}
+
+func TestNormalizeMiniMaxCatalog(t *testing.T) {
+	valid := MiniMaxCatalogEntry{Model: "m1", Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: 9}
+	out, err := NormalizeMiniMaxCatalog([]MiniMaxCatalogEntry{{Model: "gaps", Resolution: "768p", AllowedSeconds: []int{15, 5, 10, 10}}})
+	require.NoError(t, err)
+	require.Equal(t, []int{5, 10, 15}, out[0].AllowedSeconds)
+	require.Equal(t, 5, out[0].MinSeconds)
+	require.Equal(t, 15, out[0].MaxSeconds)
+	for name, bad := range map[string][]MiniMaxCatalogEntry{
+		"empty":            {},
+		"blank model":      {{Resolution: "768p", MinSeconds: 5, MaxSeconds: 15}},
+		"duplicate":        {valid, valid},
+		"seedance id":      {{Model: "00sd2.0", Resolution: "768p", MinSeconds: 5, MaxSeconds: 15}},
+		"resolution":       {{Model: "m", Resolution: "480p", MinSeconds: 5, MaxSeconds: 15}},
+		"seconds":          {{Model: "m", Resolution: "768p", MinSeconds: 10, MaxSeconds: 5}},
+		"too long":         {{Model: "m", Resolution: "768p", MinSeconds: 5, MaxSeconds: 61}},
+		"references":       {{Model: "m", Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: 10}},
+		"needs references": {{Model: "m", Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, RequiresReference: true}},
+		"ratio":            {{Model: "m", Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, AspectRatios: []string{"5:4"}}},
+	} {
+		_, err := NormalizeMiniMaxCatalog(bad)
+		require.Error(t, err, name)
+	}
 }

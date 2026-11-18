@@ -56,6 +56,23 @@ func APIKeySlotLeaseLost(ctx context.Context) bool {
 	return errors.Is(context.Cause(owner.ctx), ErrAPIKeySlotLeaseLost)
 }
 
+// DetachAPIKeyAdmissionOwner prepares a request context for work that outlives
+// its HTTP request (a background video create). Values are kept; client
+// cancellation and the request owner's end-of-request cancel are not. When the
+// request had an owner, the work gets its own, ended by the returned cancel, so
+// key slots acquired by the work are still owned and released by it.
+func DetachAPIKeyAdmissionOwner(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		return context.WithCancel(context.Background())
+	}
+	base := context.WithoutCancel(ctx)
+	if !HasAPIKeyAdmissionOwner(ctx) {
+		return context.WithCancel(base)
+	}
+	base = context.WithValue(base, apiKeyAdmissionOwnerKey{}, (*apiKeyAdmissionOwner)(nil))
+	return WithAPIKeyAdmissionOwner(base)
+}
+
 // Detach client cancellation, but never detach the capacity owner's stop signal.
 func detachAPIKeyUpstreamContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	base := context.WithoutCancel(ctx)

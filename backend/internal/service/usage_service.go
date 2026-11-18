@@ -7,6 +7,7 @@ import (
 	"time"
 
 	dbent "github.com/Wei-Shaw/sub2api/ent"
+	dbusagelog "github.com/Wei-Shaw/sub2api/ent/usagelog"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/pagination"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/usagestats"
@@ -460,4 +461,29 @@ func (s *UsageService) GetStatsWithFilters(ctx context.Context, filters usagesta
 		return nil, fmt.Errorf("get usage stats with filters: %w", err)
 	}
 	return stats, nil
+}
+
+// ActualCostsByRequestIDs sums what the user was actually charged for each
+// usage request ID. IDs without a usage record are absent from the result.
+func (s *UsageService) ActualCostsByRequestIDs(ctx context.Context, userID int64, requestIDs []string) (map[string]float64, error) {
+	costs := make(map[string]float64, len(requestIDs))
+	if len(requestIDs) == 0 {
+		return costs, nil
+	}
+	var rows []struct {
+		RequestID string  `json:"request_id"`
+		Sum       float64 `json:"sum"`
+	}
+	err := s.entClient.UsageLog.Query().
+		Where(dbusagelog.UserID(userID), dbusagelog.RequestIDIn(requestIDs...)).
+		GroupBy(dbusagelog.FieldRequestID).
+		Aggregate(dbent.Sum(dbusagelog.FieldActualCost)).
+		Scan(ctx, &rows)
+	if err != nil {
+		return nil, fmt.Errorf("sum usage costs by request id: %w", err)
+	}
+	for _, row := range rows {
+		costs[row.RequestID] = row.Sum
+	}
+	return costs, nil
 }

@@ -3,6 +3,7 @@ import {
   applySeedanceCatalog,
   builtinSeedanceCatalogEntries,
   isGrokRelayVideoModel,
+  isMuseVideoModel,
   isSeedanceVideoModel,
   seedanceCatalogModels,
   seedanceFallbackModels,
@@ -35,6 +36,12 @@ describe('Seedance catalog', () => {
     expect(isGrokRelayVideoModel('second')).toBe(false)
     // Native xAI models are not relay catalog lines.
     expect(isGrokRelayVideoModel('grok-imagine-video')).toBe(false)
+  })
+
+  it('keeps muse-video out of the Grok tab', () => {
+    expect(isMuseVideoModel('muse-video')).toBe(true)
+    expect(isMuseVideoModel('models/Muse-Video')).toBe(true)
+    expect(isGrokRelayVideoModel('muse-video')).toBe(false)
   })
 
   it('replaces the catalog, keeping its order, names and limits', () => {

@@ -1,5 +1,7 @@
 # 创作中心日常升级入口
 
+> 2026-11-10 22:36:58（北京时间）右侧 Nginx 过渡转发已通过 SIGQUIT 平滑停止，并取消开机自启；右侧 80/443 已无监听。两侧旧任务退场记录均已核实通过。停止后主域名、www、登录页面和左侧实际 API 访问记录验证通过；当前域名入口不再经过右侧。右侧云实例及原文件保留，未关机、未释放。恢复右侧转发：`sudo systemctl enable --now nginx`。详见 `DEPLOYMENT-2026-11-09-application-consolidation.md` 的 11 月 10 日退场验收。本条覆盖下列关于右侧仍保留转发和旧应用兼容的历史状态。
+
 > 2026-11-09 应用已从右侧迁至左侧 `CatBee数据库` 节点 `iZrj98y2r2rfswybuc7r9bZ`（公网 `43.110.24.140`、私网 `172.18.29.103`）。当前生产应用目录为 `/root/catbee-app`；原 PostgreSQL / Redis 仍由 `/root/sub2api-deploy` 管理，升级应用时不要操作数据库 Compose 项目。`catbee.online` 与 `www.catbee.online` 均已解析到左侧。沿用原 GHCR 固定摘要的 `2.20.1-creator.1`，未升级版本、未执行数据库迁移、未备份数据库。右侧保留 HTTPS 转发与 17 条旧图片任务的进程兼容；两侧已安装退场定时器，最早于 2026-11-10 15:38:55（北京时间）检查任务过期后停止旧应用并移除兼容路由。不可将“已安排”当作“已停止”，释放右侧前须核对退场记录。详见 `DEPLOYMENT-2026-11-09-application-consolidation.md`。本条覆盖下列历史拓扑中的应用部署位置。
 
 > 2026-11-04 已将右侧新应用机部署至 `2.19.3-creator.1`（源码 `357383931`），左侧数据库 3 项迁移验证通过；本次部署配置备份已按用户要求在验收后删除，未创建数据库备份。详见 `DEPLOYMENT-2026-11-04-catbee-v2.19.3.md`。
@@ -37,7 +39,7 @@ GitHub 对无活动的公开仓库可能暂停定时任务，计划执行也可�
 - 集成分支：`feature/creator-on-v2.10.2`（名称不变，内容持续升级）。
 - 定制仓库：`Nankeonlydream/sub2api`，上游：`ranxi2001/sub2api`。
 - 当前左侧应用及数据库节点：`iZrj98y2r2rfswybuc7r9bZ` / `172.18.29.103`（公网 `43.110.24.140`），网站 `https://catbee.online`。应用使用 `/root/catbee-app`；数据库使用原 `/root/sub2api-deploy`，共享外部 Docker 网络 `sub2api-deploy_sub2api-network`。
-- 右侧过渡节点：`iZrj97sgqumwizgptmhvzaZ` / `172.18.29.102`（公网 `47.77.224.193`），保留旧地址 HTTPS 转发和迁移前图片任务兼容；不是当前应用升级目标。退场状态以两侧 `/root/catbee-app-move-20261109/RETIRED_OK.json` 为准。
+- 右侧已退场节点：`iZrj97sgqumwizgptmhvzaZ` / `172.18.29.102`（公网 `47.77.224.193`），旧应用兼容已退场，2026-11-10 22:36:58 已停止 Nginx 转发并取消自启；云实例和原文件仍保留。不是当前应用升级目标。旧任务退场记录为两侧 `/root/catbee-app-move-20261109/RETIRED_OK.json`；转发停止记录为右侧同目录 `forwarding-stop-20261110.json`。
 - 旧右侧（历史登记）：`iZrj92zzv39jbi7n9fz4fuZ` / `172.18.28.229`；不再作为 `yapi.asia` 的部署目标。
 - 旧左侧（历史登记）：`iZrj9eby63lh2zp7dbipn8Z` / `172.18.29.45`；不再作为 `catbee.online` 的部署目标。
 - 只更新用户指定的左侧、右侧或两侧；不备份数据库；不进行付费生成测试。
@@ -49,7 +51,7 @@ GitHub 对无活动的公开仓库可能暂停定时任务，计划执行也可�
 1. 在本仓库运行 `python3 deploy/creator/upstream.py check`，读取发布说明。
 2. 检查远程候选分支和 Creator image 工作流。候选已存在时，将它检出到独立 worktree，检查与当前集成分支的关系。
    没有候选时，运行 `python3 deploy/creator/upstream.py prepare vX.Y.Z`。
-   工具创建相邻独立 worktree、合并上游、将版本设为 `X.Y.Z-creator.1`，报告位于相邻 `creator-upgrade-vX.Y.Z.json`。
+   工具创建相邻独立 worktree、合并上游、将版本设为 `X.Y.Z-creator.M.N`（沿用当前 Creator 版本号，例如 `2.22.0-creator.3.0`；Creator 自身改动时再递增 M.N），报告位于相邻 `creator-upgrade-vX.Y.Z.json`。
 3. 检查冲突、自动合并的定制文件、发布说明、所有新增/修改迁移，以及 Worker 变化；检查服务器现有 Worker 状态。
    合并失败绝不可用上游镜像覆盖。确认数据迁移和原有节点兼容；镜像回退不撤销数据库迁移。
 4. 手工准备的候选需要解决冲突、运行必要测试并提交。在候选 worktree 执行
@@ -57,7 +59,7 @@ GitHub 对无活动的公开仓库可能暂停定时任务，计划执行也可�
    定时任务准备且 CI 已成功的候选也须先审查，再用上述命令纳入集成分支。
    如果集成分支期间前进，先把最新集成分支合入候选并重新验证。
 5. 等待本次提交的 Creator image 成功，运行
-   `python3 deploy/creator/ready.py X.Y.Z-creator.N`。
+   `python3 deploy/creator/ready.py X.Y.Z-creator.M.N`。
    它读取镜像真实 revision，确认该提交的构建成功，并输出固定 digest 的服务器命令。
    不使用另一次构建的旧结果，不仅凭标签或提交消息判断成功。
 6. 服务器运行输出的命令：

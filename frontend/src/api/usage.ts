@@ -376,6 +376,18 @@ export async function getMyErrorDetail(id: number): Promise<UserErrorRequestDeta
   return data
 }
 
+/**
+ * Actual charges for Creator Studio works, keyed by the request IDs sent:
+ * image billing IDs ("client:…") or video task IDs. IDs without a usage
+ * record are left out.
+ */
+export async function getCreatorCosts(requestIds: string[]): Promise<Record<string, number>> {
+  const { data } = await apiClient.post<{ costs: Record<string, number> }>('/usage/creator-costs', {
+    request_ids: requestIds
+  })
+  return data.costs || {}
+}
+
 export const usageAPI = {
   list,
   query,
@@ -390,6 +402,7 @@ export const usageAPI = {
   getMyApiKeyDailyUsage,
   getDashboardSnapshotV2,
   getDashboardApiKeysUsage,
+  getCreatorCosts,
   // Error requests
   listMyErrorRequests,
   getMyErrorDetail

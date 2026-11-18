@@ -183,6 +183,16 @@ describe('CreatorImage', () => {
     wrapper.unmount()
   })
 
+  it('keeps loading while a pending local copy is on its way, and shows the error once it is not', async () => {
+    const wrapper = mount(CreatorImage, { props: { src: 'https://cdn.example/no-cors.png', alt: '作品', pending: true } })
+    await wrapper.get('img').trigger('error')
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false)
+    expect(wrapper.find('.creator-image-skeleton').exists()).toBe(true)
+    await wrapper.setProps({ pending: false })
+    expect(wrapper.find('[role="alert"]').exists()).toBe(true)
+    wrapper.unmount()
+  })
+
   it('invalidates a failed cached image and shows loading on explicit retry', async () => {
     const props = { src: '/cached-error.png', alt: '作品' }
     const first = mount(CreatorImage, { props })

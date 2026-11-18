@@ -82,6 +82,8 @@ var seedanceVideoTiers = map[string]seedanceVideoTier{
 	"ttsedanco2.5-480":    zhTier("480p", 5, 30, false),
 	"ttseadanco2.5-720":   zhTier("720p", 5, 30, false),
 	"sedanco2.0-300秒必出":   zhOnly("480p", true, 15),
+	// XinAI Muse (Grok group, own task API; see muse_video.go), 2026-11-13.
+	"muse-video": zhTier("720p", 1, 10, false),
 }
 
 func zhOnly(resolution string, perRequest bool, allowed ...int) seedanceVideoTier {
@@ -274,7 +276,7 @@ func isZhonghengAccount(account *Account) bool {
 		if tier, ok := lookupSeedanceVideoTier(upstream); ok && tier.Zhongheng {
 			return true
 		}
-		if isZhonghengMiniMaxH3Model(upstream) {
+		if IsMiniMaxH3Model(upstream) {
 			return true
 		}
 	}
@@ -303,6 +305,9 @@ var seedanceVideoRelay = openAIVideosRelay{
 }
 
 func (s *OpenAIGatewayService) ForwardSeedanceVideo(ctx context.Context, c *gin.Context, account *Account, endpoint GrokMediaEndpoint, taskID string, body []byte) (*OpenAIForwardResult, error) {
+	if isMuseVideoAccount(account) {
+		return s.forwardOpenAIVideosRelay(ctx, c, museVideoRelay, account, endpoint, taskID, body)
+	}
 	relay := seedanceVideoRelay
 	// Status and content lookups carry only the task ID; they reach the account
 	// that created the task, so the account decides the relay style.

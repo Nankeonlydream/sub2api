@@ -764,6 +764,65 @@ func (h *UsageHandler) DashboardAPIKeysUsage(c *gin.Context) {
 	response.Success(c, gin.H{"stats": stats})
 }
 
+// CreatorCostsRequest lists Creator Studio request IDs: image client request
+// IDs ("client:…") and video task IDs as the page received them.
+type CreatorCostsRequest struct {
+	RequestIDs []string `json:"request_ids" binding:"required"`
+}
+
+// creatorVideoBillingPrefixes are the forms a video task ID takes in usage_logs.
+var creatorVideoBillingPrefixes = []string{"grok-video:", "grok-video:seedance-video:", "grok-video:minimax-h3:"}
+
+// CreatorCosts returns what the current user was actually charged per request ID.
+// POST /api/v1/usage/creator-costs
+func (h *UsageHandler) CreatorCosts(c *gin.Context) {
+	subject, ok := middleware2.GetAuthSubjectFromContext(c)
+	if !ok {
+		response.Unauthorized(c, "User not authenticated")
+		return
+	}
+
+	var req CreatorCostsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		response.BadRequest(c, "Invalid request: "+err.Error())
+		return
+	}
+	if len(req.RequestIDs) > 100 {
+		response.BadRequest(c, "Too many request IDs (maximum 100 allowed)")
+		return
+	}
+
+	// Each billing ID maps back to the ID the page sent.
+	sources := make(map[string]string, len(req.RequestIDs)*(len(creatorVideoBillingPrefixes)+1))
+	for _, raw := range req.RequestIDs {
+		id := strings.TrimSpace(raw)
+		if id == "" || len(id) > 200 {
+			continue
+		}
+		sources[id] = id
+		if !strings.HasPrefix(id, "client:") {
+			for _, prefix := range creatorVideoBillingPrefixes {
+				sources[prefix+id] = id
+			}
+		}
+	}
+	billingIDs := make([]string, 0, len(sources))
+	for billingID := range sources {
+		billingIDs = append(billingIDs, billingID)
+	}
+
+	costs, err := h.usageService.ActualCostsByRequestIDs(c.Request.Context(), subject.UserID, billingIDs)
+	if err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	result := make(map[string]float64, len(costs))
+	for billingID, cost := range costs {
+		result[sources[billingID]] += cost
+	}
+	response.Success(c, gin.H{"costs": result})
+}
+
 // GetMyAPIKeyDailyUsage handles getting daily usage details for the current user's API key.
 // GET /api/v1/user/api-keys/:id/usage/daily?days=30
 func (h *UsageHandler) GetMyAPIKeyDailyUsage(c *gin.Context) {

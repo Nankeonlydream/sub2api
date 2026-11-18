@@ -104,8 +104,47 @@ async function compose(blobs: Blob[]): Promise<Blob> {
   }
 }
 
+function enqueue<T>(job: () => Promise<T>): Promise<T> {
+  const result = compositionQueue.then(job)
+  compositionQueue = result.then(() => undefined, () => undefined)
+  return result
+}
+
 export function composeVideoSegments(blobs: Blob[]): Promise<Blob> {
-  const composition = compositionQueue.then(() => compose(blobs))
-  compositionQueue = composition.then(() => undefined, () => undefined)
-  return composition
+  return enqueue(() => compose(blobs))
+}
+
+const SEEKABLE_TRANSCODE_TIMEOUT_MS = 5 * 60_000
+
+async function reencodeForSeeking(blob: Blob): Promise<Blob> {
+  const ffmpeg = await loadFFmpeg()
+  const jobId = crypto.randomUUID().replace(/-/g, '')
+  const inputName = `${jobId}-source.mp4`
+  const outputName = `${jobId}-seekable.mp4`
+  try {
+    await ffmpeg.writeFile(inputName, await fetchFile(blob))
+    const exitCode = await ffmpeg.exec([
+      '-i', inputName,
+      // The cover image some providers attach is a second video stream; keep only the real video and audio.
+      '-map', '0:v:0', '-map', '0:a?',
+      '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '20', '-pix_fmt', 'yuv420p',
+      '-force_key_frames', 'expr:gte(t,n_forced*0.5)',
+      '-c:a', 'copy',
+      '-movflags', '+faststart',
+      outputName,
+    ], SEEKABLE_TRANSCODE_TIMEOUT_MS)
+    if (exitCode !== 0) return blob
+    const output = await ffmpeg.readFile(outputName)
+    if (typeof output === 'string' || output.byteLength === 0) return blob
+    const bytes = new Uint8Array(output.byteLength)
+    bytes.set(output)
+    return new Blob([bytes], { type: 'video/mp4' })
+  } finally {
+    await Promise.all([removeFile(ffmpeg, inputName), removeFile(ffmpeg, outputName)])
+  }
+}
+
+/** Re-encodes with a keyframe every 0.5 s; any failure returns the original video. */
+export function reencodeVideoForSeeking(blob: Blob): Promise<Blob> {
+  return enqueue(() => reencodeForSeeking(blob)).catch(() => blob)
 }

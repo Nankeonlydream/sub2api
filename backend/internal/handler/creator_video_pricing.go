@@ -20,6 +20,16 @@ func (h *OpenAIGatewayHandler) CreatorSeedanceCatalog(c *gin.Context) {
 	c.JSON(http.StatusOK, service.CurrentSeedanceCatalog())
 }
 
+// CreatorMiniMaxCatalog is the MiniMax-H3 counterpart of CreatorSeedanceCatalog.
+func (h *OpenAIGatewayHandler) CreatorMiniMaxCatalog(c *gin.Context) {
+	c.Header("Cache-Control", "no-store")
+	if _, ok := middleware2.GetAPIKeyFromContext(c); !ok {
+		h.errorResponse(c, http.StatusUnauthorized, "authentication_error", "Invalid API key")
+		return
+	}
+	c.JSON(http.StatusOK, service.CurrentMiniMaxCatalog())
+}
+
 // CreatorVideoPricing is an authenticated, read-only price preview.
 func (h *OpenAIGatewayHandler) CreatorVideoPricing(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")

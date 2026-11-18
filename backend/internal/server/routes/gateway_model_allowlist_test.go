@@ -94,7 +94,7 @@ func TestGatewayRoutesGroupModelAllowlistMountedOnEveryGatewayRoute(t *testing.T
 	for _, chain := range chains {
 		re := regexp.MustCompile(
 			regexp.QuoteMeta(chain.group+".Use("+chain.auth) +
-				`[\s\S]{0,400}?` + regexp.QuoteMeta(chain.marker) +
+				`[\s\S]{0,600}?` + regexp.QuoteMeta(chain.marker) +
 				`[\s\S]{0,400}?` + regexp.QuoteMeta(chain.composite))
 		require.Regexp(t, re, source,
 			"%s chain must mount groupModelAllowlist after auth and before %s", chain.group, chain.composite)

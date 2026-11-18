@@ -19,11 +19,11 @@ def get(url, headers=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('version', help='Creator version, for example 2.10.4-creator.1')
+    parser.add_argument('version', help='Creator version, for example 2.22.0-creator.3.0')
     args = parser.parse_args()
     import re
-    if not re.fullmatch(r'\d+\.\d+\.\d+-creator\.\d+', args.version):
-        raise ValueError('Expected X.Y.Z-creator.N')
+    if not re.fullmatch(r'\d+\.\d+\.\d+-creator\.\d+(?:\.\d+)?', args.version):
+        raise ValueError('Expected X.Y.Z-creator.M.N')
     token, _ = get('https://ghcr.io/token?scope=repository:nankeonlydream/sub2api:pull')
     headers = {'Authorization': 'Bearer ' + token['token'],
                'Accept': 'application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json'}

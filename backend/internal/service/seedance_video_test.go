@@ -183,7 +183,7 @@ func TestSeedanceVideoTariff(t *testing.T) {
 	m := "ttsedanco2.0-480"
 	_, err := QuoteSeedanceVideo(map[string]map[string]float64{SeedanceVideoPriceFamily: {"ttsedanco2.0-720": 0.5}}, m, 5)
 	require.ErrorContains(t, err, m)
-	for _, prices := range []map[string]map[string]float64{nil, {MiniMaxH3PriceFamily: {MiniMaxH3PerSecond: 0.1}}, {SeedanceVideoPriceFamily: {m: -1}}, {SeedanceVideoPriceFamily: {m: math.NaN()}}} {
+	for _, prices := range []map[string]map[string]float64{nil, {MiniMaxH3PriceFamily: {"xminimex-h3": 0.1}}, {SeedanceVideoPriceFamily: {m: -1}}, {SeedanceVideoPriceFamily: {m: math.NaN()}}} {
 		_, err := QuoteSeedanceVideo(prices, m, 5)
 		require.Error(t, err)
 	}

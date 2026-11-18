@@ -874,7 +874,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 					Duration:                 time.Since(startTime),
 					FirstTokenMs:             ttft,
 					ImageEndpoint:            true,
-					ImageCount:               streamCount,
+					ImageCount:               capImageCountToRequested(streamCount, parsed.N),
 					ImageSize:                parsed.SizeTier,
 					ImageInputSize:           parsed.Size,
 					ImageRequestedResolution: requestedImageResolution,
@@ -884,7 +884,7 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 			return nil, err
 		}
 		usage = streamUsage
-		imageCount = resolveBillableImageCount(streamCount, 0, imageCountBillingEnabled(getAPIKeyFromContext(c)))
+		imageCount = capImageCountToRequested(resolveBillableImageCount(streamCount, 0, imageCountBillingEnabled(getAPIKeyFromContext(c))), parsed.N)
 		imageOutputSizes := streamSizes
 		firstTokenMs = ttft
 		return &OpenAIForwardResult{

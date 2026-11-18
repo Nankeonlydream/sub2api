@@ -49,7 +49,14 @@ type SeedanceCatalogEntry struct {
 	// MaxReferenceImages is how many reference images Creator Studio lets a
 	// user attach. Zero means the model only does text-to-video.
 	MaxReferenceImages int `json:"max_reference_images"`
+	// AspectRatios lists the ratios Creator Studio offers for this model, in
+	// display order. Empty means the default 16:9, 9:16 and 1:1. Some relay
+	// lines ignore the ratio and always render one shape.
+	AspectRatios []string `json:"aspect_ratios,omitempty"`
 }
+
+// seedanceCatalogAspectRatios are the ratios an administrator may list.
+var seedanceCatalogAspectRatios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "21:9", "3:2", "2:3"}
 
 // SeedanceCatalogState is what the admin panel and Creator Studio read.
 // Customized is false while the built-in catalog applies; clients then use
@@ -220,6 +227,18 @@ func NormalizeSeedanceCatalog(in []SeedanceCatalogEntry) ([]SeedanceCatalogEntry
 		if entry.MaxReferenceImages < 0 || entry.MaxReferenceImages > seedanceCatalogMaxReferenceImages {
 			return nil, seedanceCatalogError(i, "reference images must be between 0 and %d", seedanceCatalogMaxReferenceImages)
 		}
+
+		var ratios []string
+		for _, ratio := range entry.AspectRatios {
+			ratio = strings.TrimSpace(ratio)
+			if !slices.Contains(seedanceCatalogAspectRatios, ratio) {
+				return nil, seedanceCatalogError(i, "aspect ratio %q must be one of %s", ratio, strings.Join(seedanceCatalogAspectRatios, ", "))
+			}
+			if !slices.Contains(ratios, ratio) {
+				ratios = append(ratios, ratio)
+			}
+		}
+		entry.AspectRatios = ratios
 		out = append(out, entry)
 	}
 	return out, nil

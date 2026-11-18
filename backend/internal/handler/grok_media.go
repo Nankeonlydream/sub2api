@@ -30,26 +30,34 @@ func (h *OpenAIGatewayHandler) GrokImages(c *gin.Context) {
 
 // GrokVideoGeneration handles xAI video generation through Grok groups.
 func (h *OpenAIGatewayHandler) GrokVideoGeneration(c *gin.Context) {
-	h.handleGrokMedia(c, service.GrokMediaEndpointVideosGenerations, "")
+	h.handleGrokVideoCreate(c, service.GrokMediaEndpointVideosGenerations)
 }
 
 // GrokVideoEdit handles asynchronous xAI video edits through Grok groups.
 func (h *OpenAIGatewayHandler) GrokVideoEdit(c *gin.Context) {
-	h.handleGrokMedia(c, service.GrokMediaEndpointVideosEdits, "")
+	h.handleGrokVideoCreate(c, service.GrokMediaEndpointVideosEdits)
 }
 
 // GrokVideoExtension handles asynchronous xAI video extensions through Grok groups.
 func (h *OpenAIGatewayHandler) GrokVideoExtension(c *gin.Context) {
-	h.handleGrokMedia(c, service.GrokMediaEndpointVideosExtensions, "")
+	h.handleGrokVideoCreate(c, service.GrokMediaEndpointVideosExtensions)
 }
 
 // GrokVideoStatus handles xAI video status retrieval through Grok groups.
 func (h *OpenAIGatewayHandler) GrokVideoStatus(c *gin.Context) {
+	if requestID := c.Param("request_id"); service.IsGrokVideoAsyncCreateID(requestID) {
+		h.handleGrokVideoAsyncLookup(c, service.GrokMediaEndpointVideoStatus, strings.TrimSpace(requestID))
+		return
+	}
 	h.handleGrokMedia(c, service.GrokMediaEndpointVideoStatus, c.Param("request_id"))
 }
 
 // GrokVideoContent proxies downloadable video content through the task's upstream account.
 func (h *OpenAIGatewayHandler) GrokVideoContent(c *gin.Context) {
+	if requestID := c.Param("request_id"); service.IsGrokVideoAsyncCreateID(requestID) {
+		h.handleGrokVideoAsyncLookup(c, service.GrokMediaEndpointVideoContent, strings.TrimSpace(requestID))
+		return
+	}
 	h.handleGrokMedia(c, service.GrokMediaEndpointVideoContent, c.Param("request_id"))
 }
 

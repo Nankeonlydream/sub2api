@@ -31,7 +31,6 @@ const (
 	MiniMaxH3EndpointContent          GrokMediaEndpoint        = "minimax_h3_content"
 	OpenAIEndpointCapabilityMiniMaxH3 OpenAIEndpointCapability = "minimax_h3"
 	MiniMaxH3PriceFamily                                       = "minimax-h3"
-	MiniMaxH3PerSecond                                         = "per_second"
 )
 
 func (e GrokMediaEndpoint) IsMiniMaxH3() bool {
@@ -40,37 +39,43 @@ func (e GrokMediaEndpoint) IsMiniMaxH3() bool {
 
 func MiniMaxH3TaskKey(id string) string { return "minimax-h3:" + strings.TrimSpace(id) }
 
-// miniMaxH3Tier is one DeepKey (minimax-h3 group) H3 model ID. The ID fixes
-// the resolution and either a fixed length or a 10-15 second range.
+// miniMaxH3Tier is one relay (Zhongheng) H3 model ID. The ID fixes the
+// resolution and the sold lengths; each ID has its own group price.
 type miniMaxH3Tier struct {
 	Resolution             string
 	MinSeconds, MaxSeconds int
 	AllowedSeconds         []int
-	// Zhongheng tiers speak Zhongheng's request shape and are priced per model
-	// ID in the group tariff; PerRequest ones charge once per video.
-	Zhongheng, PerRequest bool
+	// PerRequest tiers charge the group price once per video, others per second.
+	PerRequest bool
 	// The upstream fails prompt-only jobs; reject them before quoting.
 	RequiresReference bool
 }
 
-// DeepKey guide-minimax-h3-video (updated 2026-09-17), /api/pricing observed
-// 2026-10-29.
+// Built-in catalog: Zhongheng /v1/models?include_capabilities=1 observed
+// 2026-10-30; its 2k is the 1440p class. An administrator's saved catalog
+// (minimax_catalog.go) replaces it.
 var miniMaxH3Tiers = map[string]miniMaxH3Tier{
-	"minimax-h3-768p-933-10s":     {Resolution: "768p", MinSeconds: 10, MaxSeconds: 10},
-	"minimax-h3-768p-933-15s":     {Resolution: "768p", MinSeconds: 15, MaxSeconds: 15},
-	"minimax-h3-768p-933-10s-15s": {Resolution: "768p", MinSeconds: 10, MaxSeconds: 15},
-	"minimax-h3-933-1440p-10s":    {Resolution: "1440p", MinSeconds: 10, MaxSeconds: 10},
-	"minimax-h3-933-1440p-15s":    {Resolution: "1440p", MinSeconds: 15, MaxSeconds: 15},
-	"minimax-h3-933-1440p-10-15s": {Resolution: "1440p", MinSeconds: 10, MaxSeconds: 15},
-	// Zhongheng /v1/models?include_capabilities=1 observed 2026-10-30; its 2k
-	// is the 1440p class.
-	"xminimex-h3":   {Resolution: "1440p", MinSeconds: 5, MaxSeconds: 15, Zhongheng: true},
-	"minimaxh3-768": {Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, AllowedSeconds: []int{5, 6, 7, 9, 10, 11, 12, 13, 14, 15}, Zhongheng: true, PerRequest: true, RequiresReference: true},
+	"xminimex-h3":   {Resolution: "1440p", MinSeconds: 5, MaxSeconds: 15},
+	"minimaxh3-768": {Resolution: "768p", MinSeconds: 5, MaxSeconds: 15, AllowedSeconds: []int{5, 6, 7, 9, 10, 11, 12, 13, 14, 15}, PerRequest: true, RequiresReference: true},
 }
 
 func lookupMiniMaxH3Tier(model string) (miniMaxH3Tier, bool) {
-	tier, ok := miniMaxH3Tiers[strings.ToLower(strings.TrimSpace(model))]
+	// Billing and request checks pass through here, so a catalog saved on another
+	// node reaches this one even if nobody opens Creator Studio.
+	refreshMiniMaxCatalogIfStale()
+	key := strings.ToLower(strings.TrimSpace(model))
+	if catalog := activeMiniMaxCatalog.Load(); catalog != nil {
+		tier, ok := catalog.tiers[key]
+		return tier, ok
+	}
+	tier, ok := miniMaxH3Tiers[key]
 	return tier, ok
+}
+
+// IsMiniMaxH3Model reports whether model is a known MiniMax-H3 catalog ID.
+func IsMiniMaxH3Model(model string) bool {
+	_, ok := lookupMiniMaxH3Tier(model)
+	return ok
 }
 
 func (t miniMaxH3Tier) allows(seconds int) bool {
@@ -92,7 +97,7 @@ func miniMaxH3IntegerField(value gjson.Result) (int, bool) {
 	return 0, false
 }
 
-// DeepKey tier models bill the seconds sent upstream: the fixed tier length, or
+// Relay tier models bill the seconds sent upstream: the fixed tier length, or
 // the variable tier's seconds/duration (they must agree), defaulting to its
 // minimum. Shared by the MiniMax-H3 and Seedance relays.
 func namedVideoTierSeconds(body []byte, model string, minSeconds, maxSeconds int) (int, error) {
@@ -177,32 +182,12 @@ func miniMaxH3Ratio(body []byte) string {
 	return strings.TrimSpace(gjson.GetBytes(body, "aspect_ratio").String())
 }
 
-// Reuse the group's versioned media JSONB. A tariff is one per_second price,
-// one fixed request_<seconds>s price, or per-resolution USD/s prices (768p,
-// 1440p). No currency conversion or resolution fallback.
-func miniMaxH3RequestSeconds(key string) (int, bool) {
-	if !strings.HasPrefix(key, "request_") || !strings.HasSuffix(key, "s") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(key, "request_"), "s"))
-	return n, err == nil && n >= 1 && n <= 15 && key == fmt.Sprintf("request_%ds", n)
-}
+// The group's versioned media JSONB holds one USD price per catalog model ID
+// (per second or per request, as the catalog says). Unknown IDs are dropped
+// when prices are normalized, since their billing unit is unknown.
+func validMiniMaxH3TariffKey(key string) bool { return IsMiniMaxH3Model(key) }
 
-func isMiniMaxH3ResolutionKey(key string) bool { return key == "768p" || key == "1440p" }
-
-func isZhonghengMiniMaxH3Model(key string) bool {
-	tier, ok := lookupMiniMaxH3Tier(key)
-	return ok && tier.Zhongheng
-}
-
-// Zhongheng model IDs sit beside the shared tariff with their own price.
-func validMiniMaxH3TariffKey(key string) bool {
-	_, ok := miniMaxH3RequestSeconds(key)
-	return ok || key == MiniMaxH3PerSecond || isMiniMaxH3ResolutionKey(key) || isZhonghengMiniMaxH3Model(key)
-}
-
-// QuoteMiniMaxH3Model prices one video of model: Zhongheng tiers from their
-// own model price, the others from the shared tariff.
+// QuoteMiniMaxH3Model prices one video of model from its own group price.
 func QuoteMiniMaxH3Model(prices map[string]map[string]float64, model string, seconds int) (float64, error) {
 	tier, ok := lookupMiniMaxH3Tier(model)
 	if !ok {
@@ -210,15 +195,6 @@ func QuoteMiniMaxH3Model(prices map[string]map[string]float64, model string, sec
 	}
 	if !tier.allows(seconds) {
 		return 0, fmt.Errorf("%s does not support %d seconds", model, seconds)
-	}
-	shared := map[string]float64{}
-	for key, price := range prices[MiniMaxH3PriceFamily] {
-		if !isZhonghengMiniMaxH3Model(key) {
-			shared[key] = price
-		}
-	}
-	if !tier.Zhongheng {
-		return QuoteMiniMaxH3Video(map[string]map[string]float64{MiniMaxH3PriceFamily: shared}, tier.Resolution, seconds)
 	}
 	price, ok := prices[MiniMaxH3PriceFamily][strings.ToLower(strings.TrimSpace(model))]
 	if !ok {
@@ -234,48 +210,9 @@ func QuoteMiniMaxH3Model(prices map[string]map[string]float64, model string, sec
 	return total, nil
 }
 
-func QuoteMiniMaxH3Video(prices map[string]map[string]float64, resolution string, seconds int) (float64, error) {
-	if seconds < 1 || seconds > 15 {
-		return 0, fmt.Errorf("seconds must be between 1 and 15")
-	}
-	tariff := prices[MiniMaxH3PriceFamily]
-	if len(tariff) == 0 {
-		return 0, fmt.Errorf("MiniMax-H3 video is disabled or its group price is not configured")
-	}
-	for key, price := range tariff {
-		if price < 0 || math.IsNaN(price) || math.IsInf(price, 0) || (len(tariff) > 1 && !isMiniMaxH3ResolutionKey(key)) {
-			return 0, fmt.Errorf("invalid MiniMax-H3 group video price")
-		}
-	}
-	perSecond := func(price float64) (float64, error) {
-		if total := price * float64(seconds); !math.IsInf(total, 0) {
-			return total, nil
-		}
-		return 0, fmt.Errorf("invalid MiniMax-H3 group video price")
-	}
-	if price, ok := tariff[resolution]; ok && isMiniMaxH3ResolutionKey(resolution) {
-		return perSecond(price)
-	}
-	for key, price := range tariff {
-		if key == MiniMaxH3PerSecond {
-			return perSecond(price)
-		}
-		if duration, ok := miniMaxH3RequestSeconds(key); ok {
-			if seconds != duration {
-				return 0, fmt.Errorf("this group's per-request video price requires seconds=\"%d\"", duration)
-			}
-			return price, nil
-		}
-		if isMiniMaxH3ResolutionKey(key) {
-			return 0, fmt.Errorf("MiniMax-H3 %s video price is not configured for this group", resolution)
-		}
-	}
-	return 0, fmt.Errorf("invalid MiniMax-H3 group video price")
-}
-
 // openAIVideosRelay describes a video family sold through a relay's JSON
-// OpenAI Videos API (POST /v1/videos, GET /v1/videos/{id}[/content]). DeepKey
-// and Zhongheng serve MiniMax-H3 and Zhongheng serves Seedance this
+// OpenAI Videos API (POST /v1/videos, GET /v1/videos/{id}[/content]). Zhongheng
+// serves MiniMax-H3 and Seedance this
 // way; they differ only in model tiers, account eligibility and the task-key
 // prefix that isolates task ownership.
 type openAIVideosRelay struct {
@@ -292,6 +229,28 @@ type openAIVideosRelay struct {
 	// gateway reads the video URL from the task status and downloads it
 	// without the key. DeepKey needs neither.
 	UploadDataImages, ContentFromStatus bool
+	// Path under /v1 (default /videos). Completed reports a billable finished
+	// task (default miniMaxH3StatusCompleted); State classifies status bodies
+	// for the settlement worker; RewriteClient edits JSON sent to clients.
+	Path          string
+	Completed     func([]byte) bool
+	State         func([]byte) string
+	RewriteClient func([]byte) []byte
+}
+
+func (r openAIVideosRelay) completed(body []byte) bool {
+	if r.Completed != nil {
+		return r.Completed(body)
+	}
+	return miniMaxH3StatusCompleted(body)
+}
+
+func (r openAIVideosRelay) clientBody(body []byte) []byte {
+	body = maskRelayUpstreamQuotaError(body)
+	if r.RewriteClient != nil {
+		return r.RewriteClient(body)
+	}
+	return body
 }
 
 var miniMaxH3Relay = openAIVideosRelay{
@@ -308,6 +267,8 @@ var miniMaxH3Relay = openAIVideosRelay{
 		result.VideoResolution, result.VideoDurationSeconds = info.Resolution, info.DurationSeconds
 		return prepareMiniMaxH3CreateBody(body, info, result.UpstreamModel)
 	},
+	// MiniMax-H3 is sold through Zhongheng only.
+	UploadDataImages: true, ContentFromStatus: true,
 }
 
 func (r openAIVideosRelay) buildURL(base string, endpoint GrokMediaEndpoint, taskID string) (string, error) {
@@ -315,7 +276,11 @@ func (r openAIVideosRelay) buildURL(base string, endpoint GrokMediaEndpoint, tas
 	if !strings.HasSuffix(base, "/v1") {
 		base += "/v1"
 	}
-	base += "/videos"
+	if r.Path != "" {
+		base += r.Path
+	} else {
+		base += "/videos"
+	}
 	if endpoint != r.Create {
 		if err := validateUpstreamPathSegment(r.Name+" task ID", taskID); err != nil || strings.TrimSpace(taskID) == "" {
 			return "", fmt.Errorf("invalid %s task ID", r.Name)
@@ -338,45 +303,23 @@ func validMiniMaxH3OutputURL(raw string) bool {
 }
 
 // The requested and upstream model must be the same ID: the ID decides the
-// billed resolution and seconds. DeepKey takes integer seconds on the 10-15s
-// tiers only and derives resolution from the model, so size fields are dropped.
+// billed resolution and seconds. Zhongheng takes duration/resolution/ratio and
+// calls 1440p "2k".
 func prepareMiniMaxH3CreateBody(body []byte, info GrokMediaRequestInfo, upstreamModel string) ([]byte, error) {
-	tier, ok := lookupMiniMaxH3Tier(upstreamModel)
-	if !ok {
+	if !IsMiniMaxH3Model(upstreamModel) {
 		return nil, fmt.Errorf("this video relay only supports MiniMax-H3 models")
 	}
 	if !strings.EqualFold(strings.TrimSpace(upstreamModel), info.Model) {
 		return nil, fmt.Errorf("MiniMax-H3 model mapping must not change the model")
 	}
-	if tier.Zhongheng {
-		body, err := sjson.SetBytes(body, "model", strings.TrimSpace(upstreamModel))
-		if err != nil {
-			return nil, err
-		}
-		if info.Resolution == "1440p" {
-			info.Resolution = "2k"
-		}
-		return prepareZhonghengVideoBody(body, info)
+	body, err := sjson.SetBytes(body, "model", strings.TrimSpace(upstreamModel))
+	if err != nil {
+		return nil, err
 	}
-	var err error
-	for _, path := range []string{"seconds", "duration", "ratio", "aspect_ratio", "resolution", "size", "n"} {
-		if body, err = sjson.DeleteBytes(body, path); err != nil {
-			return nil, err
-		}
+	if info.Resolution == "1440p" {
+		info.Resolution = "2k"
 	}
-	fields := map[string]any{"model": strings.TrimSpace(upstreamModel)}
-	if tier.MinSeconds != tier.MaxSeconds {
-		fields["seconds"] = info.DurationSeconds
-	}
-	if info.AspectRatio != "" {
-		fields["aspect_ratio"] = info.AspectRatio
-	}
-	for path, value := range fields {
-		if body, err = sjson.SetBytes(body, path, value); err != nil {
-			return nil, err
-		}
-	}
-	return body, nil
+	return prepareZhonghengVideoBody(body, info)
 }
 
 func isJSONContentType(value string) bool {
@@ -480,11 +423,7 @@ func isRelayRelativeContentURL(raw string) bool {
 }
 
 func (s *OpenAIGatewayService) ForwardMiniMaxH3(ctx context.Context, c *gin.Context, account *Account, endpoint GrokMediaEndpoint, taskID string, body []byte) (*OpenAIForwardResult, error) {
-	relay := miniMaxH3Relay
-	if isZhonghengAccount(account) {
-		relay.UploadDataImages, relay.ContentFromStatus = true, true
-	}
-	return s.forwardOpenAIVideosRelay(ctx, c, relay, account, endpoint, taskID, body)
+	return s.forwardOpenAIVideosRelay(ctx, c, miniMaxH3Relay, account, endpoint, taskID, body)
 }
 
 func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *gin.Context, relay openAIVideosRelay, account *Account, endpoint GrokMediaEndpoint, taskID string, body []byte) (*OpenAIForwardResult, error) {
@@ -575,6 +514,12 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 	if err != nil {
 		return nil, err
 	}
+	// Muse answers 503 settlement_pending for a finished task whose upstream
+	// charge is still being checked; clients keep polling it like processing.
+	if endpoint == relay.Status && relay.State != nil && resp.StatusCode == http.StatusServiceUnavailable &&
+		gjson.GetBytes(responseBody, "status").String() == "settlement_pending" {
+		resp.StatusCode = http.StatusOK
+	}
 	// An ambiguous POST must never become an automatic account-switch retry.
 	if resp.StatusCode >= 300 {
 		if resp.StatusCode < 400 {
@@ -609,12 +554,12 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 			}
 		}
 	case relay.Status:
-		if miniMaxH3StatusCompleted(responseBody) {
+		if relay.completed(responseBody) {
 			result.VideoCount = 1
 		}
 	case relay.Content:
 		// Only reached with ContentFromStatus: responseBody is the task status.
-		if !miniMaxH3StatusCompleted(responseBody) {
+		if !relay.completed(responseBody) {
 			return nil, fmt.Errorf("%s video is not ready", relay.Name)
 		}
 		if videoURL, ok := relayStatusVideoURL(responseBody, base); ok {
@@ -630,7 +575,7 @@ func (s *OpenAIGatewayService) forwardOpenAIVideosRelay(ctx context.Context, c *
 		return s.downloadRelayVideo(ctx, c, relay, account, contentURL, token, result)
 	}
 	c.Header("Cache-Control", "private, no-store")
-	writeGrokMediaResponse(c, resp, maskRelayUpstreamQuotaError(responseBody), s.responseHeaderFilter)
+	writeGrokMediaResponse(c, resp, relay.clientBody(responseBody), s.responseHeaderFilter)
 	return result, nil
 }
 
@@ -755,6 +700,11 @@ func (s *OpenAIGatewayService) uploadRelayDataImages(ctx context.Context, relay 
 	}
 	defer func() { _ = resp.Body.Close() }()
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		// A gateway relay (e.g. another sub2api in front of Zhongheng) has no
+		// /v1/media; it takes data: images inline and uploads them itself.
+		return body, nil
+	}
 	if err != nil || resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s reference image upload failed (status %d)", relay.Name, resp.StatusCode)
 	}

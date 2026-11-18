@@ -120,6 +120,8 @@ func (s *grokMediaSlotsCache) assertReleased(t *testing.T) {
 
 type grokMediaSlotBindings struct {
 	testutil.StubGatewayCache
+	// mu guards pending: background video creates write it concurrently.
+	mu      sync.Mutex
 	owner   int64
 	writes  int
 	key     string
@@ -130,6 +132,8 @@ type grokMediaSlotBindings struct {
 }
 
 func (s *grokMediaSlotBindings) SetGrokVideoPendingBilling(_ context.Context, key string, body []byte, _ time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.pending == nil {
 		s.pending = make(map[string][]byte)
 	}
@@ -140,6 +144,8 @@ func (s *grokMediaSlotBindings) GetGrokVideoPendingBilling(ctx context.Context, 
 	if s.honorCancel && ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.pending[key], nil
 }
 

@@ -10,7 +10,9 @@ func TestResolveBillableImageCount(t *testing.T) {
 		fallbackToOne bool
 		want          int
 	}{
-		{name: "实际返回多张", reported: 3, requested: 5, want: 3},
+		{name: "实际返回少于请求", reported: 3, requested: 5, want: 3},
+		{name: "上游多返回按请求 n 封顶", reported: 2, requested: 1, want: 1},
+		{name: "请求 n 未知不封顶", reported: 2, requested: 0, want: 2},
 		{name: "开关开启兜底一张", reported: 0, requested: 3, fallbackToOne: true, want: 1},
 		{name: "开关关闭保留请求 n", reported: 0, requested: 3, want: 3},
 		{name: "流式开关关闭保持 0", reported: 0, requested: 0, want: 0},
@@ -41,7 +43,22 @@ func TestCountOpenAIImageOutputs_OfficialMultiImageResponse(t *testing.T) {
 	if got := countOpenAIResponseImageOutputsFromJSONBytes(body); got != 3 {
 		t.Fatalf("countOpenAIResponseImageOutputsFromJSONBytes() = %d, want 3", got)
 	}
-	if got := resolveBillableImageCount(countOpenAIResponseImageOutputsFromJSONBytes(body), 1, false); got != 3 {
+	if got := resolveBillableImageCount(countOpenAIResponseImageOutputsFromJSONBytes(body), 3, false); got != 3 {
 		t.Fatalf("resolveBillableImageCount() = %d, want 3", got)
+	}
+	// 只请求 1 张时，上游多返回的图片不计费。
+	if got := resolveBillableImageCount(countOpenAIResponseImageOutputsFromJSONBytes(body), 1, false); got != 1 {
+		t.Fatalf("resolveBillableImageCount() with n=1 = %d, want 1", got)
+	}
+}
+
+func TestCapImageCountToRequested(t *testing.T) {
+	cases := []struct{ count, requested, want int }{
+		{2, 1, 1}, {1, 1, 1}, {0, 1, 0}, {3, 0, 3}, {2, 4, 2},
+	}
+	for _, c := range cases {
+		if got := capImageCountToRequested(c.count, c.requested); got != c.want {
+			t.Fatalf("capImageCountToRequested(%d, %d) = %d, want %d", c.count, c.requested, got, c.want)
+		}
 	}
 }

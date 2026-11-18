@@ -49,9 +49,6 @@
 
       <div class="toolbar-actions">
         <span class="ready-status"><i></i>{{ activeGenerations.size ? `${activeGenerations.size} 个生成中` : '已就绪' }}</span>
-        <button type="button" class="connection-action" title="刷新工作台状态" aria-label="刷新工作台状态" :disabled="bootstrapping" @click="refreshStudio">
-          <Icon name="broadcast" size="sm" :class="{ pulsing: bootstrapping }" />
-        </button>
         <button
           ref="historyToggleElement"
           type="button"
@@ -74,10 +71,12 @@
     </header>
 
     <p v-if="localSaveWarning" class="local-save-warning" role="alert">
-      {{ localSaveWarning }}
-      <button v-if="selectedWork?.type === 'image'" type="button" @click="retryLocalImageSave">重试保存原图</button>
+      <span class="local-save-warning-text">{{ localSaveWarning }}</span>
+      <button v-if="localSaveWarningWork && selectedWork?.id !== localSaveWarningWork.id" type="button" class="local-save-warning-open" @click="openLocalSaveWarningWork">查看该作品</button>
+      <button v-if="localSaveRetryTarget" type="button" class="local-save-warning-retry" :disabled="retryingLocalSave" @click="retryLocalImageSave">{{ retryingLocalSave ? '正在保存…' : '重试保存原图' }}</button>
+      <button type="button" class="local-save-warning-close" aria-label="关闭提示" title="关闭提示" @click="dismissLocalSaveWarning">×</button>
     </p>
-    <div class="studio-grid" :class="{ 'history-collapsed': historyCollapsed }">
+    <div class="studio-grid" :class="{ 'history-collapsed': historyCollapsed, 'is-generating': generationViewVisible, 'is-viewing-result': resultWorkspaceVisible }">
       <div
         v-if="compactHistory"
         class="history-drawer-backdrop"
@@ -139,10 +138,11 @@
           </button>
         </div>
 
-        <div v-if="visibleHistory.length && !historyListHidden" ref="historyListElement" class="history-list">
-          <div v-if="historyPaddingTop" :style="{ height: `${historyPaddingTop}px` }" aria-hidden="true"></div>
+        <!-- List and pager share one branch so the loading/empty states below chain off the list, not the pager. -->
+        <template v-if="visibleHistory.length && !historyListHidden">
+        <div ref="historyListElement" class="history-list">
           <article
-            v-for="work in renderedHistory"
+            v-for="work in pagedHistory"
             :key="work.id"
             class="history-item"
             :class="{ active: selectedWork?.id === work.id, generating: activeGenerations.has(work.id) }"
@@ -154,7 +154,8 @@
               @click="openHistoryWork(work)"
             ></button>
             <span class="history-preview">
-              <CreatorThumbnail v-if="work.type === 'image' && work.outputs[0]" :src="work.outputs[0]" :cache-key="`${work.id}:${work.updatedAt}`" />
+              <span v-if="work.imageOutputsPending" class="history-thumb-pending" role="img" aria-label="缩略图加载中"></span>
+              <CreatorThumbnail v-else-if="historyImageCover(work)" :src="historyImageCover(work)!.src" :cache-key="historyImageCover(work)!.cacheKey" />
               <CreatorVideoThumbnail
                 v-else-if="work.type === 'video' && work.status === 'completed'"
                 :src="work.outputs[0]"
@@ -167,7 +168,7 @@
               <span
                 v-if="activeGenerations.has(work.id)"
                 class="history-generating"
-                :class="{ 'has-preview': work.type === 'image' && Boolean(work.outputs[0]) }"
+                :class="{ 'has-preview': Boolean(historyImageCover(work)) }"
                 aria-hidden="true"
               >
                 <span class="history-generating-ring"><Icon :name="work.type === 'image' ? 'sparkles' : 'play'" size="xs" /></span>
@@ -178,22 +179,39 @@
             <span class="history-copy">
               <strong>{{ historyWorkTitle(work) }}</strong>
               <small v-if="activeGenerations.has(work.id)" class="history-progress">{{ activeGenerations.get(work.id)?.progress || '生成中' }}</small>
-              <small v-else>{{ work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model) }} · {{ work.aspectRatio || '自动' }} · {{ work.type === 'video' ? videoResolutionTierLabel(work) : workResolutionLabel(work) }} · {{ formatHistoryTime(work.createdAt) }}</small>
-            </span>
-            <span class="history-item-actions">
-              <button
-                type="button"
-                class="history-delete"
-                :title="activeGenerations.has(work.id) ? '生成完成后可删除' : '删除作品'"
-                aria-label="删除作品"
-                :disabled="activeGenerations.has(work.id)"
-                @click.stop="removeWork(work)"
-              >
-                <Icon name="trash" size="sm" />
-              </button>
+              <small v-else>{{ formatHistoryTime(work.createdAt) }} · {{ work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model) }} · {{ work.aspectRatio || '自动' }} · {{ work.type === 'video' ? videoResolutionTierLabel(work) : workResolutionLabel(work) }}</small>
             </span>
           </article>
-          <div v-if="historyPaddingBottom" :style="{ height: `${historyPaddingBottom}px` }" aria-hidden="true"></div>
+        </div>
+
+        <nav v-if="historyPageCount > 1" class="history-pager" aria-label="作品历史分页">
+          <div class="history-pager-track">
+            <button type="button" class="history-page-step" aria-label="上一页" :disabled="historyPage <= 1" @click="goHistoryPage(historyPage - 1)">
+              <Icon name="chevronLeft" size="xs" />
+            </button>
+            <template v-for="(page, pageIndex) in historyPageButtons" :key="pageIndex">
+              <span v-if="page === 0" class="history-page-gap" aria-hidden="true">…</span>
+              <button
+                v-else
+                type="button"
+                class="history-page-number"
+                :class="{ active: page === historyPage }"
+                :aria-current="page === historyPage ? 'page' : undefined"
+                :aria-label="`第 ${page} 页`"
+                @click="goHistoryPage(page)"
+              >{{ page }}</button>
+            </template>
+            <button type="button" class="history-page-step" aria-label="下一页" :disabled="historyPage >= historyPageCount" @click="goHistoryPage(historyPage + 1)">
+              <Icon name="chevronRight" size="xs" />
+            </button>
+          </div>
+        </nav>
+        </template>
+
+        <div v-else-if="!historyLoaded && !historyListHidden" class="history-empty history-loading" role="status">
+          <span><span class="button-spinner"></span></span>
+          <strong>正在读取作品历史</strong>
+          <p>作品保存在本机浏览器中</p>
         </div>
 
         <div v-else class="history-empty">
@@ -204,206 +222,135 @@
       </aside>
 
       <main ref="canvasPanelElement" class="canvas-panel">
-        <div v-if="selectedGeneration && selectedWork" class="generation-state" :class="{ 'is-video': generationMode === 'video' }">
-          <section class="generation-panel">
-            <div class="generation-heading">
-              <div class="generation-heading-copy">
-                <h2><span class="generation-status-dot" aria-hidden="true"></span>{{ generationMode === 'image' ? '正在绘制你的画面' : '正在制作你的视频' }}</h2>
-                <p>{{ generationProgress }}</p>
-              </div>
-              <button type="button" class="new-creation-link generation-new-creation" @click="newCreation">
-                <Icon name="plus" size="sm" />新建创作
-              </button>
-            </div>
-            <div class="generation-body">
-              <div class="generation-brief">
-                <p v-if="fullPromptText(selectedWork)" class="generation-prompt" :title="fullPromptText(selectedWork)">{{ fullPromptText(selectedWork) }}</p>
-                <ul class="result-tags generation-tags">
-                  <li v-for="(part, partIndex) in generationTags(selectedWork)" :key="partIndex" :title="part">{{ part }}</li>
-                </ul>
-              </div>
-              <div class="generation-metrics">
-                <!-- One segment per image, so each frame below has its own progress. -->
-                <div
-                  v-if="generationMode === 'image' && generationFrames.length > 1"
-                  class="generation-segments"
-                  role="progressbar"
-                  aria-valuemin="0"
-                  :aria-valuemax="generationFrames.length"
-                  :aria-valuenow="selectedWork.outputs.length"
-                  :aria-valuetext="`已完成 ${selectedWork.outputs.length} / ${generationFrames.length}`"
-                >
-                  <span
-                    v-for="frame in generationFrames"
-                    :key="frame.index"
-                    class="generation-segment"
-                    :class="`is-${frame.state}`"
-                    :style="{ '--segment-delay': `${frame.index * 0.2}s` }"
-                  ></span>
-                </div>
-                <div
-                  v-else
-                  class="progress-track"
-                  :class="{ indeterminate: !generationHasExactProgress }"
-                  role="progressbar"
-                  :aria-valuenow="generationHasExactProgress ? generationPercent : undefined"
-                  aria-valuemin="0"
-                  aria-valuemax="100"
-                >
-                  <span :style="generationHasExactProgress ? { width: `${generationPercent}%` } : undefined"></span>
-                </div>
-                <strong v-if="generationMode === 'video' && generationPhase === 'generating' && generationHasExactProgress" class="generation-percent">{{ generationPercent }}%</strong>
-                <em v-if="generationMode === 'image' && generationFrames.length > 1" class="generation-done-count">已完成 {{ selectedWork.outputs.length }} / {{ generationFrames.length }}</em>
-                <span class="generation-elapsed"><Icon name="clock" size="xs" />已用时<strong>{{ generationElapsedLabel }}</strong></span>
-              </div>
-            </div>
-          </section>
-          <div class="generation-stage" :class="`is-${generationMode}`" :style="generationStageStyle">
-            <span
-              v-for="frame in generationFrames"
-              :key="frame.index"
-              class="generation-frame"
-              :class="`is-${frame.state}`"
-              :style="generationFrameStyle"
-              :aria-hidden="frame.output ? undefined : 'true'"
-            >
-              <img v-if="frame.output && generationMode === 'image'" :src="frame.output" alt="" decoding="async" />
-              <video v-else-if="frame.output && generationMode === 'video'" :src="frame.output" muted loop playsinline autoplay class="generation-frame-video" />
-              <!-- Finished images can be previewed, saved or edited while the rest are still drawing. -->
-              <template v-if="frame.output && generationMode === 'image'">
-                <button type="button" class="generation-frame-open" :title="`查看第 ${frame.index + 1} 张`" :aria-label="`查看第 ${frame.index + 1} 张`" @click="openPreview(frame.output)" />
-                <span class="generation-frame-actions">
-                  <button
-                    type="button"
-                    class="generation-frame-action is-preview"
-                    :title="`预览第 ${frame.index + 1} 张`"
-                    :aria-label="`预览第 ${frame.index + 1} 张`"
-                    @click="openPreview(frame.output)"
-                  ><Icon name="eye" size="xs" /></button>
-                  <button
-                    type="button"
-                    class="generation-frame-action generation-frame-download"
-                    :title="downloadingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在下载' : `下载第 ${frame.index + 1} 张`"
-                    :aria-label="`下载第 ${frame.index + 1} 张`"
-                    :disabled="Boolean(downloadingOutputKey)"
-                    @click="downloadOutput(frame.output, selectedWork, frame.index)"
-                  ><Icon name="download" size="xs" /></button>
-                  <button
-                    type="button"
-                    class="generation-frame-action generation-frame-edit"
-                    :title="referencingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在准备编辑' : `编辑第 ${frame.index + 1} 张`"
-                    :aria-label="`编辑第 ${frame.index + 1} 张`"
-                    :disabled="Boolean(referencingOutputKey)"
-                    @click="useOutputAsReference(frame.output, selectedWork, frame.index)"
-                  ><Icon name="edit" size="xs" /></button>
-                </span>
-              </template>
-              <!-- Finished videos can be previewed and downloaded while the rest are still drawing. -->
-              <template v-else-if="frame.output && generationMode === 'video'">
-                <button type="button" class="generation-frame-open" :title="`播放镜头 ${frame.index + 1}`" :aria-label="`播放镜头 ${frame.index + 1}`" @click="previewResult(frame.output, 'video', frame.index)" />
-                <span class="generation-frame-actions">
-                  <button
-                    type="button"
-                    class="generation-frame-action is-preview"
-                    :title="`播放镜头 ${frame.index + 1}`"
-                    :aria-label="`播放镜头 ${frame.index + 1}`"
-                    @click="previewResult(frame.output, 'video', frame.index)"
-                  ><Icon name="play" size="xs" /></button>
-                  <button
-                    type="button"
-                    class="generation-frame-action generation-frame-download"
-                    :title="downloadingOutputKey === `${selectedWork.id}:${frame.index}` ? '正在下载' : `下载镜头 ${frame.index + 1}`"
-                    :aria-label="`下载镜头 ${frame.index + 1}`"
-                    :disabled="Boolean(downloadingOutputKey)"
-                    @click="downloadOutput(frame.output, selectedWork, frame.index)"
-                  ><Icon name="download" size="xs" /></button>
-                </span>
-              </template>
-              <span v-if="frame.state === 'failed'" class="generation-frame-failed"><Icon name="exclamationTriangle" size="sm" />未生成</span>
-              <template v-else-if="frame.state === 'current'">
-                <span class="generation-frame-dots" aria-hidden="true"></span>
-                <span class="generation-frame-loader">
-                  <span class="generation-frame-ring">
-                    <Icon :name="generationMode === 'image' ? 'sparkles' : 'play'" size="sm" />
-                  </span>
-                </span>
-              </template>
-              <span v-else class="generation-frame-index">{{ frame.index + 1 }}</span>
-            </span>
-          </div>
-        </div>
-
-        <div v-else-if="selectedWork" class="result-workspace">
+        <!-- Generations draw straight into the result cards: each card already has its ratio, prompt and tags, and fills in when its image or video arrives. -->
+        <div v-if="selectedWork && (generationViewVisible || !(studioMode === 'video' && shotWorkspaceShown))" class="result-workspace" :class="{ 'is-generating': generationViewVisible }">
           <div class="result-heading result-heading-complete">
             <div class="result-heading-title">
-              <p class="eyebrow">{{ selectedWork.status === 'pending' && !hasResultImages(selectedWork) ? '等待生成结果' : selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '生成未完成' : '生成结果' }}</p>
-              <div class="result-heading-title-line">
-                <h2>{{ selectedWork.status === 'failed' && !hasPartialImages(selectedWork) ? '这次没有完成' : '本次创作' }}</h2>
-                <span v-if="hasResultActions(selectedWork)" class="result-count-pill">
-                  {{ isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : hasResultImages(selectedWork) && selectedWork.outputs.length < resultOutputCount(selectedWork) ? `${selectedWork.outputs.length} / ${resultOutputCount(selectedWork)} 张` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
+              <!-- While drawing, the live progress is the title, with the same pills as a finished result: outputs so far and a ticking duration.
+                   A single video has nothing to count; its card shows the progress. -->
+              <div v-if="generationViewVisible" class="result-heading-title-line">
+                <h2 class="result-heading-progress" aria-live="polite">{{ headingProgress }}</h2>
+                <span class="result-heading-pills">
+                  <span class="result-count-pill">{{ settledOutputCount < resultOutputCount(selectedWork) ? `${settledOutputCount} / ${resultOutputCount(selectedWork)}` : resultOutputCount(selectedWork) }} {{ selectedWork.type === 'image' ? '张' : '段' }}</span>
+                  <span v-if="headingFailedCount" class="result-count-pill result-failed-pill">{{ headingFailedCount }} {{ selectedWork.type === 'image' ? '张' : '段' }}失败</span>
+                  <span class="result-count-pill result-duration-pill generation-elapsed-pill">耗时 {{ generationElapsedDurationLabel }}</span>
+                </span>
+              </div>
+              <div v-if="!generationViewVisible" class="result-heading-title-line">
+                <!-- Slots redone in place keep the result layout; the count pill already says how many are done, and the duration pill ticks with that run. -->
+                <h2 :aria-live="hasRegeneratingSlot ? 'polite' : undefined">{{ hasRegeneratingSlot ? '正在生成' : selectedWork.status === 'failed' && !isInPlaceRetry(selectedWork) && !hasPartialImages(selectedWork) ? '这次没有完成' : '本次创作' }}</h2>
+                <span v-if="hasResultActions(selectedWork) || hasRegeneratingSlot" class="result-heading-pills">
+                  <!-- Shots redone in place count up like images: finished / total. -->
+                  <span v-if="hasResultActions(selectedWork) || (hasRegeneratingSlot && selectedWork.type === 'video')" class="result-count-pill">
+                    {{ hasRegeneratingSlot && selectedWork.type === 'video' ? `${selectedWork.outputs.filter(Boolean).length} / ${resultOutputCount(selectedWork)} 段` : isMultiShotVideo(selectedWork) && selectedWork.outputs.length ? `完整成片 + ${selectedWork.outputs.length} 段` : hasResultImages(selectedWork) && selectedWork.outputs.length < resultOutputCount(selectedWork) ? `${selectedWork.outputs.length} / ${resultOutputCount(selectedWork)} 张` : `${resultOutputCount(selectedWork)} ${selectedWork.type === 'image' ? '张' : '段'}` }}
+                  </span>
+                  <span v-if="hasRegeneratingSlot && selectedGeneration" class="result-count-pill result-duration-pill generation-elapsed-pill">耗时 {{ generationElapsedDurationLabel }}</span>
+                  <span v-else-if="selectedWork.status !== 'pending'" class="result-count-pill result-duration-pill" :title="`完成耗时 ${formatCompletionDuration(selectedWork)}`">耗时 {{ formatCompletionDuration(selectedWork) }}</span>
                 </span>
               </div>
             </div>
             <div class="result-heading-actions">
-              <button type="button" class="icon-action danger" title="删除这条作品" aria-label="删除这条作品" @click="removeWork(selectedWork)">
-                <Icon name="trash" size="sm" /><span>删除</span>
-              </button>
               <button
-                v-if="hasResultActions(selectedWork) && selectedWork.outputs.length"
+                type="button"
+                class="secondary-command delete-work-command"
+                :class="{ confirming: deleteConfirmWorkId === selectedWork.id }"
+                :title="activeGenerations.has(selectedWork.id) ? '生成完成后可删除' : deleteConfirmWorkId === selectedWork.id ? '再点一次确认删除' : '删除这条作品'"
+                :aria-label="deleteConfirmWorkId === selectedWork.id ? '确认删除这条作品' : '删除这条作品'"
+                :disabled="activeGenerations.has(selectedWork.id)"
+                @click="requestRemoveWork(selectedWork)"
+              ><Icon name="trash" size="sm" :stroke-width="1.7" /><span>{{ deleteConfirmWorkId === selectedWork.id ? '确认删除' : '删除' }}</span></button>
+              <!-- Every action stays in place; ones that cannot run yet are only disabled. -->
+              <button
                 type="button"
                 class="secondary-command download-all-command"
+                :class="{ 'is-downloading': Boolean(downloadingOutputKey) }"
                 :title="selectedWork.type === 'image' ? '下载本页全部图片' : '下载全部视频片段'"
-                :disabled="Boolean(downloadingOutputKey)"
+                :disabled="Boolean(downloadingOutputKey) || !hasResultActions(selectedWork) || !selectedWork.outputs.length"
                 @click="downloadAllOutputs(selectedWork)"
-              ><Icon name="download" size="sm" /><span>{{ downloadingOutputKey === `${selectedWork.id}:all` ? '正在下载...' : '一键下载' }}</span></button>
+              ><Icon name="download" size="sm" :stroke-width="1.7" /><span>{{ downloadingOutputKey === `${selectedWork.id}:all` ? '正在下载...' : '一键下载' }}</span></button>
               <button
-                v-if="hasRetryActions(selectedWork)"
                 type="button"
                 class="secondary-command"
-                :disabled="Boolean(regeneratingWorkId)"
+                :disabled="!(hasRetryActions(selectedWork) || isInPlaceRetry(selectedWork)) || (activeGenerations.has(selectedWork.id) && !isInPlaceRetry(selectedWork))"
                 @click="regenerateWork(selectedWork)"
-              ><Icon name="refresh" size="sm" /><span>{{ regeneratingWorkId === selectedWork.id ? '准备生成...' : '重新生成' }}</span></button>
-              <button v-if="hasRetryActions(selectedWork)" type="button" class="secondary-command primary-soft" @click="continueCreating"><Icon name="plus" size="sm" /><span>新建创作</span></button>
+              ><Icon name="refresh" size="sm" :stroke-width="1.7" /><span>重新生成</span></button>
+              <!-- Grouped so the two "continue" actions share their own row on narrow screens. -->
+              <div class="result-heading-continue">
+                <button
+                  type="button"
+                  class="secondary-command result-reuse-command"
+                  title="把这条作品的提示词和参数带入编辑区，可换模型或修改后继续生成"
+                  @click="reuseForAnotherModel(selectedWork)"
+                ><Icon name="edit" size="sm" :stroke-width="1.7" /><span>带入提示词继续</span></button>
+                <button type="button" class="secondary-command primary-soft new-creation-command" @click="continueCreating"><Icon name="plus" size="sm" :stroke-width="1.7" /><span>新建创作</span></button>
+              </div>
             </div>
           </div>
 
           <div
-            v-if="selectedWork.status === 'failed' && !hasPartialImages(selectedWork)"
+            v-if="isSingleSlotFailure(withRedrawnOriginals(selectedWork))"
             class="result-error"
-            :class="{ muted: reloadingVideoInPlaceId === selectedWork.id }"
+            :class="{ muted: isRegeneratingSlot(selectedWork, 0) }"
             aria-live="polite"
           >
-            <template v-if="reloadingVideoInPlaceId === selectedWork.id">
-              <span class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
-              <strong>正在加载视频</strong>
-              <p>视频已生成，正在准备播放，请稍候。</p>
+            <!-- Only a single image fails into this box; a failed video keeps its card, which shows the failure where the video would be. -->
+            <template v-if="isRegeneratingSlot(selectedWork, 0)">
+              <span class="generation-frame-ring" role="status"><Icon name="sparkles" size="sm" /></span>
+              <strong>正在重新生成</strong>
+              <p>生成完成后会直接显示在这里，请稍候。</p>
             </template>
             <template v-else>
               <Icon name="exclamationTriangle" size="lg" />
               <strong>生成失败</strong>
-              <p>{{ localizeSvgGenerationError(selectedWork.error || '请检查模型与参数后重试。') }}</p>
+              <p>{{ imageFailureReason(selectedWork) || '请检查模型与参数后重试。' }}</p>
+              <!-- A single failed image is redrawn in this same work instead of a new history item. -->
               <button
-                v-if="isVideoDownloadFailure(selectedWork)"
                 type="button"
-                class="secondary-command primary-soft status-check-command"
-                :disabled="checkingVideoHistory"
-                @click="reloadVideoInPlace(selectedWork)"
-              >
-                <Icon name="refresh" size="xs" />
-                重新加载视频
-              </button>
-              <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
+                class="secondary-command"
+                :disabled="regeneratingImageKeys.has(`${selectedWork.id}:0`)"
+                @click="retryFailedSingleImage(selectedWork)"
+              >重新生成</button>
             </template>
           </div>
 
-          <div v-else-if="missingOutputCount(selectedWork)" class="partial-result-notice" role="status">
-            <Icon name="exclamationTriangle" size="sm" />
+          <!-- Multi-shot videos or image batches with missing results get a full-width banner: what is missing
+               (and why) on the left, a single retry button on the right. The button stays (disabled) while
+               those results are redone in place, so the layout does not move. -->
+          <div v-else-if="selectedVideoNotice" class="partial-result-notice" role="status">
+            <Icon :name="selectedVideoNotice.failed.length ? 'exclamationTriangle' : 'sparkles'" size="sm" :stroke-width="1.7" />
             <div>
-              <strong v-if="selectedWork.type === 'image'">已生成 {{ selectedWork.outputs.length }} / {{ resultOutputCount(selectedWork) }} 张，{{ missingOutputCount(selectedWork) }} 张未生成</strong>
-              <strong v-else>已生成 {{ selectedWork.outputs.length }} / {{ resultOutputCount(selectedWork) }} 段，{{ failedShotLabel(selectedWork) }}未生成</strong>
-              <p>{{ selectedWork.type === 'image' ? '已生成的图片可以正常预览和下载。' : '已生成的镜头可以正常预览和下载，失败的镜头未计费。' }}{{ partialImageReason(selectedWork) }}</p>
+              <strong>{{ selectedVideoNotice.label }}</strong>
+              <p v-if="selectedVideoNotice.failed.length && imageFailureReason(selectedWork)">{{ imageFailureReason(selectedWork) }}</p>
             </div>
-            <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数重试</button>
+            <button
+              v-if="selectedVideoNotice.failed.length"
+              type="button"
+              class="partial-retry-command"
+              :disabled="!canRedrawVideo(selectedWork)"
+              title="只重新生成未生成的镜头，结果会填回各自位置，失败的镜头未计费"
+              @click="regenerateMissingVideoShots(selectedWork)"
+            >
+              <Icon name="refresh" size="sm" :stroke-width="1.7" />
+              <span>全部重试</span>
+            </button>
+          </div>
+
+          <div v-else-if="selectedWork.type === 'image' && resultOutputCount(selectedWork) > 1 && missingImageIndexes(selectedWork).length" class="partial-result-notice" role="status">
+            <Icon name="exclamationTriangle" size="sm" :stroke-width="1.7" />
+            <div>
+              <strong>{{ missingImageIndexes(selectedWork).length }} 张图片未生成</strong>
+              <p v-if="missingImageBannerReason(selectedWork)">{{ missingImageBannerReason(selectedWork) }}</p>
+            </div>
+            <button
+              type="button"
+              class="partial-retry-command"
+              :disabled="activeGenerations.has(selectedWork.id) && !joinableImageWorkIds.has(selectedWork.id)"
+              title="重新生成全部未生成的图片，结果会填回各自位置"
+              @click="regenerateMissingImages(selectedWork)"
+            >
+              <Icon name="refresh" size="sm" :stroke-width="1.7" />
+              <span>全部重试</span>
+            </button>
           </div>
 
           <!-- Opening a finished video from history and reloading after an error share
@@ -434,11 +381,17 @@
             </template>
           </div>
 
-          <section v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="complete-video-card">
+          <!-- The complete video only appears once it is composed and its first frame is decoded, so it shows up finished. -->
+          <section
+            v-if="showCompleteVideoCard(selectedWork)"
+            class="complete-video-card"
+            :class="{ 'is-preparing': isPreparingCompleteVideo(selectedWork) }"
+            :aria-hidden="isPreparingCompleteVideo(selectedWork) || undefined"
+          >
             <header>
               <div>
                 <p class="eyebrow">完整成片</p>
-                <h3>{{ selectedWork.mergedOutput ? '所有镜头已按顺序合成' : '镜头素材已完成，等待合成完整视频' }}</h3>
+                <h3>{{ completeVideoTitle(selectedWork) }}</h3>
                 <p>{{ completeVideoDescription(selectedWork) }}</p>
               </div>
               <span>{{ selectedWork.outputs.length }} 个镜头 · {{ completedVideoDuration(selectedWork) }} 秒</span>
@@ -449,7 +402,8 @@
                 :style="resultMediaStyle(selectedWork)"
                 media-class="complete-video-media"
                 :src="selectedWork.mergedOutput"
-                @error="handleVideoPlaybackError(selectedWork)"
+                @ready="markCompleteVideoReady(selectedWork.mergedOutput)"
+                @error="markCompleteVideoReady(selectedWork.mergedOutput); handleVideoPlaybackError(selectedWork)"
                 @loadedmetadata="handleVideoMetadata($event, selectedWork, 0, 'complete')"
               />
               <footer>
@@ -476,124 +430,308 @@
 
           <div v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="segment-heading">
             <div><p class="eyebrow">分段素材</p><h3>镜头素材</h3></div>
-            <span>{{ selectedWork.outputs.length }} 段</span>
+            <span>{{ selectedWork.outputs.length }} / {{ resultOutputCount(selectedWork) }} 段</span>
           </div>
 
-          <div v-else-if="(selectedWork.status !== 'failed' || hasPartialImages(selectedWork)) && selectedWork.outputs.length" class="result-grid" :class="{ single: selectedWork.outputs.length === 1 }">
-            <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-${index}`" class="result-card">
-              <span v-if="selectedWork.outputs.length > 1" class="result-index">{{ String(index + 1).padStart(2, '0') }}</span>
-              <CreatorImage
-                v-if="selectedWork.type === 'image'"
-                class="result-media"
-                :class="{ landscape: resultIsLandscape(selectedWork, index), fitted: resultIsFitted(selectedWork, index) }"
-                :style="resultMediaStyle(selectedWork, index)"
-                :src="output"
-                :cache-key="`${selectedWork.id}:${selectedWork.updatedAt}:${index}`"
-                downscale
-                :alt="`生成图片 ${index + 1}`"
-                title="查看大图"
-                @preview="openPreview(output)"
-              />
+          <div v-if="resultEntries.length && showResultEntries && !isSingleSlotFailure(withRedrawnOriginals(selectedWork))" class="result-grid" :class="{ single: resultEntries.length === 1, 'is-image': selectedWork.type === 'image', 'result-segment-grid': hasCompleteVideo(selectedWork) }">
+            <article v-for="entry in resultEntries" :key="`${selectedWork.id}-${entry.index}`" class="result-card" :class="{ 'is-missing': !entry.output && !isDrawingEntry(entry), 'is-drawing': isDrawingEntry(entry) }" :data-result-index="entry.index">
+              <span v-if="resultEntries.length > 1" class="result-index">{{ String(entry.index + 1).padStart(2, '0') }}</span>
+              <!-- Still drawing: the card keeps the requested ratio with the same loader the progress view used; a video shot also shows its progress. -->
+              <div v-if="isDrawingEntry(entry)" class="result-drawing-media" :style="missingResultMediaStyle(selectedWork, entry.index)" role="status" :aria-label="`${selectedWork.type === 'image' ? '图片' : '镜头'} ${entry.index + 1} 正在生成`">
+                <span class="generation-frame-dots" aria-hidden="true"></span>
+                <span class="generation-frame-loader">
+                  <span class="generation-frame-ring"><Icon :name="selectedWork.type === 'image' ? 'sparkles' : 'play'" size="sm" /></span>
+                  <span class="generation-frame-caption">
+                    <strong>{{ selectedWork.type === 'image' ? '正在生成图片' : '正在生成视频' }}</strong>
+                    <small>{{ shotProgress.get(entry.index)?.label || '生成完成后会直接显示在这里' }}</small>
+                  </span>
+                  <span
+                    v-if="shotProgress.has(entry.index)"
+                    class="slot-progress"
+                    :class="{ indeterminate: shotProgress.get(entry.index)?.percent === undefined }"
+                    role="progressbar"
+                    :aria-label="`镜头 ${entry.index + 1} 生成进度`"
+                    :aria-valuenow="shotProgress.get(entry.index)?.percent"
+                    aria-valuemin="0"
+                    aria-valuemax="100"
+                  ><i :style="{ width: `${shotProgress.get(entry.index)?.percent ?? 0}%` }" /></span>
+                </span>
+              </div>
+              <div v-else-if="!entry.output" class="result-missing-media" :class="[hasVideoHistoryCheckError(selectedWork) ? 'is-status-error' : isRegeneratingSlot(selectedWork, entry.index) ? 'is-regenerating' : isReloadingVideoCard(selectedWork) ? 'is-pending' : `is-${entry.state}`, { 'is-image': selectedWork.type === 'image' }]" :style="missingResultMediaStyle(selectedWork, entry.index)" role="status" aria-live="polite">
+                <template v-if="isRegeneratingSlot(selectedWork, entry.index)">
+                  <span class="generation-frame-dots" aria-hidden="true"></span>
+                  <span class="generation-frame-ring"><Icon name="sparkles" size="sm" /></span>
+                </template>
+                <span v-else-if="isReloadingVideoCard(selectedWork)" class="video-loading-spinner"><Icon name="refresh" size="sm" /></span>
+                <Icon v-else :class="{ 'status-check-icon': checkingSelectedVideoStatus && entry.index === 0 }" :name="hasVideoHistoryCheckError(selectedWork) || entry.state === 'failed' ? 'exclamationTriangle' : checkingSelectedVideoStatus && entry.index === 0 ? 'refresh' : 'clock'" size="lg" />
+                <strong>{{ hasVideoHistoryCheckError(selectedWork) ? '任务状态检查失败' : checkingSelectedVideoStatus && entry.index === 0 ? '正在同步状态' : isRegeneratingSlot(selectedWork, entry.index) ? '正在重新生成' : isReloadingVideoCard(selectedWork) ? '正在加载视频' : isSingleVideoFailure(selectedWork, entry) ? '生成失败' : entry.state === 'pending' ? '等待生成结果' : '未生成' }}</strong>
+                <p v-if="hasVideoHistoryCheckError(selectedWork)">{{ selectedVideoHistoryFeedback?.message }}</p>
+                <p v-else-if="checkingSelectedVideoStatus && entry.index === 0">正在查询服务端任务状态，请稍候。</p>
+                <p v-else-if="isRegeneratingSlot(selectedWork, entry.index)">{{ shotProgress.get(entry.index)?.label || '生成完成后会直接显示在这里' }}</p>
+                <p v-else-if="isReloadingVideoCard(selectedWork)">视频已生成，正在准备播放，请稍候。</p>
+                <!-- A single shot has no banner above it, so its card carries the failure reason. -->
+                <p v-else-if="isSingleVideoFailure(selectedWork, entry)">{{ localizeVideoTaskError(localizeSvgGenerationError(selectedWork.error || '')) || '请检查模型与参数后重试。' }}</p>
+                <p v-else-if="selectedWork.type === 'video' && (selectedWork.status !== 'pending' || isInPlaceRetry(selectedWork)) && entry.state === 'failed'">点击“重新生成”，结果会填回当前位置</p>
+                <!-- The banner above carries the failure reason; the card only explains its own button. -->
+                <p v-else-if="selectedWork.type === 'image' && (selectedWork.status !== 'pending' || isInPlaceImageRetry(selectedWork) || joinableImageWorkIds.has(selectedWork.id)) && entry.state === 'failed'">点击“重新生成”，单独重做这张图片</p>
+                <p v-else>提示词和参数已保留</p>
+                <span
+                  v-if="shotProgress.has(entry.index)"
+                  class="slot-progress"
+                  :class="{ indeterminate: shotProgress.get(entry.index)?.percent === undefined }"
+                  role="progressbar"
+                  :aria-label="`镜头 ${entry.index + 1} 生成进度`"
+                  :aria-valuenow="shotProgress.get(entry.index)?.percent"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                ><i :style="{ width: `${shotProgress.get(entry.index)?.percent ?? 0}%` }" /></span>
+                <button
+                  v-if="isVideoDownloadFailure(selectedWork) && !isReloadingVideoCard(selectedWork)"
+                  type="button"
+                  class="secondary-command primary-soft status-check-command"
+                  :disabled="checkingVideoHistory"
+                  @click="reloadVideoInPlace(selectedWork)"
+                >
+                  <Icon name="refresh" size="xs" />
+                  重新加载视频
+                </button>
+                <button
+                  v-if="selectedWork.type === 'video' && (selectedWork.status !== 'pending' || isInPlaceRetry(selectedWork)) && entry.state === 'failed' && !isRegeneratingSlot(selectedWork, entry.index) && !isReloadingVideoCard(selectedWork)"
+                  type="button"
+                  class="result-shot-retry"
+                  :disabled="!canRedrawVideo(selectedWork)"
+                  :aria-label="`重新生成镜头 ${entry.index + 1}`"
+                  title="只重新生成此镜头，结果会填回当前位置"
+                  @click="regenerateVideoShot(selectedWork, entry.index)"
+                >
+                  重新生成
+                </button>
+                <!-- Other failed cards stay clickable while one is redrawing; their retry joins the same run. -->
+                <button
+                  v-if="selectedWork.type === 'image' && (selectedWork.status !== 'pending' || isInPlaceImageRetry(selectedWork) || joinableImageWorkIds.has(selectedWork.id)) && entry.state === 'failed' && !isRegeneratingImage(selectedWork, entry.index)"
+                  type="button"
+                  class="result-shot-retry"
+                  :disabled="activeGenerations.has(selectedWork.id) && !joinableImageWorkIds.has(selectedWork.id)"
+                  :aria-label="`重新生成图片 ${entry.index + 1}`"
+                  title="只重新生成这张图片，结果会填回当前位置"
+                  @click="regenerateImageOutput(selectedWork, entry.index)"
+                >
+                  重新生成
+                </button>
+                <button
+                  v-if="hasVideoHistoryCheckError(selectedWork) && selectedWork.requestId"
+                  type="button"
+                  class="secondary-command primary-soft status-check-command"
+                  :disabled="checkingVideoHistory"
+                  @click="refreshVideoWork(selectedWork)"
+                >
+                  <Icon name="refresh" size="xs" />
+                  {{ checkingVideoHistory ? '同步中...' : '同步状态' }}
+                </button>
+              </div>
+              <div v-else-if="selectedWork.type === 'image'" class="result-media-frame">
+                <CreatorImage
+                  class="result-media"
+                  :class="{ landscape: resultIsLandscape(entry.work, entry.outputIndex), fitted: resultIsFitted(entry.work, entry.outputIndex) }"
+                  :style="resultMediaStyle(entry.work, entry.outputIndex)"
+                  :src="entry.output"
+                  :cache-key="resultImageCacheKey(entry.work, entry.outputIndex)"
+                  :pending="savingImageSources.has(entry.output)"
+                  downscale
+                  :alt="`生成图片 ${entry.index + 1}`"
+                  title="查看大图"
+                  @preview="openPreview(entry.output)"
+                />
+                <!-- The original stays underneath while it is redrawn; the new image replaces it when ready. -->
+                <div v-if="isAwaitingRedrawnImage(selectedWork, entry.index)" class="result-redraw-overlay" role="status" aria-live="polite">
+                  <span class="generation-frame-dots" aria-hidden="true"></span>
+                  <span class="generation-frame-ring"><Icon name="sparkles" size="sm" /></span>
+                  <strong>正在重新生成</strong>
+                  <p>生成完成后会直接显示在这里</p>
+                </div>
+              </div>
               <CreatorVideoPlayer
                 v-else
                 class="video-result-frame"
-                :style="resultMediaStyle(selectedWork, index)"
+                :style="resultMediaStyle(entry.work, entry.outputIndex)"
                 media-class="result-media video result-segment-video"
-                :media-style="resultMediaStyle(selectedWork, index)"
-                :src="output"
+                :media-style="resultMediaStyle(entry.work, entry.outputIndex)"
+                :src="entry.output"
+                :ref="(el) => setResultPlayer(`result:${entry.outputIndex}`, el)"
+                :muted="isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`)"
+                @update:muted="setResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`, $event)"
                 @error="handleVideoPlaybackError(selectedWork)"
-                @loadedmetadata="handleVideoMetadata($event, selectedWork, index)"
+                @loadedmetadata="handleVideoMetadata($event, entry.work, entry.outputIndex)"
               />
               <div class="result-actions">
                 <div class="result-description">
-                  <strong>{{ selectedWork.type === 'video' ? videoShotTitle(selectedWork, index) : selectedWork.provider }}</strong>
-                  <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
+                  <div class="result-description-heading">
+                    <strong>{{ selectedWork.type === 'video' ? videoShotTitle(selectedWork, entry.index) : selectedWork.provider }}</strong>
+                  </div>
+                  <p v-if="resultDescription(selectedWork, entry.index)" class="result-prompt">{{ resultDescription(selectedWork, entry.index) }}</p>
                 </div>
-                <div class="result-media-actions">
-                  <button type="button" class="icon-action" :title="selectedWork.type === 'image' ? '预览作品' : '播放视频'" @click="previewResult(output, selectedWork.type, index)">
-                    <Icon :name="selectedWork.type === 'image' ? 'eye' : 'play'" size="sm" />
-                  </button>
+                <!-- Missing images keep the same toolbar, greyed out until the image exists. -->
+                <div v-if="!entry.output && selectedWork.type === 'image'" class="result-media-actions is-unavailable">
+                  <button type="button" class="icon-action" title="未生成，暂不能预览" aria-label="预览作品" disabled><Icon name="eye" size="sm" /><span class="result-action-label">预览</span></button>
                   <button
                     type="button"
-                    class="icon-action"
-                    :title="downloadingOutputKey === `${selectedWork.id}:${index}` ? '正在下载' : '下载作品'"
-                    :disabled="Boolean(downloadingOutputKey)"
-                    @click="downloadOutput(output, selectedWork, index)"
+                    class="icon-action result-redraw-action"
+                    :title="canRetryMissingImage(selectedWork, entry) ? '只重新生成这张图片，结果会填回当前位置' : '生成中，暂不能重新生成'"
+                    aria-label="重新生成这张"
+                    :disabled="!canRetryMissingImage(selectedWork, entry)"
+                    @click="regenerateImageOutput(selectedWork, entry.index)"
+                  ><Icon name="refresh" size="sm" :class="{ 'is-spinning': isRegeneratingImage(selectedWork, entry.index) }" /><span class="result-action-label">重新生成</span></button>
+                  <button type="button" class="icon-action" title="未生成，暂不能编辑" aria-label="编辑这张照片" disabled><Icon name="edit" size="sm" /><span class="result-action-label">编辑</span></button>
+                  <button type="button" class="icon-action" title="未生成，暂不能下载" aria-label="下载作品" disabled><Icon name="download" size="sm" /><span class="result-action-label">下载</span></button>
+                </div>
+                <!-- Missing video shots keep the same toolbar too; only regenerating works before the video exists. -->
+                <div v-if="!entry.output && selectedWork.type === 'video'" class="result-media-actions is-unavailable">
+                  <button
+                    type="button"
+                    class="icon-action result-redraw-action"
+                    :title="canRetryMissingShot(selectedWork, entry) ? '只重新生成此镜头，结果会填回当前位置' : '生成中，暂不能重新生成'"
+                    aria-label="重新生成这个镜头"
+                    :disabled="!canRetryMissingShot(selectedWork, entry)"
+                    @click="regenerateVideoShot(selectedWork, entry.index)"
+                  ><Icon name="refresh" size="sm" :class="{ 'is-spinning': isRegeneratingSlot(selectedWork, entry.index) }" /><span class="result-action-label">重新生成</span></button>
+                  <button type="button" class="icon-action" title="未生成，暂不能播放" aria-label="静音" disabled>
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z" /><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" /></svg><span class="result-action-label">静音</span>
+                  </button>
+                  <button type="button" class="icon-action" title="未生成，暂不能全屏" aria-label="全屏播放" disabled>
+                    <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" /></svg><span class="result-action-label">全屏</span>
+                  </button>
+                  <button type="button" class="icon-action" title="未生成，暂不能下载" aria-label="下载作品" disabled><Icon name="download" size="sm" /><span class="result-action-label">下载</span></button>
+                </div>
+                <div v-if="entry.output" class="result-media-actions">
+                  <button v-if="selectedWork.type === 'image'" type="button" class="icon-action" title="预览作品" @click="previewResult(entry.output, selectedWork.type, entry.outputIndex)">
+                    <Icon name="eye" size="sm" />
+                    <span class="result-action-label">预览</span>
+                  </button>
+                  <template v-if="selectedWork.type === 'video'">
+                    <button
+                      type="button"
+                      class="icon-action result-redraw-action"
+                      title="重新生成这个镜头，结果会替换当前位置；失败时保留原视频"
+                      :aria-label="`重新生成镜头 ${entry.index + 1}`"
+                      :disabled="!canRedrawVideo(selectedWork)"
+                      @click="redrawVideoShot(selectedWork, entry.index)"
+                    >
+                      <Icon name="refresh" size="sm" />
+                      <span class="result-action-label">重新生成</span>
+                    </button>
+                    <button type="button" class="icon-action" :title="isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`) ? '打开声音' : '静音'" :aria-label="isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`) ? '打开声音' : '静音'" :aria-pressed="isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`)" @click="setResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`, !isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`))">
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <path d="M11 5 6 9H3v6h3l5 4V5Z" />
+                        <path v-if="isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`)" d="m16 9 5 6m0-6-5 6" />
+                        <path v-else d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13" />
+                      </svg>
+                      <span class="result-action-label">{{ isResultPlayerMuted(`${selectedWork.id}:result:${entry.outputIndex}`) ? '打开声音' : '静音' }}</span>
+                    </button>
+                    <button type="button" class="icon-action result-fullscreen-action" title="全屏播放" aria-label="全屏播放" @click="playResultFullscreen(`result:${entry.outputIndex}`)">
+                      <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M8 3H3v5m13-5h5v5M3 16v5h5m13-5v5h-5" /></svg><span class="result-action-label">全屏</span>
+                    </button>
+                  </template>
+                  <button
+                    v-if="selectedWork.type === 'image'"
+                    type="button"
+                    class="icon-action result-redraw-action"
+                    :title="isRegeneratingImage(selectedWork, entry.index) ? '正在重新生成，完成后替换这张' : '重新生成这张，结果会替换当前位置；失败时保留原图'"
+                    :aria-label="`重新生成图片 ${entry.index + 1}`"
+                    :disabled="!canRedrawImage(selectedWork) || isRegeneratingImage(selectedWork, entry.index)"
+                    @click="redrawImageOutput(selectedWork, entry.index)"
                   >
-                    <Icon name="download" size="sm" />
+                    <Icon name="refresh" size="sm" :class="{ 'is-spinning': isRegeneratingImage(selectedWork, entry.index) }" />
+                    <span class="result-action-label">重新生成</span>
                   </button>
                   <button
                     v-if="selectedWork.type === 'image'"
                     type="button"
                     class="icon-action"
-                    :title="referencingOutputKey === `${selectedWork.id}:${index}` ? '正在准备编辑' : '编辑这张照片'"
+                    :title="referencingOutputKey === `${selectedWork.id}:${entry.outputIndex}` ? '正在准备编辑' : '编辑这张照片'"
                     aria-label="编辑这张照片"
                     :disabled="Boolean(referencingOutputKey)"
-                    @click="useOutputAsReference(output, selectedWork, index)"
+                    @click="useOutputAsReference(entry.output, entry.work, entry.outputIndex)"
                   >
                     <Icon name="edit" size="sm" />
+                    <span class="result-action-label">编辑</span>
                   </button>
-                  <button v-else type="button" class="icon-action" title="新建创作" @click="continueCreating">
-                    <Icon name="plus" size="sm" />
+                  <button
+                    type="button"
+                    class="icon-action"
+                    :title="downloadingOutputKey === `${selectedWork.id}:${entry.outputIndex}` ? '正在下载' : '下载作品'"
+                    :disabled="Boolean(downloadingOutputKey)"
+                    @click="downloadOutput(entry.output, entry.work, entry.outputIndex)"
+                  >
+                    <Icon name="download" size="sm" />
+                    <span class="result-action-label">下载</span>
                   </button>
                 </div>
-                <ul v-if="selectedWork.type === 'image'" class="result-tags">
+                <ul v-if="isDrawingEntry(entry) && selectedWork.type === 'image'" class="result-tags">
+                  <li v-for="(part, partIndex) in generationTags(selectedWork)" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
+                <ul v-else-if="!entry.output" class="result-tags">
+                  <li v-for="(part, partIndex) in missingResultTags(selectedWork, entry.index)" :key="partIndex" :title="part">{{ part }}</li>
+                </ul>
+                <ul v-else-if="selectedWork.type === 'image'" class="result-tags">
                   <li v-for="(part, partIndex) in metaParts(
-                    modelLabel(selectedWork.model),
-                    imageAspectRatioLabel(selectedWork, index),
-                    imageDimensionsLabel(selectedWork, index),
-                    outputFormatLabel(output) || selectedWork.outputFormat?.toUpperCase(),
+                    imageModelTag(selectedWork),
+                    imageAspectRatioLabel(entry.work, entry.outputIndex),
+                    imageResolutionTierLabel(entry.work, entry.outputIndex),
+                    imageDimensionsLabel(entry.work, entry.outputIndex),
+                    outputFormatLabel(entry.output) || selectedWork.outputFormat?.toUpperCase(),
                     selectedWork.outputFormat === 'gif' && selectedWork.frameCount ? `${selectedWork.frameCount} 帧` : undefined,
                     selectedWork.referenceCount ? `${selectedWork.referenceCount} 张参考图` : undefined,
                   )" :key="partIndex" :title="part">{{ part }}</li>
                 </ul>
                 <ul v-else class="result-tags">
-                  <li v-for="(part, partIndex) in videoResultTags(selectedWork, index)" :key="partIndex" :title="part">{{ part }}</li>
+                  <li v-for="(part, partIndex) in videoResultTags(entry.work, entry.outputIndex)" :key="partIndex" :title="part">{{ part }}</li>
                 </ul>
-              </div>
-            </article>
-          </div>
-
-          <div v-if="selectedWork.status !== 'failed' && hasCompleteVideo(selectedWork)" class="result-grid result-segment-grid">
-            <article v-for="(output, index) in selectedWork.outputs" :key="`${selectedWork.id}-segment-${index}`" class="result-card">
-              <span v-if="selectedWork.outputs.length > 1" class="result-index">{{ String(shotIndexForOutput(selectedWork, index) + 1).padStart(2, '0') }}</span>
-              <CreatorVideoPlayer
-                class="video-result-frame"
-                :style="resultMediaStyle(selectedWork, index)"
-                media-class="result-media video result-segment-video"
-                :media-style="resultMediaStyle(selectedWork, index)"
-                :src="output"
-                @error="handleVideoPlaybackError(selectedWork)"
-                @loadedmetadata="handleVideoMetadata($event, selectedWork, index)"
-              />
-              <div class="result-actions">
-                <div class="result-description">
-                  <strong>{{ videoShotTitle(selectedWork, index) }}</strong>
-                  <p v-if="resultDescription(selectedWork, index)" class="result-prompt" :title="resultDescription(selectedWork, index)">{{ resultDescription(selectedWork, index) }}</p>
-                </div>
-                <div class="result-media-actions">
-                  <button type="button" class="icon-action" title="播放镜头" @click="previewResult(output, selectedWork.type, index)"><Icon name="play" size="sm" /></button>
+                <div
+                  v-if="selectedWork.type === 'video' && selectedWork.status === 'pending' && !generationViewVisible && !isInPlaceRetry(selectedWork) && !selectedWork.outputs.length && entry.index === 0 && !hasVideoHistoryCheckError(selectedWork) && (selectedWork.requestId || (selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone !== 'error' && !checkingVideoHistory))"
+                  class="pending-video-status"
+                  role="status"
+                  aria-live="polite"
+                >
                   <button
+                    v-if="selectedWork.requestId"
                     type="button"
-                    class="icon-action"
-                    :title="downloadingOutputKey === `${selectedWork.id}:${index}` ? '正在下载' : '下载镜头'"
-                    :disabled="Boolean(downloadingOutputKey)"
-                    @click="downloadOutput(output, selectedWork, index)"
-                  ><Icon name="download" size="sm" /></button>
-                  <button type="button" class="icon-action" title="新建创作" @click="continueCreating"><Icon name="plus" size="sm" /></button>
+                    class="secondary-command primary-soft status-check-command"
+                    :disabled="checkingVideoHistory"
+                    @click="refreshVideoWork(selectedWork)"
+                  >
+                    <Icon name="refresh" size="xs" />
+                    {{ checkingVideoHistory ? '同步中...' : '同步状态' }}
+                  </button>
+                  <div
+                    v-if="selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone !== 'error' && !checkingVideoHistory"
+                    class="video-status-feedback"
+                    :class="`is-${selectedVideoHistoryFeedback.tone}`"
+                  >
+                    <Icon name="infoCircle" size="xs" />
+                    <span>{{ selectedVideoHistoryFeedback.message }}</span>
+                  </div>
                 </div>
-                <ul class="result-tags">
-                  <li v-for="(part, partIndex) in videoResultTags(selectedWork, index)" :key="partIndex" :title="part">{{ part }}</li>
-                </ul>
               </div>
             </article>
           </div>
 
-          <div v-if="selectedWork.status === 'pending' && !selectedWork.outputs.length" class="result-error muted">
-            <span v-if="checkingVideoHistory" class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
-            <Icon v-else name="clock" size="lg" />
-            <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在同步状态' : '视频还在生成中' }}</strong>
-            <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在获取最新进度，请稍候。' : '任务已保存，可随时点击下方按钮同步最新进度。' }}</p>
+          <div
+            v-if="!generationViewVisible && selectedWork.status === 'pending' && !isInPlaceRetry(selectedWork) && !selectedWork.outputs.length && (selectedWork.type === 'image' || !resultEntries.length || !showResultEntries)"
+            class="result-error muted"
+            role="status"
+            aria-live="polite"
+          >
+            <template v-if="hasVideoHistoryCheckError(selectedWork)">
+              <Icon name="exclamationTriangle" size="lg" />
+              <strong>任务状态检查失败</strong>
+              <p>{{ selectedVideoHistoryFeedback?.message }}</p>
+            </template>
+            <template v-else>
+              <span v-if="checkingVideoHistory" class="video-loading-spinner" role="status"><Icon name="refresh" size="sm" /></span>
+              <Icon v-else name="clock" size="lg" />
+              <strong>{{ selectedWork.type === 'image' ? '正在等待图片结果' : checkingVideoHistory ? '正在同步状态' : '视频还在生成中' }}</strong>
+              <p>{{ selectedWork.type === 'image' ? selectedWork.imageTaskIds?.length ? '图片任务已保存在服务器，页面刷新不影响生成。点击“刷新生成结果”继续同步进度。' : '如果任务仍在其他页面生成，请保留该页面，结果保存后会自动同步到这里。若生成页面已关闭或刷新，可以带回参数重新创作。' : checkingVideoHistory ? '正在获取最新进度，请稍候。' : '任务已保存，可随时点击下方按钮同步最新进度。' }}</p>
+            </template>
             <div v-if="selectedWork.type === 'image'" class="pending-image-actions">
               <button type="button" class="secondary-command primary-soft image-refresh-command" @click="refreshImageWork(selectedWork)">刷新生成结果</button>
               <button type="button" class="secondary-command" @click="reuseWork(selectedWork)">带回参数</button>
@@ -609,35 +747,21 @@
               {{ checkingVideoHistory ? '同步中...' : '同步状态' }}
             </button>
             <div
-              v-if="selectedVideoHistoryFeedback && !checkingVideoHistory"
+              v-if="selectedVideoHistoryFeedback && selectedVideoHistoryFeedback.tone !== 'error' && !checkingVideoHistory"
               class="video-status-feedback"
               :class="`is-${selectedVideoHistoryFeedback.tone}`"
               role="status"
               aria-live="polite"
             >
-              <Icon :name="selectedVideoHistoryFeedback.tone === 'error' ? 'exclamationCircle' : 'infoCircle'" size="xs" />
+              <Icon name="infoCircle" size="xs" />
               <span>{{ selectedVideoHistoryFeedback.message }}</span>
             </div>
           </div>
 
           <section class="result-parameters" aria-label="作品参数">
             <div class="result-stat-grid">
-              <article v-for="field in resultParameterFields(selectedWork)" :key="field.label" :class="{ wide: field.wide }">
+              <article v-for="field in resultParameterFields(selectedWork)" :key="field.label">
                 <span>{{ field.label }}</span><strong :title="field.value">{{ field.value }}</strong>
-              </article>
-              <article class="result-prompt-cell">
-                <span>完整提示词</span>
-                <p class="full-prompt" :class="{ clamped: isPromptLong(selectedWork) && !promptExpanded }">{{ fullPromptText(selectedWork) }}</p>
-                <button
-                  v-if="isPromptLong(selectedWork)"
-                  type="button"
-                  class="result-prompt-toggle"
-                  :aria-expanded="promptExpanded"
-                  @click="promptExpanded = !promptExpanded"
-                >
-                  {{ promptExpanded ? '收起' : '展开全部' }}
-                  <Icon name="chevronDown" size="xs" />
-                </button>
               </article>
             </div>
           </section>
@@ -647,14 +771,14 @@
           <header class="sequence-header">
             <div>
               <p class="sequence-eyebrow"><i></i> PRO EDITOR · SEQUENCE</p>
-              <h2>镜头序列 <span>{{ videoShots.length }} / 6</span></h2>
+              <h2>镜头序列 <span>{{ videoShots.length }}</span></h2>
               <p>按时间顺序编排画面，点击镜头后在右侧编辑描述与参数</p>
             </div>
             <dl>
               <div><dt>总时长</dt><dd>{{ formatSequenceDuration(totalShotDuration) }}</dd></div>
               <div><dt>已完成</dt><dd>0/{{ videoShots.length }}</dd></div>
             </dl>
-            <button v-if="videoShots.length < 6" type="button" class="sequence-add" title="添加镜头" @click="addShot"><Icon name="plus" size="sm" /></button>
+            <button type="button" class="sequence-add" title="添加镜头" @click="addShot"><Icon name="plus" size="sm" /></button>
           </header>
 
           <div class="sequence-ruler"><span>00:00</span><i></i><span>{{ formatSequenceDuration(totalShotDuration) }}</span></div>
@@ -698,12 +822,12 @@
                 </footer>
               </div>
             </article>
-            <button v-if="videoShots.length < 6" type="button" class="sequence-inline-add" @click="addShot"><Icon name="plus" size="sm" /><span>添加镜头</span></button>
+            <button type="button" class="sequence-inline-add" @click="addShot"><Icon name="plus" size="sm" /><span>添加镜头</span></button>
           </div>
 
           <footer class="sequence-footer">
             <span><Icon name="broadcast" size="xs" /> 每个镜头可独立编辑、排序和重试</span>
-            <strong :class="{ invalid: totalShotDuration > 60 }">最多 6 个镜头 · 总时长 {{ totalShotDuration }} / 60 秒</strong>
+            <strong>共 {{ videoShots.length }} 个镜头 · 总时长 {{ totalShotDuration }} 秒</strong>
           </footer>
         </section>
 
@@ -723,6 +847,22 @@
                 <button type="button" title="上一份企划" @click="previousTemplate"><Icon name="chevronLeft" size="sm" /></button>
                 <button type="button" title="下一份企划" @click="nextTemplate"><Icon name="chevronRight" size="sm" /></button>
               </div>
+              <div class="brief-navigation">
+                <label for="creator-brief-navigation">浏览企划</label>
+                <input
+                  id="creator-brief-navigation"
+                  class="brief-range"
+                  type="range"
+                  min="1"
+                  :max="activeTemplates.length"
+                  step="1"
+                  :value="activeTemplateIndex + 1"
+                  :aria-valuetext="`第 ${activeTemplateIndex + 1} 份，共 ${activeTemplates.length} 份：${activeTemplate.title}`"
+                  :style="{ '--brief-progress': `${activeTemplateIndex / Math.max(1, activeTemplates.length - 1) * 100}%` }"
+                  @input="selectTemplate(Number(($event.target as HTMLInputElement).value) - 1)"
+                />
+                <span class="brief-position"><strong>{{ String(activeTemplateIndex + 1).padStart(2, '0') }}</strong><span>/ {{ activeTemplates.length }}</span></span>
+              </div>
             </div>
             <div class="brief-stage" :style="briefBodyHeight ? { '--brief-stage-height': `${briefBodyHeight}px` } : undefined">
               <Transition name="brief-slide" mode="out-in">
@@ -731,39 +871,23 @@
                     <span>{{ activeTemplate.tag }}</span>
                     <h3>{{ activeTemplate.title }}</h3>
                     <p>{{ activeTemplate.subtitle }}</p>
-                    <small>画面提案 · {{ activeTemplate.prompt.length }} 字</small>
+                    <button type="button" @click="useTemplate(activeTemplate)">使用这份企划 <Icon name="arrowRight" size="sm" /></button>
                   </div>
                   <div class="brief-copy">
-                    <small>CREATIVE BRIEF</small>
+                    <small>画面提案<span>{{ activeTemplate.prompt.length }} 字</span></small>
                     <p ref="briefPromptElement" :class="{ 'is-clipped': briefPromptClipped }" @scroll="updateBriefPromptClip">{{ activeTemplate.prompt }}</p>
-                    <button type="button" @click="useTemplate(activeTemplate)">使用这份企划 <Icon name="arrowRight" size="sm" /></button>
                   </div>
                 </div>
               </Transition>
             </div>
-            <div class="brief-navigation">
-              <label for="creator-brief-navigation">浏览企划</label>
-              <input
-                id="creator-brief-navigation"
-                class="brief-range"
-                type="range"
-                min="1"
-                :max="activeTemplates.length"
-                step="1"
-                :value="activeTemplateIndex + 1"
-                :aria-valuetext="`第 ${activeTemplateIndex + 1} 份，共 ${activeTemplates.length} 份：${activeTemplate.title}`"
-                :style="{ '--brief-progress': `${activeTemplateIndex / Math.max(1, activeTemplates.length - 1) * 100}%` }"
-                @input="selectTemplate(Number(($event.target as HTMLInputElement).value) - 1)"
-              />
-              <span class="brief-position"><strong>{{ String(activeTemplateIndex + 1).padStart(2, '0') }}</strong><span>/ {{ activeTemplates.length }}</span></span>
-            </div>
           </article>
 
           <div class="quick-templates">
-            <span class="quick-templates-label">灵感分类 · 点击随机填入</span>
+            <span class="quick-templates-label">灵感分类<small>点击随机填入</small></span>
             <div class="quick-templates-list">
               <button v-for="category in activePromptCategories" :key="category.name" type="button" :title="`随机填入一条「${category.name}」提示词`" @click="useRandomCategoryPrompt(category)">
-                <span><strong>{{ category.name }}</strong><small>{{ category.hint }}</small></span>
+                <img class="quick-template-cover" :src="category.cover" alt="" loading="lazy" decoding="async" />
+                <span class="quick-template-text"><strong>{{ category.name }}</strong><small>{{ category.hint }}</small></span>
                 <Icon name="refresh" size="xs" />
               </button>
             </div>
@@ -778,7 +902,10 @@
               <h2>生成能力</h2>
               <p>选择当前要使用的模型</p>
             </div>
-            <Icon name="key" size="sm" />
+            <button type="button" class="reset-settings-action" title="清空提示词和参考图，生成参数恢复默认" :disabled="bootstrapping" @click="resetSettings">
+              <Icon name="broom" size="sm" />
+              <span>清空参数</span>
+            </button>
           </div>
 
           <div v-if="studioMode === 'image'" class="capability-switch" role="tablist" aria-label="图片生成能力">
@@ -823,17 +950,15 @@
               v-model="selectedModel"
               class="studio-input model-input"
               :class="{ 'is-loading': loadingModels }"
-              :disabled="loadingModels || !selectedApiKey || referenceVideoModelUnavailable"
+              :disabled="loadingModels || !selectedApiKey"
               :aria-busy="loadingModels"
             >
               <option v-if="loadingModels && !selectableModelOptions.length" value="">正在读取可用模型...</option>
-              <option v-else-if="referenceVideoModelUnavailable" value="">没有支持参考图的视频模型</option>
               <option v-else-if="!selectableModelOptions.length" value="">请先创建 Key</option>
-              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ miniMaxH3Tier(model)?.optionLabel || modelLabel(model) }}</option>
+              <option v-for="model in selectableModelOptions" :key="model" :value="model">{{ modelOptionLabel(model) }}</option>
             </select>
             <small v-if="selectedMiniMaxTierHint" data-testid="minimax-tier-hint">{{ selectedMiniMaxTierHint }}</small>
             <small v-if="selectedSeedanceTier" data-testid="seedance-tier-hint">{{ seedanceTierHint(selectedSeedanceTier) }}</small>
-            <small v-if="referenceVideoModelUnavailable" class="model-compatibility-error">当前分组没有 Grok Imagine Video 1.5 或 MiniMax H3，无法使用参考图生视频</small>
           </div>
 
           <div v-if="selectedApiKey" class="key-ready">
@@ -915,8 +1040,8 @@
               <label for="video-generation-method">生成方式</label>
               <select id="video-generation-method" v-model="activeVideoGenerationMethod" class="studio-input" :disabled="processingReferenceImages">
                 <option value="text" :disabled="relayTierRequiresReference">文生视频 · 只用提示词{{ relayTierRequiresReference ? '（该模型需要参考图）' : '' }}</option>
-                <option value="image" :disabled="selectedVideoRelayTier !== null">图生视频 · 1 张源图{{ selectedVideoRelayTier ? `（${videoProviderLabel(selectedModel)} 不支持）` : '' }}</option>
-                <option value="reference" :disabled="!relayTierAcceptsUploads">参考图生视频 · 最多 {{ referenceVideoImageLimit }} 张{{ relayTierAcceptsUploads ? '' : '（该模型不支持上传）' }}</option>
+                <option value="image" :disabled="!firstFrameVideoSupported">首帧图生视频 · 1 张首帧图{{ firstFrameVideoSupported ? '' : '（当前模型不支持）' }}</option>
+                <option value="reference" :disabled="!referenceVideoSupported">参考图生视频 · 最多 {{ referenceVideoImageLimit }} 张{{ referenceVideoSupported ? '' : '（当前模型不支持）' }}</option>
               </select>
             </div>
             <div class="field-block">
@@ -990,9 +1115,7 @@
                   <option value="jpeg">JPEG</option>
                   <option value="webp">WebP</option>
                   <option value="gif">GIF</option>
-                  <option value="svg" :disabled="referenceImages.length > 0">SVG{{ referenceImages.length ? '（不支持参考图）' : '' }}</option>
                 </select>
-                <small v-if="outputFormat === 'svg'">SVG 矢量图只支持文生图，每次 1 张；画面质量用于内部参考图。</small>
               </div>
             </div>
 
@@ -1045,9 +1168,9 @@
 
             <label class="toggle-row professional-toggle video-control-row">
               <span class="professional-toggle-icon"><Icon name="grid" size="sm" /></span>
-              <span class="professional-toggle-copy"><strong>{{ professionalVideo ? '收起多镜头制作' : '多镜头制作' }}</strong><small>把视频拆成几个镜头，选中后在右侧编辑</small></span>
+              <span class="professional-toggle-copy"><strong>{{ shotWorkspaceShown ? '收起多镜头制作' : '多镜头制作' }}</strong><small>把视频拆成几个镜头，选中后在右侧编辑</small></span>
               <span class="professional-toggle-hint" title="把视频拆成几个镜头，每个镜头可单独描述、配图、调整顺序和重新生成">拆成几个镜头，分别描述和重做</span>
-              <input v-model="professionalVideo" type="checkbox" />
+              <input type="checkbox" :checked="shotWorkspaceShown" @change="toggleShotWorkspace" />
               <span class="professional-toggle-chevron"><Icon name="chevronDown" size="sm" /></span>
             </label>
           </template>
@@ -1083,9 +1206,9 @@
           </div>
 
           <button type="button" class="generate-button" :disabled="!canGenerate" @click="startGeneration">
-            <Icon v-if="!selectedGeneration" name="sparkles" size="sm" />
+            <Icon v-if="!generationViewVisible" name="sparkles" size="sm" />
             <span v-else class="button-spinner"></span>
-            {{ selectedGeneration ? '正在生成...' : '开始生成' }}
+            {{ generationViewVisible ? '正在生成...' : '开始生成' }}
           </button>
           <p v-if="professionalVideoReferenceError" class="generation-requirement">{{ professionalVideoReferenceError }}</p>
         </div>
@@ -1109,7 +1232,7 @@
         aria-label="上一张"
         @click.stop="stepPreview(-1)"
       ><Icon name="chevronLeft" size="md" /></button>
-      <CreatorImage class="image-preview-content" :src="previewUrl" :cache-key="previewImageCacheKey" alt="生成图片预览" preview />
+      <CreatorImage class="image-preview-content" :src="previewUrl" :cache-key="previewImageCacheKey" :pending="savingImageSources.has(previewUrl)" alt="生成图片预览" preview />
       <button
         v-if="previewOutputs.length > 1"
         type="button"
@@ -1183,13 +1306,24 @@
             <h4>图像比例</h4>
             <div class="image-ratio-grid">
               <button
+                v-if="imageCapability === 'image2' && imageReferenceDimensions"
+                type="button"
+                :class="{ active: imageSizeDraftFollowReference }"
+                :disabled="!referenceFollowSize(imageSizeDraftResolution)"
+                :title="referenceFollowSize(imageSizeDraftResolution) ? `按参考图比例输出 ${referenceFollowSize(imageSizeDraftResolution)?.replace('x', '×')}` : '原图比例在此档位超出像素限制，请选择 2K 或 4K'"
+                @click="imageSizeDraftFollowReference = true"
+              >
+                <i :style="ratioShapeStyle(`${imageReferenceDimensions.width}:${imageReferenceDimensions.height}`)"></i>
+                <span>跟随原图</span>
+              </button>
+              <button
                 v-for="option in imageDialogRatioOptions"
                 :key="option.value"
                 type="button"
-                :class="{ active: imageSizeDraftRatio === option.value }"
+                :class="{ active: !imageSizeDraftFollowReference && imageSizeDraftRatio === option.value }"
                 :disabled="!isImageRatioAvailable(imageSizeDraftResolution, option.value)"
                 :title="isImageRatioAvailable(imageSizeDraftResolution, option.value) ? undefined : '此比例请选择 2K 或 4K'"
-                @click="imageSizeDraftRatio = option.value"
+                @click="imageSizeDraftRatio = option.value; imageSizeDraftFollowReference = false"
               >
                 <i :style="ratioShapeStyle(option.value)"></i>
                 <span>{{ option.value === 'auto' ? '自动比例' : option.value }}</span>
@@ -1267,7 +1401,7 @@
             >自定义比例</button>
           </div>
           <p v-if="videoUsesSourceImage" class="image-size-tier-hint video-aspect-source-hint">
-            {{ videoFollowSourceDraft ? '图生视频会跟随原图比例输出。' : '原图会按所选比例居中裁剪后再生成视频。' }}
+            {{ videoFollowSourceDraft ? '视频会跟随原图比例输出，原图将作为视频首帧。' : '原图会按所选比例居中裁剪后作为视频首帧。' }}
           </p>
           <div class="image-ratio-grid video-ratio-grid">
             <button
@@ -1309,7 +1443,6 @@
 
 <script setup lang="ts">
 import { computed, reactive, nextTick, onActivated, onDeactivated, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { observeElementRect, useVirtualizer } from '@tanstack/vue-virtual'
 import { useMediaQuery, useResizeObserver, useScrollLock } from '@vueuse/core'
 import CreatorImage from '@/components/common/CreatorImage.vue'
 import CreatorVideoPlayer from '@/components/common/CreatorVideoPlayer.vue'
@@ -1329,6 +1462,7 @@ import {
   submitCreatorImageTask,
   type ImageGenerationResult,
   getCreatorImagePricing,
+  getCreatorMiniMaxCatalog,
   getCreatorSeedanceCatalog,
   getCreatorVideoPricing,
   type CreatorVideoPricing,
@@ -1338,14 +1472,18 @@ import {
   listCreatorModels,
 } from '@/api/creator'
 import {
+  applyMiniMaxCatalog,
+  isLegacyMiniMaxH3Model,
   isMiniMaxH3Model,
-  isMiniMaxH3StudioModel,
   MINIMAX_H3_ASPECT_RATIOS,
   MINIMAX_H3_MAX_REFERENCE_IMAGES,
-  MINIMAX_H3_STUDIO_MODELS,
+  miniMaxCatalogModels,
+  miniMaxFallbackModels,
   miniMaxH3Tier,
+  miniMaxTierHint,
 } from '@/utils/miniMaxH3'
-import { applySeedanceCatalog, isGrokRelayVideoModel, isSeedanceVideoModel, SEEDANCE_VIDEO_PRICE_FAMILY, seedanceCatalogModels, seedanceFallbackModels, seedanceTierHint, seedanceVideoTier, snapSeedanceSeconds } from '@/utils/seedanceVideo'
+import { orderImageFallbackModels } from '@/utils/imageFallbackModels'
+import { applySeedanceCatalog, isGrokRelayVideoModel, isMuseVideoModel, isSeedanceVideoModel, SEEDANCE_VIDEO_PRICE_FAMILY, seedanceFallbackModels, seedanceTierHint, seedanceVideoTier, snapSeedanceSeconds, sortSeedanceModels } from '@/utils/seedanceVideo'
 import {
   creatorHistory,
   type CreatorHistoryItem,
@@ -1362,10 +1500,12 @@ import { imagePromptCategories, videoPromptCategories, type PromptCategory } fro
 import { useAppStore } from '@/stores/app'
 import type { ApiKey, Group } from '@/types'
 import { formatScaled } from '@/utils/pricing'
+import { getCreatorCosts } from '@/api/usage'
+import { needsSeekableReencode } from '@/services/videoKeyframes'
 
 type StudioMode = 'image' | 'video'
 type ImageCapability = 'grok' | 'image2' | 'banner'
-type VideoCapability = 'grok' | 'minimax' | 'seedance'
+type VideoCapability = 'grok' | 'minimax' | 'muse' | 'seedance'
 type GenerationPhase = 'submitting' | 'generating'
 type ImageSizeMode = 'auto' | 'ratio' | 'custom'
 type VideoGenerationMethod = 'text' | 'image' | 'reference'
@@ -1373,6 +1513,9 @@ type VideoGenerationMethod = 'text' | 'image' | 'reference'
 const MAX_REFERENCE_IMAGE_SIZE_MB = 10
 const MAX_REFERENCE_IMAGE_SIZE_BYTES = MAX_REFERENCE_IMAGE_SIZE_MB * 1024 * 1024
 const VIDEO_SUBMISSION_RETRY_DELAYS_MS = [2000, 5000] as const
+// A video task that failed because the provider could not read its reference
+// image is submitted again this many times.
+const VIDEO_IMAGE_FETCH_RESUBMITS = 2
 // A submitted task keeps rendering upstream, so a few failed status checks
 // must not discard it (H3 renders for minutes and one 502 is common).
 const VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES = 5
@@ -1382,6 +1525,12 @@ const VIDEO_CONTENT_RETRY_DELAYS_MS = [3000, 8000] as const
 const VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE = '视频已生成，但下载时连接中断。点击“重新加载视频”即可继续获取，不会重复扣费，无需重新生成。'
 
 class VideoContentDownloadError extends Error {}
+// The task could not be read for a while (gateway or relay briefly down); the
+// task itself is unaffected and may still be rendering or already finished.
+class VideoStatusLookupError extends Error {}
+// A pending video whose status cannot be read keeps tracking in the background
+// for about ten minutes before asking the user to sync by hand.
+const VIDEO_TRACKING_RETRY_DELAYS_MS = [10000, 20000, 40000, 60000, 120000, 120000, 120000, 120000] as const
 
 interface PromptTemplate {
   title: string
@@ -1424,6 +1573,7 @@ interface ImageGenerationSnapshot {
   aspectRatio: string
   resolution: string
   sizeMode: ImageSizeMode
+  fallbackModels?: string[]
 }
 
 interface VideoGenerationSnapshot {
@@ -1445,8 +1595,19 @@ interface ResumedVideoShots {
   requestIds: string[]
   shotIndexes: number[]
   outputBlobs: Blob[]
+  // URLs the finished shots already play from; reusing them keeps those players as they are.
+  outputUrls?: string[]
   failedShots: number[]
   lastError?: unknown
+  // Finished shots being redrawn, by shot index: put back if the redraw fails.
+  redrawFallbacks?: Map<number, RedrawnShot>
+}
+
+// The original video of a shot being redrawn.
+interface RedrawnShot {
+  blob: Blob
+  url: string
+  requestId: string
 }
 
 const imageTemplates: PromptTemplate[] = [
@@ -1655,16 +1816,19 @@ const videoTemplates: PromptTemplate[] = [
   { title: '远山后拉', tag: '风光空镜', subtitle: '缓慢后拉 · 片尾留白', prompt: '傍晚连绵远山的层层剪影由深蓝渐变到浅蓝灰，山谷间薄雾缓缓流动，镜头缓慢向后拉开并略微上升，画面上方逐渐留出大片淡橙色天空。运动平稳，结尾停稳，适合片尾落版和视频背景。' },
 ]
 
+const MUSE_VIDEO_MODEL = 'muse-video'
+
 const videoCapabilities: Array<{ id: VideoCapability; label: string; disabled?: boolean }> = [
-  { id: 'seedance', label: 'Seedance 视频' },
-  { id: 'grok', label: 'Grok 视频' },
-  { id: 'minimax', label: 'MiniMax H3 视频' },
+  { id: 'seedance', label: 'Seedance' },
+  { id: 'grok', label: 'Grok' },
+  { id: 'minimax', label: 'MiniMax H3' },
+  { id: 'muse', label: 'Muse' },
 ]
 
 const imageCapabilities: Array<{ id: ImageCapability; label: string }> = [
-  { id: 'image2', label: 'Image 生图' },
-  { id: 'grok', label: 'Grok 生图' },
-  { id: 'banner', label: 'Banner 生图' },
+  { id: 'image2', label: 'Image' },
+  { id: 'grok', label: 'Grok' },
+  { id: 'banner', label: 'Banner' },
 ]
 
 const defaultAspectOptions = [
@@ -1739,9 +1903,12 @@ const studioMode = ref<StudioMode>('image')
 const historyFilter = ref<StudioMode>('image')
 const imageCapability = ref<ImageCapability>('image2')
 const videoCapability = ref<VideoCapability>('seedance')
-const historyCollapsed = ref(false)
 // Below 1120px the history column is hidden; the panel opens as a drawer instead.
 const compactHistory = useMediaQuery('(max-width: 1120px)')
+// Wide screens open with the history column; narrower desktops start collapsed so the canvas keeps its room.
+const narrowHistory = useMediaQuery('(max-width: 1599px)')
+const historyCollapsed = ref(true)
+watch(narrowHistory, narrow => { historyCollapsed.value = narrow }, { immediate: true })
 const phoneHistory = useMediaQuery('(max-width: 800px)')
 const historyDrawerOpen = ref(false)
 const historyDragOffset = ref(0)
@@ -1769,6 +1936,10 @@ const videoResolutionDraft = ref('720p')
 const imageSizeDraftMode = ref<ImageSizeMode>('ratio')
 const imageSizeDraftResolution = ref('1K')
 const imageSizeDraftRatio = ref('1:1')
+const imageSizeDraftFollowReference = ref(false)
+// GPT Image ratio mode can follow the first reference image's exact shape at the chosen tier.
+const imageFollowReference = ref(false)
+const imageReferenceDimensions = ref<{ width: number; height: number } | null>(null)
 const imageSizeDraftWidth = ref(1024)
 const imageSizeDraftHeight = ref(1024)
 const videoResolution = ref('720p')
@@ -1790,14 +1961,11 @@ function clampGifSetting(value: unknown, range: { min: number; max: number; fall
 watch(outputFormat, (format, previous) => {
   if (format === 'gif' && previous !== 'gif' && imageCapability.value === 'image2') imageSizeMode.value = 'auto'
 })
-// SVG output is generations-only; the edits endpoint (used with reference images) cannot return it.
-watch(() => referenceImages.value.length, count => {
-  if (count > 0 && outputFormat.value === 'svg') {
-    outputFormat.value = 'png'
-    // Reusing a work includes the format change in its success notification.
-    if (!referencingOutputKey.value) appStore.showWarning('SVG 输出不支持参考图，已切换为 PNG')
-  }
-})
+// SVG output was withdrawn because no upstream channel honors it; old SVG works
+// are regenerated as PNG.
+function availableImageOutputFormat(format?: string) {
+  return !format || format === 'svg' ? 'png' : format
+}
 const outputCount = ref(1)
 const videoDuration = ref(8)
 const professionalVideo = ref(false)
@@ -1814,24 +1982,128 @@ const videoShots = ref<VideoShot[]>([{
 const selectedShotId = ref(videoShots.value[0].id)
 const historyItems = ref<CreatorHistoryItem[]>([])
 const selectedWork = ref<CreatorHistoryItem | null>(null)
-const promptExpanded = ref(false)
-watch(() => selectedWork.value?.id, () => { promptExpanded.value = false })
+// A selected result stays in the center until the user opens the shot editor with the toggle.
+const shotWorkspaceOpen = ref(false)
+const shotWorkspaceShown = computed(() => professionalVideo.value && (!selectedWork.value || shotWorkspaceOpen.value))
+watch(() => selectedWork.value?.id, () => { shotWorkspaceOpen.value = false })
+function toggleShotWorkspace() {
+  if (shotWorkspaceShown.value) {
+    // With a result selected, collapsing returns to it while keeping its shots for the next open.
+    if (selectedWork.value) shotWorkspaceOpen.value = false
+    else professionalVideo.value = false
+    return
+  }
+  // A prompt written before opening the shot editor becomes the first shot's description.
+  const [firstShot] = videoShots.value
+  const draftPrompt = prompt.value.trim()
+  if (videoShots.value.length === 1 && firstShot && !firstShot.prompt.trim() && draftPrompt) {
+    firstShot.prompt = prompt.value
+  }
+  professionalVideo.value = true
+  shotWorkspaceOpen.value = true
+}
+watch(() => selectedWork.value?.id, () => {
+  // Switching works must never carry an armed delete over to the next one.
+  clearDeleteConfirm()
+})
 const localSaveWarning = ref('')
+// Work whose image-save failure the banner currently shows; dismissing it is remembered per work.
+const localSaveWarningWorkId = ref<string | null>(null)
+const DISMISSED_SAVE_WARNINGS_KEY = 'creator-studio-dismissed-save-warnings'
+const MAX_DISMISSED_SAVE_WARNINGS = 500
+function readDismissedSaveWarnings(): string[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DISMISSED_SAVE_WARNINGS_KEY) || '[]')
+    return Array.isArray(parsed) ? parsed.filter((id): id is string => typeof id === 'string') : []
+  } catch { return [] }
+}
+function writeDismissedSaveWarnings(ids: string[]) {
+  try { localStorage.setItem(DISMISSED_SAVE_WARNINGS_KEY, JSON.stringify(ids.slice(-MAX_DISMISSED_SAVE_WARNINGS))) } catch { /* storage unavailable */ }
+}
+function showImageSaveWarning(work: CreatorHistoryItem, force = false) {
+  if (!work.imagePersistenceError || (!force && readDismissedSaveWarnings().includes(work.id))) return
+  localSaveWarning.value = work.imagePersistenceError
+  localSaveWarningWorkId.value = work.id
+}
+const retryingLocalSave = ref(false)
+// The banner may name a work other than the one on screen (a batch finishing
+// in the background), so its actions target that work, not the selection.
+const localSaveWarningWork = computed(() => {
+  const id = localSaveWarningWorkId.value
+  return id ? historyItems.value.find(item => item.id === id && item.type === 'image') || null : null
+})
+const localSaveRetryTarget = computed(() => localSaveWarningWork.value
+  || (!localSaveWarningWorkId.value && selectedWork.value?.type === 'image' ? selectedWork.value : null))
+function openLocalSaveWarningWork() {
+  const work = localSaveWarningWork.value
+  if (work) void selectWork(work)
+}
+// Turns a failed original-image download into a reason the user can act on.
+function imageSaveFailureReason(error: unknown, hasKey = true) {
+  if (!hasKey) return '找不到生成该作品时使用的 Key（可能已删除或停用），无法通过服务器下载原图'
+  const status = typeof error === 'object' && error ? Number((error as { status?: unknown }).status) || 0 : 0
+  const message = errorMessage(error, '')
+  const suffix = status ? `（HTTP ${status}）` : ''
+  if (status === 401 || status === 403) return `当前 Key 无权下载该图片，Key 可能已停用、过期或额度不足${suffix}`
+  if (status === 413) return `图片超过服务器允许下载的大小上限${suffix}`
+  if (status === 400 && /not allowed|invalid/i.test(message)) return `图片链接无效或不在允许下载的地址范围内${suffix}`
+  if (/did not return a supported image|返回了无效内容/i.test(message)) return `上游链接返回的已不是图片，临时链接很可能已过期${suffix}`
+  if (status === 502 || status === 504 || /failed to download image/i.test(message)) return `服务器从上游下载图片失败，临时链接可能已过期或上游暂时不可用${suffix}`
+  if (error instanceof TypeError || /failed to fetch|network/i.test(message)) return '网络连接失败，无法访问图片下载接口'
+  return `${message || '未知错误'}${suffix}`
+}
+function imageSaveFailureMessage(work: CreatorHistoryItem, reason: string) {
+  const title = work.prompt.trim().replace(/\s+/g, ' ')
+  const label = title ? `作品「${title.length > 24 ? `${title.slice(0, 24)}…` : title}」` : '该作品'
+  return `${label}的原图未能保存到浏览器本地：${reason}。目前显示的是上游临时链接，过期后将无法恢复，请重试保存，或打开作品立即下载原图。`
+}
+function dismissLocalSaveWarning() {
+  const workId = localSaveWarningWorkId.value
+  if (workId) writeDismissedSaveWarnings([...readDismissedSaveWarnings().filter(id => id !== workId), workId])
+  localSaveWarning.value = ''
+  localSaveWarningWorkId.value = null
+}
 const imageDownloads = new Map<string, Promise<Blob>>()
 const historicalImageSaves = new Map<string, Promise<void>>()
 let historicalImageRecoveryRunning = false
 const referencingOutputKey = ref('')
 const downloadingOutputKey = ref('')
+// Result card players, keyed by grid and output index, so a card's fullscreen button opens its own video.
+type ResultPlayer = { playFullscreen: () => Promise<void> }
+const resultPlayers = new Map<string, ResultPlayer>()
+
+function setResultPlayer(key: string, el: unknown) {
+  if (el && typeof (el as Partial<ResultPlayer>).playFullscreen === 'function') resultPlayers.set(key, el as ResultPlayer)
+  else resultPlayers.delete(key)
+}
+
+function playResultFullscreen(key: string) {
+  void resultPlayers.get(key)?.playFullscreen()
+}
+
+// Sound is per card: muting one shot leaves the others alone. Keyed by work id + grid + index.
+// The starting state is read once so toggling one card never changes cards the user hasn't touched.
+const resultPlayerMuted = reactive<Record<string, boolean>>({})
+
+function isResultPlayerMuted(key: string) {
+  return resultPlayerMuted[key] ?? false
+}
+
+function setResultPlayerMuted(key: string, value: boolean) {
+  resultPlayerMuted[key] = value
+}
 const activeTemplateIndex = ref(0)
 const briefPromptElement = ref<HTMLElement | null>(null)
 const briefPromptClipped = ref(false)
 const briefBodyElement = ref<HTMLElement | null>(null)
 const briefBodyHeight = ref(0)
 const bootstrapping = ref(false)
+/** False until the first local history read finishes, so the list does not flash "empty". */
+const historyLoaded = ref(false)
+let initialHistorySync: Promise<void> | undefined
 const loadingModels = ref(false)
 const creatingKey = ref(false)
 const processingReferenceImages = ref(false)
-const regeneratingWorkId = ref('')
 interface GenerationTask {
   id: string
   mode: StudioMode
@@ -1843,25 +2115,54 @@ interface GenerationTask {
   startedAt: number
   /** Images of this task that failed; their frames are marked instead of drawing. */
   failedCount?: number
-  /** Video shots that finished; indexed by original shot number. */
-  shotOutputs?: Map<number, string>
-  /** Video shots that failed upstream (not download interruptions). */
-  failedShots?: Set<number>
+  /** Progress of each video shot by original shot number; a single shot reports into the task itself. */
+  shotTasks?: GenerationTask[]
+  // Redrawn images that failed and got their original image back.
+  restoredRedraws?: number
 }
 // Each request owns its state and immutable inputs. Browsing or starting another
 // creation only changes the selection, never the request that is already running.
 const activeGenerations = reactive(new Map<string, GenerationTask>())
 const selectedGeneration = computed(() => selectedWork.value ? activeGenerations.get(selectedWork.value.id) : undefined)
+// The full-page progress view; on phones it replaces the settings below it.
+const generationViewVisible = computed(() => !!(selectedGeneration.value && selectedWork.value && !isInPlaceRetry(selectedWork.value)))
+// A finished (or failed) work is open in the canvas; on mobile the settings stay hidden
+// until the user starts a new creation or brings the prompt back into the editor.
+const resultWorkspaceVisible = computed(() => !generationViewVisible.value && !!selectedWork.value && !(studioMode.value === 'video' && shotWorkspaceShown.value))
 const activeGenerationCounts = computed(() => {
   const counts: Record<StudioMode, number> = { image: 0, video: 0 }
   for (const task of activeGenerations.values()) counts[task.mode]++
   return counts
 })
-const generationMode = computed(() => selectedGeneration.value?.mode)
-const generationPhase = computed(() => selectedGeneration.value?.phase)
+function isDrawingEntry(entry: { output: string; state: string }) {
+  return generationViewVisible.value && !entry.output && entry.state === 'pending'
+}
+// While a run is on screen an image only counts as done once its original is
+// saved in this browser, matching the history list's "已完成 n 张".
+const settledOutputCount = computed(() => selectedWork.value?.outputs.filter(output => output && !savingImageSources.has(output)).length || 0)
 const generationProgress = computed(() => selectedGeneration.value?.progress)
-const generationHasExactProgress = computed(() => selectedGeneration.value?.hasExactProgress)
-const generationPercent = computed(() => selectedGeneration.value?.percent || 0)
+// The heading already shows "已完成 n / m" in its pill, so drop the repeated count from the progress line and keep only a failure note.
+// The heading keeps the phase short; counts, failures and time live in the pills beside it.
+const headingProgress = computed(() => {
+  const progress = generationProgress.value
+  const work = selectedWork.value
+  const total = resultEntries.value.length
+  // The count pill beside the title already shows how many images are done, so the title never repeats a count.
+  const drawing = !progress || progress.startsWith('正在同时生成') || progress.startsWith('正在生成第')
+  // Every image is on screen and only saving is left: say so instead of "still generating".
+  if (work && total > 1 && work.outputs.length >= total && drawing) return '正在保存'
+  if (drawing) return '正在生成'
+  if (progress.startsWith('图片已生成')) return '正在保存'
+  if (progress.startsWith('正在提交') || progress.startsWith('正在重新提交')) return '正在提交'
+  if (progress.startsWith('正在同步')) return '正在同步'
+  // Video phases; each shot card shows its own queue position and percentage.
+  if (progress.startsWith('正在按镜头顺序生成')) return '正在生成'
+  if (progress.startsWith('任务已提交') || progress.startsWith('任务正在排队')) return '正在排队'
+  if (progress.startsWith('视频已生成') || progress.startsWith('正在优化视频')) return '正在加载'
+  if (progress.endsWith('正在合成完整视频')) return '正在合成'
+  return progress
+})
+const headingFailedCount = computed(() => Number(generationProgress.value?.match(/(\d+) [张个]失败/)?.[1] || 0))
 const generationStartedAt = computed(() => selectedGeneration.value?.startedAt || 0)
 const modeSelections: Record<StudioMode, string | null> = { image: null, video: null }
 const generationClock = ref(Date.now())
@@ -1869,14 +2170,39 @@ const checkingVideoHistory = ref(false)
 const videoHistoryFeedback = ref<{ workId: string; tone: 'pending' | 'error'; message: string } | null>(null)
 const loadingVideoWorkId = ref('')
 const composingWorkId = ref('')
+const manualComposeWorkId = ref('')
+// Complete videos whose first frame has loaded; their card can be shown without a loading state.
+const readyCompleteVideos = ref(new Set<string>())
 const previewUrl = ref('')
 const previewOutputs = computed(() => selectedWork.value?.outputs ?? [])
 const previewIndex = computed(() => previewOutputs.value.indexOf(previewUrl.value))
 const previewImageCacheKey = computed(() => {
   const work = selectedWork.value
   const index = previewIndex.value
-  return work && index >= 0 ? `${work.id}:${work.updatedAt}:${index}` : undefined
+  return work && index >= 0 ? resultImageCacheKey(work, index) : undefined
 })
+
+// Keyed by slot and image content, not updatedAt: retrying one slot updates the
+// work, and the finished images must not reload (and flash their loader) for it.
+function resultImageCacheKey(work: CreatorHistoryItem, outputIndex: number) {
+  const output = work.outputs[outputIndex] || ''
+  const slot = work.type === 'image' ? work.imageOutputIndexes?.[outputIndex] ?? outputIndex : outputIndex
+  return `${work.id}:${slot}:${output.length}:${output.slice(-48)}`
+}
+
+// The history cover is the lowest-numbered image, counting one being redrawn as its original,
+// so starting a redraw does not swap the cover and make the thumbnail reload.
+function historyImageCover(work: CreatorHistoryItem) {
+  if (work.type !== 'image') return null
+  const shown = withRedrawnOriginals(work)
+  let best = -1
+  shown.outputs.forEach((output, index) => {
+    if (!output) return
+    const slot = shown.imageOutputIndexes?.[index] ?? index
+    if (best < 0 || slot < (shown.imageOutputIndexes?.[best] ?? best)) best = index
+  })
+  return best < 0 ? null : { src: shown.outputs[best], cacheKey: resultImageCacheKey(shown, best) }
+}
 
 function openPreview(output: string) {
   previewUrl.value = output
@@ -1923,6 +2249,10 @@ const isDragging = ref(false)
 let modelRequestSequence = 0
 let referenceUploadSequence = 0
 let disposed = false
+// Leaving the studio only stops this page's polling; the server task keeps
+// rendering, so this is never a generation failure.
+const PAGE_CLOSED_MESSAGE = '页面已关闭，任务可稍后从历史记录继续查看'
+const pendingDisposableDelays = new Set<() => void>()
 let unsubscribeHistory: (() => void) | undefined
 let unsubscribeExternalHistory: (() => void) | undefined
 let externalHistoryQueue: Promise<void> = Promise.resolve()
@@ -1950,6 +2280,8 @@ let generationTimer: number | undefined
 let templateAutoplayTimer: number | undefined
 let restoreSettingsSequence = 0
 const restoringWorkSettings = ref(false)
+const regeneratingShotKeys = reactive(new Set<string>())
+const regeneratingImageKeys = reactive(new Set<string>())
 const transientObjectUrls = new Set<string>()
 const blobObjectUrls = new WeakMap<Blob, string>()
 
@@ -1959,6 +2291,11 @@ const activePromptCategories = computed(() => studioMode.value === 'image' ? ima
 const selectedVideoHistoryFeedback = computed(() => (
   videoHistoryFeedback.value?.workId === selectedWork.value?.id ? videoHistoryFeedback.value : null
 ))
+const checkingSelectedVideoStatus = computed(() => {
+  const work = selectedWork.value
+  return Boolean(work && work.type === 'video' && work.status === 'pending'
+    && checkingVideoHistory.value && loadingVideoWorkId.value === work.id)
+})
 const promptTemplatePageSize = 6
 const promptTemplatePageCount = computed(() => Math.max(1, Math.ceil(activeTemplates.value.length / promptTemplatePageSize)))
 const visiblePromptTemplates = computed(() => {
@@ -1993,9 +2330,8 @@ const videoDurationRange = computed(() => selectedVideoRelayTier.value
   ? { min: selectedVideoRelayTier.value.minSeconds, max: selectedVideoRelayTier.value.maxSeconds }
   : { min: 1, max: 15 })
 const selectedSeedanceTier = computed(() => studioMode.value === 'video' ? seedanceVideoTier(selectedModel.value) : null)
-const selectedMiniMaxTierHint = computed(() => studioMode.value === 'video'
-  ? miniMaxH3Tier(selectedModel.value)?.label.split(' · ').slice(1).join(' · ') || ''
-  : '')
+const selectedMiniMaxTier = computed(() => studioMode.value === 'video' ? miniMaxH3Tier(selectedModel.value) : null)
+const selectedMiniMaxTierHint = computed(() => selectedMiniMaxTier.value ? miniMaxTierHint(selectedMiniMaxTier.value) : '')
 const videoAspectRatios = computed(() => selectedVideoRelayTier.value
   ? selectedVideoRelayTier.value.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
   : GROK_VIDEO_ASPECT_RATIOS)
@@ -2003,12 +2339,12 @@ const videoAspectRatios = computed(() => selectedVideoRelayTier.value
 const videoAspectChoices = computed(() => selectedVideoRelayTier.value
   ? videoAspectOptions.filter(option => videoAspectRatios.value.includes(option.value))
   : videoAspectOptions)
+const firstFrameVideoSupported = computed(() => supportsFirstFrameVideo(selectedModel.value))
+const referenceVideoSupported = computed(() => supportsReferenceVideo(selectedModel.value))
 const referenceVideoImageLimit = computed(() => selectedVideoRelayTier.value
-  ? selectedSeedanceTier.value?.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES
+  ? selectedVideoRelayTier.value.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES
   : 7)
-// Text-only Seedance lines refuse reference images.
-const relayTierAcceptsUploads = computed(() => selectedSeedanceTier.value?.supportsUploadedReferences ?? true)
-const relayTierRequiresReference = computed(() => Boolean(studioMode.value === 'video' && miniMaxH3Tier(selectedModel.value)?.requiresReference))
+const relayTierRequiresReference = computed(() => Boolean(selectedMiniMaxTier.value?.requiresReference))
 const aspectOptions = computed(() => {
   if (studioMode.value === 'image') {
     return image2SizeOptions[imageResolution.value] || image2SizeOptions['1K']
@@ -2016,9 +2352,16 @@ const aspectOptions = computed(() => {
   return defaultAspectOptions
 })
 const imageDialogRatioOptions = image2RatioOptions
+const imageFollowsReference = computed(() => studioMode.value === 'image'
+  && imageCapability.value === 'image2'
+  && imageSizeMode.value === 'ratio'
+  && imageFollowReference.value
+  && referenceImages.value.length > 0
+  && Boolean(referenceFollowSize(imageResolution.value)))
 const imageSizeTriggerLabel = computed(() => {
   if (imageCapability.value === 'image2' && imageSizeMode.value === 'auto') return '自动'
   const size = sizeForImage().replace('x', '×')
+  if (imageFollowsReference.value) return `${imageResolution.value} · 跟随原图`
   return imageCapability.value === 'image2' && imageSizeMode.value === 'custom' ? `自定义 · ${size}` : `${imageResolution.value} · ${size}`
 })
 const imageSizeDraftResult = computed(() => {
@@ -2026,6 +2369,10 @@ const imageSizeDraftResult = computed(() => {
   if (imageSizeDraftMode.value === 'custom') {
     const [width, height] = normalizeCustomImageSize(imageSizeDraftWidth.value, imageSizeDraftHeight.value)
     return `${width}x${height}`
+  }
+  if (imageSizeDraftFollowReference.value) {
+    const followSize = referenceFollowSize(imageSizeDraftResolution.value)
+    if (followSize) return followSize
   }
   return image2SizeFor(imageSizeDraftResolution.value, imageSizeDraftRatio.value)
 })
@@ -2092,12 +2439,11 @@ const maxReferenceImages = computed(() => {
   if (imageCapability.value === 'image2') return 16
   return 3
 })
-// GPT Image 2.6 SVG output only allows n=1.
-const maxOutputCount = computed(() => (imageCapability.value === 'image2' && outputFormat.value === 'svg') || isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
+const maxOutputCount = computed(() => isSingleOutputImageModel(selectedModel.value, imageResolution.value, imageCapability.value) ? 1 : 4)
 const referenceFieldVisible = computed(() => studioMode.value === 'image' || activeVideoGenerationMethod.value !== 'text')
-const referenceFieldLabel = computed(() => studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image' ? '源图' : '参考图')
+const referenceFieldLabel = computed(() => studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image' ? '首帧图' : '参考图')
 const referenceHint = computed(() => {
-  if (studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image') return '必选，仅 1 张，作为当前镜头首帧'
+  if (studioMode.value === 'video' && activeVideoGenerationMethod.value === 'image') return professionalVideo.value ? '必选，仅 1 张，作为当前镜头首帧' : '必选，仅 1 张，作为视频首帧'
   if (studioMode.value === 'video') return `必选，最多 ${referenceVideoImageLimit.value} 张`
   return `可选，最多 ${maxReferenceImages.value} 张`
 })
@@ -2175,30 +2521,41 @@ const imageHistoryCount = computed(() => historyItems.value.filter(item => item.
 const videoHistoryCount = computed(() => historyItems.value.filter(item => item.type === 'video').length)
 const visibleHistory = computed(() => historyItems.value.filter(item => item.type === historyFilter.value))
 const historyListElement = ref<HTMLElement | null>(null)
-const virtualizeHistory = computed(() => visibleHistory.value.length > 20)
-const historyVirtualizer = useVirtualizer<HTMLElement, HTMLElement>(computed(() => ({
-  enabled: virtualizeHistory.value && !historyListHidden.value,
-  count: virtualizeHistory.value ? visibleHistory.value.length : 0,
-  getScrollElement: () => historyListElement.value,
-  getItemKey: (index: number) => visibleHistory.value[index].id,
-  estimateSize: () => 78,
-  overscan: 3,
-  initialRect: { width: 0, height: 600 },
-  observeElementRect: (instance, callback) => observeElementRect(instance, rect => {
-    if (rect.height > 0) callback(rect)
-  }),
-})))
-const historyVirtualRows = computed(() => historyVirtualizer.value.getVirtualItems())
-const renderedHistory = computed(() => virtualizeHistory.value
-  ? historyVirtualRows.value.map(row => visibleHistory.value[row.index])
-  : visibleHistory.value)
-const historyPaddingTop = computed(() => virtualizeHistory.value ? historyVirtualRows.value[0]?.start || 0 : 0)
-const historyPaddingBottom = computed(() => virtualizeHistory.value
-  ? Math.max(0, historyVirtualizer.value.getTotalSize() - (historyVirtualRows.value.at(-1)?.end || 0))
-  : 0)
-watch(historyFilter, () => {
-  historyVirtualizer.value.scrollToOffset(0)
-}, { flush: 'post' })
+// Only the shown page reads its originals from IndexedDB, so a long history
+// opens as fast as a short one; other pages load when the user turns to them.
+const HISTORY_PAGE_SIZE = 20
+const historyPage = ref(1)
+const historyPageCount = computed(() => Math.max(1, Math.ceil(visibleHistory.value.length / HISTORY_PAGE_SIZE)))
+const pagedHistory = computed(() => visibleHistory.value.slice((historyPage.value - 1) * HISTORY_PAGE_SIZE, historyPage.value * HISTORY_PAGE_SIZE))
+/** Page numbers to show; 0 marks a gap. */
+const historyPageButtons = computed(() => {
+  const count = historyPageCount.value
+  const current = historyPage.value
+  if (count <= 7) return Array.from({ length: count }, (_, index) => index + 1)
+  const start = Math.max(2, Math.min(current - 1, count - 4))
+  const end = Math.min(count - 1, Math.max(current + 1, 5))
+  return [1, ...(start > 2 ? [0] : []), ...Array.from({ length: end - start + 1 }, (_, index) => start + index), ...(end < count - 1 ? [0] : []), count]
+})
+
+function goHistoryPage(page: number) {
+  historyPage.value = Math.min(Math.max(1, page), historyPageCount.value)
+}
+
+watch(historyPage, () => {
+  void nextTick(() => historyListElement.value?.scrollTo?.({ top: 0 }))
+})
+watch(historyFilter, () => { historyPage.value = 1 })
+watch(historyPageCount, count => { if (historyPage.value > count) historyPage.value = count })
+// Show the page holding a newly selected work (a new task, or a mode switch).
+watch(() => selectedWork.value?.id, id => {
+  const index = id ? visibleHistory.value.findIndex(work => work.id === id) : -1
+  if (index >= 0) historyPage.value = Math.floor(index / HISTORY_PAGE_SIZE) + 1
+})
+watch(pagedHistory, works => {
+  for (const work of works) {
+    if (work.imageOutputsPending) void loadHistoryImages(work).catch(error => console.warn('[creator] failed to read history images', error))
+  }
+}, { immediate: true })
 const totalShotDuration = computed(() => videoShots.value.reduce((sum, shot) => sum + Number(shot.duration || 0), 0))
 const editorPrompt = computed({
   get: () => studioMode.value === 'video' && professionalVideo.value
@@ -2260,6 +2617,38 @@ function videoShotPrice(resolution: string, duration: number) {
   const cost = videoPricing.value?.prices[resolution]?.[Number(duration) - 1]
   return cost != null && Number.isFinite(cost) ? cost : null
 }
+// The MiniMax picker lists several separately priced tiers, so each option is
+// quoted on its own (keyed by model, cleared when the API key changes).
+const videoOptionQuotes = ref<Record<string, CreatorVideoPricing>>({})
+let videoOptionQuotesKey = ''
+async function loadVideoOptionQuotes() {
+  const apiKey = selectedApiKey.value?.key || ''
+  if (apiKey !== videoOptionQuotesKey) {
+    videoOptionQuotesKey = apiKey
+    videoOptionQuotes.value = {}
+  }
+  if (studioMode.value !== 'video' || videoCapability.value !== 'minimax' || !apiKey) return
+  const missing = selectableModelOptions.value.filter(model => isMiniMaxH3Model(model) && !(model in videoOptionQuotes.value))
+  await Promise.all(missing.map(async model => {
+    try {
+      const quote = await getCreatorVideoPricing(apiKey, model)
+      if (videoOptionQuotesKey === apiKey) videoOptionQuotes.value = { ...videoOptionQuotes.value, [model]: quote }
+    } catch {
+      // The option keeps its plain name; the selected model's quote still shows below.
+    }
+  }))
+}
+// Unit price for a MiniMax option: per second for 按秒 tiers, per clip for 按条.
+function miniMaxOptionPriceLabel(model: string) {
+  const tier = miniMaxH3Tier(model)
+  const quote = videoOptionQuotes.value[model] || (model === selectedModel.value ? videoPricing.value : null)
+  const prices = tier ? quote?.prices[tier.resolution] : undefined
+  if (!tier || !prices) return ''
+  const index = prices.findIndex(cost => cost != null && Number.isFinite(cost))
+  if (index < 0) return ''
+  const amount = tier.perRequest ? prices[index]! : prices[index]! / (index + 1)
+  return ` · ${formatScaled(amount, 1, 2).replace(/^\$/, '')}/${tier.perRequest ? '条' : '秒'}`
+}
 function videoResolutionPriceLabel(resolution: string) {
   if (videoPricingLoading.value) return '正在查询…'
   const cost = videoShotPrice(resolution, configuredVideoDuration.value)
@@ -2313,29 +2702,12 @@ const effectivePrompt = computed(() => {
   }
   return prompt.value.trim()
 })
-const referenceVideoModelOptions = computed(() => modelOptions.value.filter(supportsReferenceVideo))
-const requiresReferenceVideo15 = computed(() => (
-  studioMode.value === 'video'
-  && (professionalVideo.value
-    ? videoShots.value.some(shot => shot.generationMethod === 'reference')
-    : videoGenerationMethod.value === 'reference')
-))
-const selectableModelOptions = computed(() => (
-  requiresReferenceVideo15.value
-    ? referenceVideoModelOptions.value
-    : modelOptions.value
-))
-const referenceVideoModelUnavailable = computed(() => (
-  requiresReferenceVideo15.value
-  && !loadingModels.value
-  && referenceVideoModelOptions.value.length === 0
-))
+const selectableModelOptions = computed(() => modelOptions.value)
 const canGenerate = computed(() => {
-  if (selectedGeneration.value || loadingModels.value || restoringWorkSettings.value || processingReferenceImages.value || !selectedApiKey.value || !selectedModel.value || !effectivePrompt.value || effectivePrompt.value.length > promptLimit.value) return false
-  if (requiresReferenceVideo15.value && !supportsReferenceVideo(selectedModel.value)) return false
+  // Slots redone in place run beside a new creation; only a work still drawing for the first time blocks it.
+  if (generationViewVisible.value || loadingModels.value || restoringWorkSettings.value || processingReferenceImages.value || !selectedApiKey.value || !selectedModel.value || !effectivePrompt.value || effectivePrompt.value.length > promptLimit.value) return false
   if (studioMode.value === 'video' && professionalVideo.value) {
-    return totalShotDuration.value <= 60
-      && videoShots.value.length > 0
+    return videoShots.value.length > 0
       && videoShots.value.every(shot => (
         shot.prompt.trim()
         && shot.prompt.length <= promptLimit.value
@@ -2350,87 +2722,51 @@ const professionalVideoReferenceError = computed(() => {
   const index = videoShots.value.findIndex(shot => shot.generationMethod !== 'text' && !shot.referenceImages.length)
   if (index < 0) return ''
   return videoShots.value[index].generationMethod === 'image'
-    ? `镜头 ${index + 1} 的图生视频需要 1 张源图`
+    ? `镜头 ${index + 1} 的首帧图生视频需要 1 张首帧图`
     : `镜头 ${index + 1} 的参考图生视频至少需要 1 张参考图`
 })
-// One placeholder per requested image or video shot, shaped like the requested ratio, so
-// finished items appear in place while the others are still drawing.
-const generationFrames = computed(() => {
-  const work = selectedWork.value
-  const task = selectedGeneration.value
-  if (!work || !task) return []
-  if (work.type === 'image') {
-    const count = Math.max(1, work.outputCount || 1)
-    const failedFrom = count - (task.failedCount || 0)
-    return Array.from({ length: count }, (_, index) => {
-      const output = work.outputs[index]
-      // All remaining images are requested at once, so every empty frame is drawing.
-      const state = output ? 'done' : index >= failedFrom ? 'failed' : 'current'
-      return { index, output, state }
-    })
+// Keep every requested slot in its original position, including failed requests.
+const showResultEntries = computed(() => !needsVideoDownload(selectedWork.value))
+// While a finished image is redrawn, its card keeps showing the original until the new one arrives.
+function withRedrawnOriginals(work: CreatorHistoryItem): CreatorHistoryItem {
+  if (work.type !== 'image' || !redrawnImageFallbacks.size) return work
+  const slots = work.outputs.map((_, index) => work.imageOutputIndexes?.[index] ?? index)
+  const prefix = `${work.id}:`
+  const kept = [...redrawnImageFallbacks]
+    .filter(([key]) => key.startsWith(prefix))
+    .map(([key, image]) => ({ index: Number(key.slice(prefix.length)), image }))
+    .filter(({ index }) => Number.isInteger(index) && !slots.includes(index))
+  if (!kept.length) return work
+  return {
+    ...work,
+    outputs: [...work.outputs, ...kept.map(({ image }) => image.output)],
+    imageOutputIndexes: [...slots, ...kept.map(({ index }) => index)],
+    imageOutputSizes: [...work.outputs.map((_, index) => work.imageOutputSizes?.[index] || ''), ...kept.map(({ image }) => image.size)],
+    upstreamImageSizes: [...work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || ''), ...kept.map(({ image }) => image.upstreamSize)],
   }
-  // Video: one frame per shot, showing finished shots immediately.
-  const shotCount = work.shotCount || 1
-  if (shotCount === 1) {
-    return [{ index: 0, output: work.outputs[0], state: work.outputs[0] ? 'done' : 'current' }]
-  }
-  return Array.from({ length: shotCount }, (_, index) => {
-    const output = task.shotOutputs?.get(index)
-    const state = output ? 'done' : task.failedShots?.has(index) ? 'failed' : 'current'
-    return { index, output, state }
+}
+const resultEntries = computed(() => {
+  if (!selectedWork.value) return []
+  const work = withRedrawnOriginals(selectedWork.value)
+  const outputIndexes = new Map<number, number>()
+  work.outputs.forEach((output, outputIndex) => {
+    if (output) outputIndexes.set(work.type === 'video'
+      ? shotIndexForOutput(work, outputIndex)
+      : work.imageOutputIndexes?.[outputIndex] ?? outputIndex, outputIndex)
+  })
+  const failed = new Set(work.type === 'image' ? work.imageFailedIndexes : work.shotQueue?.failedIndexes)
+  return Array.from({ length: resultOutputCount(work) }, (_, index) => {
+    const outputIndex = outputIndexes.get(index) ?? -1
+    const output = work.outputs[outputIndex] || ''
+    const state = output ? 'done' : work.status === 'pending' && !failed.has(index) ? 'pending' : 'failed'
+    return { index, outputIndex, output, state, work }
   })
 })
-// Video shots wrap after two per row; images use the same cap on mobile.
-const generationColumns = computed(() => {
-  const count = generationFrames.value.length || 1
-  return generationMode.value === 'video' ? Math.min(count, 2) : count
-})
-const generationStageStyle = computed(() => ({
-  '--generation-columns': generationColumns.value,
-  '--generation-mobile-columns': Math.min(generationFrames.value.length || 1, 2),
-}))
-const generationFrameStyle = computed(() => {
-  const [ratioWidth, ratioHeight] = (selectedWork.value?.aspectRatio || '').split(':').map(Number)
-  const width = ratioWidth > 0 ? ratioWidth : 1
-  const height = ratioHeight > 0 ? ratioHeight : 1
-  const count = generationFrames.value.length || 1
-  const columns = generationColumns.value
-  const rows = Math.ceil(count / columns)
-  const ratio = Math.round((width / height) * 10000) / 10000
-  const singleImage = generationMode.value === 'image' && count === 1
-  // Row width and frame height come from CSS so the frames scale with the canvas.
-  // Single frames fill the available row so their side gaps match the workspace;
-  // multiple frames share the row with 12px gaps.
-  const share = count === 1
-    ? 'var(--generation-row-width)'
-    : `(var(--generation-row-width) - ${12 * (columns - 1)}px) / ${columns}`
-  // Wrapped rows split the frame height so the whole grid stays about one frame tall.
-  // A single portrait image is capped at 72vh so it stays on screen.
-  const frameHeight = rows === 1
-    ? (singleImage ? 'min(var(--generation-frame-height), 72vh)' : 'var(--generation-frame-height)')
-    : `max(140px, (var(--generation-frame-height) - ${12 * (rows - 1)}px) / ${rows})`
-  // Landscape and square single images are not height-capped; the canvas scrolls instead.
-  const frameWidth = singleImage && ratio >= 1
-    ? `calc(${share})`
-    : `min(calc(${share}), calc(${frameHeight} * ${ratio}))`
-  return {
-    '--generation-frame-width': frameWidth,
-    '--generation-frame-height-ring-size': `${50 * height / width}cqi`,
-    // Desktop video placeholders fill the available canvas; media stays contained.
-    aspectRatio: generationMode.value === 'image' ? `${width} / ${height}` : undefined,
-    '--generation-frame-aspect-ratio': `${width} / ${height}`,
-    // Mobile frames stretch to the gutter; cap each at 480px tall so portrait ratios stay on screen.
-    '--generation-frame-mobile-max': `${Math.round((width / height) * 480)}px`,
-  }
-})
-const generationElapsedLabel = computed(() => {
-  const elapsedSeconds = generationStartedAt.value
-    ? Math.max(0, Math.floor((generationClock.value - generationStartedAt.value) / 1000))
-    : 0
-  const minutes = Math.floor(elapsedSeconds / 60)
-  const seconds = elapsedSeconds % 60
-  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
-})
+
+// Same wording as the finished result's duration pill, ticking with the generation clock.
+const generationElapsedDurationLabel = computed(() => formatDurationSeconds(generationStartedAt.value
+  ? Math.max(0, Math.floor((generationClock.value - generationStartedAt.value) / 1000))
+  : 0))
 
 function groupMatchesCurrentCapability(group: Group) {
   if (group.status !== 'active') return false
@@ -2444,9 +2780,16 @@ function groupMatchesCurrentCapability(group: Group) {
     if (videoCapability.value === 'seedance') {
       return group.platform === 'deepseek' && Object.keys(group.video_model_prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || {}).length > 0
     }
+    // Muse is priced in Grok groups; a group named for Muse belongs to its own tab.
+    if (videoCapability.value === 'muse') {
+      return group.platform === 'grok' && MUSE_VIDEO_MODEL in (group.video_model_prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || {})
+    }
+    if (/muse/.test(haystack)) return false
     return group.platform === 'grok' || (group.platform !== 'minimax' && group.platform !== 'deepseek' && /grok|xai/.test(haystack))
   }
   if (imageCapability.value === 'grok') {
+    // Muse groups sit on the Grok platform but only sell video.
+    if (/muse/.test(haystack)) return false
     return (group.allow_image_generation && group.platform === 'grok') || /grok.*(图|image)|xai/.test(haystack)
   }
   if (imageCapability.value === 'image2') {
@@ -2457,8 +2800,9 @@ function groupMatchesCurrentCapability(group: Group) {
 
 function fallbackModels() {
   if (studioMode.value === 'video') {
-    if (videoCapability.value === 'minimax') return [...MINIMAX_H3_STUDIO_MODELS]
+    if (videoCapability.value === 'minimax') return miniMaxFallbackModels()
     if (videoCapability.value === 'seedance') return seedanceFallbackModels()
+    if (videoCapability.value === 'muse') return [MUSE_VIDEO_MODEL]
     return ['grok-imagine-video', 'grok-imagine-video-1.5']
   }
   if (imageCapability.value === 'grok') return ['grok-imagine-image', 'grok-imagine-image-quality']
@@ -2471,12 +2815,55 @@ function isGrokVideo15Model(model: string) {
 }
 
 function supportsReferenceVideo(model: string) {
-  return isGrokVideo15Model(model) || isMiniMaxH3Model(model) || Boolean(seedanceVideoTier(model)?.supportsUploadedReferences)
+  return isGrokVideo15Model(model) || (miniMaxH3Tier(model)?.maxReferenceImages ?? 0) > 0 || Boolean(seedanceVideoTier(model)?.supportsUploadedReferences)
+}
+
+// Muse and direct Grok models animate one image as the first frame; other relays do not.
+function supportsFirstFrameVideo(model: string) {
+  return isMuseVideoModel(model) || (!miniMaxH3Tier(model) && !seedanceVideoTier(model))
+}
+
+// Moves a method the model cannot run to the closest one it can.
+function videoMethodForModel(model: string, method: VideoGenerationMethod): VideoGenerationMethod {
+  const firstFrame = supportsFirstFrameVideo(model)
+  const reference = supportsReferenceVideo(model)
+  if (method === 'image' && !firstFrame) return reference ? 'reference' : 'text'
+  if (method === 'reference' && !reference) return firstFrame ? 'image' : 'text'
+  if (method === 'text' && miniMaxH3Tier(model)?.requiresReference) return reference ? 'reference' : 'image'
+  return method
+}
+
+function fitVideoMethodsToModel(model = selectedModel.value) {
+  if (studioMode.value !== 'video' || !model) return
+  videoGenerationMethod.value = videoMethodForModel(model, videoGenerationMethod.value)
+  videoShots.value.forEach(shot => { shot.generationMethod = videoMethodForModel(model, shot.generationMethod) })
 }
 
 // Friendly names for relay IDs; other models show their ID.
 function modelLabel(model: string) {
   return miniMaxH3Tier(model)?.label || seedanceVideoTier(model)?.name || model
+}
+
+// Names the models that drew images after the selected one kept failing, so
+// the user knows which model (and price) produced the work.
+function imageModelTag(work: CreatorHistoryItem) {
+  const fallbacks = (work.fallbackModels || []).filter(model => model !== work.model)
+  return fallbacks.length
+    ? `${modelLabel(work.model)}（已自动切换 ${fallbacks.map(modelLabel).join('、')}）`
+    : modelLabel(work.model)
+}
+
+// MiniMax entries carry each tier's own quoted unit price. Muse bills per
+// second at one resolution, so its entry carries the selected model's quote.
+function modelOptionLabel(model: string) {
+  const miniMaxTier = miniMaxH3Tier(model)
+  if (miniMaxTier) return `${miniMaxTier.optionLabel || modelLabel(model)}${miniMaxOptionPriceLabel(model)}`
+  const label = modelLabel(model)
+  const tier = isMuseVideoModel(model) ? seedanceVideoTier(model) : null
+  if (!tier) return label
+  const museLabel = `Muse 视频 · ${tier.resolution} · 按秒`
+  const cost = model === selectedModel.value ? videoShotPrice(tier.resolution, 1) : null
+  return cost == null ? museLabel : `${museLabel} · ${formatScaled(cost, 1, 2).replace(/^\$/, '')}/秒`
 }
 
 function videoModelLabel(model: string) {
@@ -2490,42 +2877,28 @@ function videoResolutionTierLabel(work: CreatorHistoryItem, index?: number) {
 // Grok video IDs name Grok or video; other relay IDs are Seedance lines, even
 // ones since dropped from the administrator's catalog (e.g. OOsd2.5 history).
 function videoCapabilityForModel(model: string): VideoCapability {
-  if (isMiniMaxH3Model(model)) return 'minimax'
+  if (isMiniMaxH3Model(model) || isLegacyMiniMaxH3Model(model)) return 'minimax'
+  if (isMuseVideoModel(model)) return 'muse'
   if (isSeedanceVideoModel(model)) return isGrokRelayVideoModel(model) ? 'grok' : 'seedance'
   return /grok|video/i.test(model) ? 'grok' : 'seedance'
 }
 
 function videoProviderLabel(model: string) {
-  return { minimax: 'MiniMax H3', seedance: 'Seedance', grok: 'Grok' }[videoCapabilityForModel(model)]
+  return { minimax: 'MiniMax H3', muse: 'Muse', seedance: 'Seedance', grok: 'Grok' }[videoCapabilityForModel(model)]
 }
 
 function videoGenerationMethodLabelFor(method: VideoGenerationMethod) {
   return {
     text: '文生',
-    image: '图生',
+    image: '首帧图生',
     reference: '参考图生',
   }[method]
 }
 
-function syncVideoModelForGenerationMethod() {
-  if (studioMode.value !== 'video') return
-  if (requiresReferenceVideo15.value) {
-    if (supportsReferenceVideo(selectedModel.value) && referenceVideoModelOptions.value.includes(selectedModel.value)) return
-    selectedModel.value = referenceVideoModelOptions.value.find(model => /^grok-imagine-video-1\.5$/i.test(model))
-      || referenceVideoModelOptions.value[0]
-      || ''
-    return
-  }
-  if (!selectedModel.value || !modelOptions.value.includes(selectedModel.value)) {
-    selectedModel.value = modelOptions.value.includes(preferredModel())
-      ? preferredModel()
-      : modelOptions.value[0] || ''
-  }
-}
-
 function preferredModel() {
   if (studioMode.value === 'video') {
-    if (videoCapability.value === 'minimax') return MINIMAX_H3_STUDIO_MODELS[0]
+    if (videoCapability.value === 'minimax') return miniMaxFallbackModels()[0] || ''
+    if (videoCapability.value === 'muse') return MUSE_VIDEO_MODEL
     return videoCapability.value === 'seedance' ? seedanceFallbackModels()[0] : 'grok-imagine-video'
   }
   if (imageCapability.value === 'grok') return 'grok-imagine-image'
@@ -2540,26 +2913,24 @@ function filterModels(models: string[]) {
     // only the ones this group sells.
     const prices = selectedGroup.value?.video_model_prices
     const relayPriced = (model: string) => !prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || model.toLowerCase() in prices[SEEDANCE_VIDEO_PRICE_FAMILY]
+    // MiniMax lists the priced catalog models in the administrator's order.
     if (videoCapability.value === 'minimax') {
+      const order = miniMaxCatalogModels().map(([model]) => model)
       return clean
-        .filter(model => isMiniMaxH3StudioModel(model) && (!miniMaxH3Tier(model)?.zhongheng || model.toLowerCase() in (prices?.['minimax-h3'] || {})))
-        .sort((a, b) => {
-          const tierA = miniMaxH3Tier(a)
-          const tierB = miniMaxH3Tier(b)
-          const resolutionOrder = (tier: typeof tierA) => tier?.resolution === '768p' ? 0 : 1
-          return resolutionOrder(tierA) - resolutionOrder(tierB)
-            || Number(Boolean(tierA?.zhongheng)) - Number(Boolean(tierB?.zhongheng))
-        })
-    }
-    // List Seedance in catalog order, so lines of the same model stay together.
-    if (videoCapability.value === 'seedance') {
-      const order = seedanceCatalogModels().map(([model]) => model)
-      return clean
-        .filter(model => isSeedanceVideoModel(model) && !isGrokRelayVideoModel(model) && relayPriced(model))
+        .filter(model => isMiniMaxH3Model(model) && model.toLowerCase() in (prices?.['minimax-h3'] || {}))
         .sort((a, b) => order.indexOf(a.toLowerCase()) - order.indexOf(b.toLowerCase()))
     }
+    // Group Seedance lines by resolution; within one, per-clip lines come
+    // before per-second ones, each cheapest first, then catalog order.
+    if (videoCapability.value === 'seedance') {
+      return sortSeedanceModels(
+        clean.filter(model => isSeedanceVideoModel(model) && !isGrokRelayVideoModel(model) && relayPriced(model)),
+        prices?.[SEEDANCE_VIDEO_PRICE_FAMILY],
+      )
+    }
+    if (videoCapability.value === 'muse') return clean.filter(model => isMuseVideoModel(model) && relayPriced(model))
     // Grok groups also sell relay Grok lines priced under the Seedance family.
-    return clean.filter(model => isGrokRelayVideoModel(model)
+    return clean.filter(model => isMuseVideoModel(model) ? false : isGrokRelayVideoModel(model)
       ? model.toLowerCase() in (prices?.[SEEDANCE_VIDEO_PRICE_FAMILY] || {})
       : /video/i.test(model) && !isMiniMaxH3Model(model) && !isSeedanceVideoModel(model))
   }
@@ -2604,11 +2975,12 @@ async function loadModels() {
   }
   loadingModels.value = true
   try {
-    // The administrator's Seedance catalog names the models and their limits;
-    // without it the built-in catalog applies.
-    if (studioMode.value === 'video' && (videoCapability.value === 'seedance' || videoCapability.value === 'grok')) {
+    // The administrator's Seedance or MiniMax catalog names the models and
+    // their limits; without it the built-in catalog applies.
+    if (studioMode.value === 'video') {
       try {
-        applySeedanceCatalog(await getCreatorSeedanceCatalog(key.key))
+        if (videoCapability.value === 'minimax') applyMiniMaxCatalog(await getCreatorMiniMaxCatalog(key.key))
+        else applySeedanceCatalog(await getCreatorSeedanceCatalog(key.key))
       } catch {
         // Keep the catalog already in use.
       }
@@ -2622,7 +2994,6 @@ async function loadModels() {
       : nextModels[0] || ''
     modelOptions.value = nextModels
     selectedModel.value = nextModel
-    syncVideoModelForGenerationMethod()
   } catch (error) {
     if (sequence !== modelRequestSequence) return
     const nextModels = fallbackModels()
@@ -2631,7 +3002,6 @@ async function loadModels() {
       : nextModels[0] || ''
     modelOptions.value = nextModels
     selectedModel.value = nextModel
-    syncVideoModelForGenerationMethod()
   } finally {
     if (sequence === modelRequestSequence) loadingModels.value = false
   }
@@ -2640,6 +3010,15 @@ async function loadModels() {
 async function refreshStudio() {
   if (bootstrapping.value) return
   bootstrapping.value = true
+  // History lives in this browser: show it without waiting for the group and
+  // key requests, which can take seconds on a slow connection.
+  const firstLoad = !historyLoaded.value
+  const historyLoad = syncHistory().finally(() => {
+    historyLoaded.value = true
+    if (firstLoad) initialHistorySync = undefined
+  })
+  if (firstLoad) initialHistorySync = historyLoad
+  historyLoad.catch(() => undefined)
   try {
     const [available, activeKeys] = await Promise.all([
       userGroupsAPI.getAvailable(),
@@ -2647,7 +3026,7 @@ async function refreshStudio() {
     ])
     groups.value = available
     apiKeys.value = activeKeys
-    await syncHistory()
+    await historyLoad
     syncSelectedGroup()
     await loadModels()
     void preserveHistoricalImages()
@@ -2657,6 +3036,7 @@ async function refreshStudio() {
       if (work.type === 'image' && work.status === 'pending' && work.imageTaskIds?.length) void resumeImageWork(work)
       if (work.type === 'video' && work.status === 'pending' && work.shotQueue
         && work.shotQueue.nextIndex < (work.shotCount || 0)) void resumeVideoShotQueue(work)
+      else if (!trackPendingVideo(work)) void failInterruptedVideoSubmission(work)
     }
   } catch (error) {
     appStore.showError(errorMessage(error, '创作中心加载失败'))
@@ -2672,7 +3052,17 @@ function saveVideoThumbnail(work: CreatorHistoryItem, thumbnail: string) {
   void creatorHistory.saveVideoThumbnail(work.id, work.updatedAt, thumbnail)
 }
 
-function applyHistoryUpdate(work: CreatorHistoryItem) {
+// Older builds (or another tab still running one) saved a video as failed when
+// its page was closed mid-render. The server task kept going, so show it as
+// pending again and let the normal tracker load the finished video.
+function reviveClosedPageVideo(work: CreatorHistoryItem): CreatorHistoryItem {
+  if (work.type !== 'video' || work.status !== 'failed' || !work.requestId
+    || work.outputs.length || work.error !== PAGE_CLOSED_MESSAGE) return work
+  return { ...work, status: 'pending', error: undefined }
+}
+
+function applyHistoryUpdate(incoming: CreatorHistoryItem) {
+  const work = reviveClosedPageVideo(incoming)
   const current = historyItems.value.find(item => item.id === work.id)
   if (current && current.updatedAt > work.updatedAt) return
   reuseLoadedVideoBlobs(work, current)
@@ -2694,23 +3084,47 @@ function applyExternalHistoryChange(change: CreatorHistoryChange) {
       const work = await creatorHistory.get(change.id)
       if (!disposed && work) applyHistoryUpdate(work)
     } else {
+      noteHistoryRemoval(change.type === 'clear' ? undefined : change.id)
       historyItems.value = change.type === 'clear' ? [] : historyItems.value.filter(work => work.id !== change.id)
       if (change.type === 'clear' || selectedWork.value?.id === change.id) selectedWork.value = null
     }
   }).catch(() => undefined)
 }
 
+// Removals counted from here let a history read that started earlier skip
+// works deleted (or a history cleared) while it was still encoding images.
+let historyMutation = 0
+let historyClearedAt = 0
+const historyRemovedAt = new Map<string, number>()
+
+function noteHistoryRemoval(id?: string) {
+  historyMutation++
+  if (id === undefined) historyClearedAt = historyMutation
+  else historyRemovedAt.set(id, historyMutation)
+}
+
 async function syncHistory() {
-  const works = [...await creatorHistory.list()]
-  if (disposed) return
+  const startedAt = historyMutation
+  // Only the shown page encodes its originals; see loadHistoryImages.
+  const works = await creatorHistory.list({ deferImages: true })
+  if (disposed || historyClearedAt > startedAt) return
+  const removed = (work: CreatorHistoryItem) => (historyRemovedAt.get(work.id) ?? 0) > startedAt
+  applyHistorySnapshot(works.filter(work => !removed(work)))
+}
+
+function applyHistorySnapshot(snapshot: CreatorHistoryItem[]) {
+  const works = snapshot.map(reviveClosedPageVideo)
+  const listed = new Set(works.map(work => work.id))
   const current = new Map(historyItems.value.map(work => [work.id, work]))
   // A focus/visibility refresh can race the first IndexedDB write of a task.
   for (const work of current.values()) {
-    if (activeGenerations.has(work.id) && !works.some(item => item.id === work.id)) works.push(work)
+    if (!listed.has(work.id) && activeGenerations.has(work.id)) works.push(work)
   }
   historyItems.value = works.map(work => {
     const previous = current.get(work.id)
     if (previous && previous.updatedAt > work.updatedAt) return previous
+    // Keep images already read for this revision instead of deferring them again.
+    if (previous && previous.updatedAt === work.updatedAt && work.imageOutputsPending && !previous.imageOutputsPending) return previous
     reuseLoadedVideoBlobs(work, previous)
     return work
   })
@@ -2721,7 +3135,33 @@ async function syncHistory() {
   }
 }
 
+const historyImageReads = new Map<string, Promise<CreatorHistoryItem>>()
+
+/** Encodes a deferred work's originals once and puts the result in the list. */
+function loadHistoryImages(work: CreatorHistoryItem): Promise<CreatorHistoryItem> {
+  if (!work.imageOutputsPending) return Promise.resolve(work)
+  const key = `${work.id}:${work.updatedAt}`
+  const existing = historyImageReads.get(key)
+  if (existing) return existing
+  const reading = creatorHistory.readImages(work).then(loaded => {
+    const index = historyItems.value.findIndex(item => item.id === work.id)
+    const current = historyItems.value[index]
+    // Replace only the same deferred revision; a newer write already has its images.
+    if (current?.imageOutputsPending && current.updatedAt === work.updatedAt) {
+      historyItems.value = historyItems.value.map(item => item === current ? loaded : item)
+      if (selectedWork.value === current) selectedWork.value = loaded
+      return loaded
+    }
+    return current && current.updatedAt >= work.updatedAt ? current : loaded
+  }).finally(() => { historyImageReads.delete(key) })
+  historyImageReads.set(key, reading)
+  return reading
+}
+
 function syncVisibleHistory() {
+  // The first load already reads everything; a second read would encode every
+  // original again in parallel because the cache is still empty.
+  if (initialHistorySync) return
   if (studioActive && document.visibilityState === 'visible') void syncHistory()
 }
 
@@ -2755,7 +3195,16 @@ async function createAndUseKey() {
   }
 }
 
+// On mobile a mode tab can be tapped from anywhere down the page; the new
+// workspace starts at the top. Tapping the active tab also returns to the top.
+function scrollPageTopOnMobile() {
+  if (!window.matchMedia?.('(max-width: 800px)').matches) return
+  stopSettingsReveal()
+  window.scrollTo?.({ top: 0, behavior: 'smooth' })
+}
+
 async function switchMode(mode: StudioMode) {
+  scrollPageTopOnMobile()
   if (studioMode.value === mode) return
   modeSelections[studioMode.value] = selectedWork.value?.id || null
   restoreSettingsSequence++
@@ -2997,11 +3446,14 @@ async function addReferenceFiles(files: File[]) {
   }
 
   if (studioMode.value !== 'video') {
+    const firstReference = targetReferences.length === 0
     const accepted = validFiles
       .slice(0, remaining)
       .map(file => ({ file, url: URL.createObjectURL(file) }))
     targetReferences.push(...accepted)
     if (validFiles.length > remaining) appStore.showError(`已保留前 ${targetMaximum} 张有效参考图`)
+    // Reusing a work restores that work's size, so only fresh uploads follow the reference shape.
+    if (firstReference && accepted.length && !referencingOutputKey.value) await adaptImageSizeToReference(accepted[0].file)
     return
   }
 
@@ -3035,6 +3487,137 @@ async function addReferenceFiles(files: File[]) {
   }
 }
 
+// Upload adaptation and the follow-shape watcher both need a file's size; decode it once.
+const referenceDimensionsCache = new WeakMap<File, Promise<{ width: number; height: number } | null>>()
+function readReferenceDimensions(file: File) {
+  let cached = referenceDimensionsCache.get(file)
+  if (!cached) {
+    cached = decodeReferenceDimensions(file)
+    referenceDimensionsCache.set(file, cached)
+  }
+  return cached
+}
+
+async function decodeReferenceDimensions(file: File) {
+  if (typeof createImageBitmap !== 'function') return null
+  try {
+    const bitmap = await createImageBitmap(file)
+    const dimensions = { width: bitmap.width, height: bitmap.height }
+    bitmap.close()
+    return dimensions.width > 0 && dimensions.height > 0 ? dimensions : null
+  } catch {
+    return null
+  }
+}
+
+// The first reference sets the output size. GPT Image (auto or ratio mode) follows the
+// original's own pixel size by default, so the tier comes from the original; custom
+// sizes keep their long edge, and other models snap to the nearest preset ratio.
+async function adaptImageSizeToReference(file: File) {
+  // GIF frames share one pixel budget and stay on "auto"; see GIF_FRAME_COUNT_RANGE.
+  if (imageCapability.value === 'image2' && imageSizeMode.value === 'auto' && outputFormat.value === 'gif') return
+  const dimensions = await readReferenceDimensions(file)
+  if (!dimensions || studioMode.value !== 'image') return
+  const referenceRatio = dimensions.width / dimensions.height
+  const previousLabel = imageSizeTriggerLabel.value
+  const previousSize = sizeForImage()
+
+  if (imageCapability.value === 'image2' && imageSizeMode.value === 'custom') {
+    const longEdge = Math.max(imageCustomWidth.value, imageCustomHeight.value)
+    const [width, height] = normalizeCustomImageSize(
+      referenceRatio >= 1 ? longEdge : longEdge * referenceRatio,
+      referenceRatio >= 1 ? longEdge / referenceRatio : longEdge,
+    )
+    const resolution = customImageResolution(width, height)
+    if (resolution === '4K' && !imageResolutionOptions.value.includes('4K')) return
+    imageCustomWidth.value = width
+    imageCustomHeight.value = height
+    imageResolution.value = resolution
+    aspectRatio.value = ratioForDimensions(width, height)
+  } else if (imageCapability.value === 'image2') {
+    imageReferenceDimensions.value = dimensions
+    const nativeSize = referenceNativeSize()
+    const resolution = nativeSize ? availableImageTierAtMost(customImageResolution(nativeSize[0], nativeSize[1])) : ''
+    // Shapes GPT Image cannot keep (beyond 3:1) stay on auto, or snap to the nearest preset.
+    if (!resolution || !referenceFollowSize(resolution)) {
+      imageFollowReference.value = false
+      if (imageSizeMode.value === 'auto') return
+      aspectRatio.value = nearestImageRatio(imageResolution.value, referenceRatio)
+    } else {
+      imageSizeMode.value = 'ratio'
+      imageResolution.value = resolution
+      // The nearest preset is the fallback once the reference is removed.
+      aspectRatio.value = nearestImageRatio(resolution, referenceRatio)
+      imageFollowReference.value = true
+    }
+  } else {
+    aspectRatio.value = nearestImageRatio(imageResolution.value, referenceRatio)
+  }
+
+  if (sizeForImage() !== previousSize || imageSizeTriggerLabel.value !== previousLabel) {
+    appStore.showInfo(`已按参考图调整输出尺寸：${imageSizeTriggerLabel.value} · ${sizeForImage().replace('x', '×')}`)
+  }
+}
+
+const IMAGE_TIERS = ['1K', '2K', '4K']
+
+// The largest tier the current group offers that does not exceed `tier`.
+function availableImageTierAtMost(tier: string) {
+  const options = imageResolutionOptions.value
+  return IMAGE_TIERS.slice(0, IMAGE_TIERS.indexOf(tier) + 1).filter(option => options.includes(option)).at(-1) || options[0]
+}
+
+function nearestImageRatio(resolution: string, referenceRatio: number) {
+  const options = image2SizeOptions[resolution] || image2SizeOptions['1K']
+  const ratioDistance = (ratio: string) => {
+    const [width, height] = ratio.split(':').map(Number)
+    return Math.abs(Math.log(width / height / referenceRatio))
+  }
+  return options.reduce((best, option) => ratioDistance(option.value) < ratioDistance(best.value) ? option : best).value
+}
+
+const IMAGE_TIER_LONG_EDGE: Record<string, number> = { '1K': 1024, '2K': 2048, '4K': 3840 }
+
+// The reference image's own size within GPT Image limits (long edge 3840, 16px steps,
+// pixel range), or null when those limits would distort its shape (beyond 3:1).
+function referenceNativeSize(): [number, number] | null {
+  const dimensions = imageReferenceDimensions.value
+  if (!dimensions) return null
+  const scale = Math.min(1, IMAGE_TIER_LONG_EDGE['4K'] / Math.max(dimensions.width, dimensions.height))
+  const [width, height] = normalizeCustomImageSize(dimensions.width * scale, dimensions.height * scale)
+  return keepsReferenceShape(width, height) ? [width, height] : null
+}
+
+function keepsReferenceShape(width: number, height: number) {
+  const dimensions = imageReferenceDimensions.value
+  return Boolean(dimensions) && Math.abs(Math.log(width / height / (dimensions!.width / dimensions!.height))) <= 0.03
+}
+
+// The reference image's shape at `resolution`: its own size when that already falls in
+// the tier, otherwise scaled to the tier's long edge. Null when GPT Image's pixel limits
+// would move it to another tier (and price) or distort the shape.
+function referenceFollowSize(resolution: string) {
+  const nativeSize = referenceNativeSize()
+  const longEdge = IMAGE_TIER_LONG_EDGE[resolution]
+  if (!nativeSize || !longEdge) return null
+  if (customImageResolution(nativeSize[0], nativeSize[1]) === resolution) return `${nativeSize[0]}x${nativeSize[1]}`
+  const referenceRatio = nativeSize[0] / nativeSize[1]
+  const [width, height] = normalizeCustomImageSize(
+    referenceRatio >= 1 ? longEdge : longEdge * referenceRatio,
+    referenceRatio >= 1 ? longEdge / referenceRatio : longEdge,
+  )
+  if (customImageResolution(width, height) !== resolution || !keepsReferenceShape(width, height)) return null
+  return `${width}x${height}`
+}
+
+// Keep the follow shape tied to the current first reference (removal, reorder, reuse).
+let referenceDimensionsSequence = 0
+watch(() => referenceImages.value[0]?.file, async file => {
+  const sequence = ++referenceDimensionsSequence
+  const dimensions = file ? await readReferenceDimensions(file) : null
+  if (sequence === referenceDimensionsSequence) imageReferenceDimensions.value = dimensions
+})
+
 function removeReference(index: number) {
   const [removed] = activeReferenceImages.value.splice(index, 1)
   if (removed) URL.revokeObjectURL(removed.url)
@@ -3059,6 +3642,7 @@ function sizeForImage() {
       const [width, height] = normalizeCustomImageSize(imageCustomWidth.value, imageCustomHeight.value)
       return `${width}x${height}`
     }
+    if (imageFollowsReference.value) return referenceFollowSize(imageResolution.value) || image2SizeFor(imageResolution.value, aspectRatio.value)
     return image2SizeFor(imageResolution.value, aspectRatio.value)
   }
 
@@ -3071,6 +3655,7 @@ function isImageRatioAvailable(resolution: string, ratio: string) {
 
 watch(imageSizeDraftResolution, resolution => {
   if (!isImageRatioAvailable(resolution, imageSizeDraftRatio.value)) imageSizeDraftRatio.value = '1:1'
+  if (imageSizeDraftFollowReference.value && !referenceFollowSize(resolution)) imageSizeDraftFollowReference.value = false
 })
 
 function image2SizeFor(resolution: string, ratio: string) {
@@ -3122,6 +3707,7 @@ function openImageSizeDialog() {
   imageSizeDraftRatio.value = isImageRatioAvailable(imageResolution.value, aspectRatio.value)
     ? aspectRatio.value
     : '1:1'
+  imageSizeDraftFollowReference.value = imageFollowsReference.value
   imageSizeDraftWidth.value = imageCustomWidth.value
   imageSizeDraftHeight.value = imageCustomHeight.value
   imageSizeDialogOpen.value = true
@@ -3143,7 +3729,12 @@ function confirmImageSize() {
     aspectRatio.value = ratioForDimensions(width, height)
   } else if (imageSizeDraftMode.value === 'ratio') {
     imageResolution.value = imageSizeDraftResolution.value
-    aspectRatio.value = imageSizeDraftRatio.value
+    const referenceDimensions = imageReferenceDimensions.value
+    const follow = imageSizeDraftFollowReference.value && referenceDimensions && referenceFollowSize(imageSizeDraftResolution.value)
+    aspectRatio.value = follow
+      ? nearestImageRatio(imageSizeDraftResolution.value, referenceDimensions.width / referenceDimensions.height)
+      : imageSizeDraftRatio.value
+    imageFollowReference.value = Boolean(follow)
   }
   imageSizeMode.value = imageSizeDraftMode.value
   imageSizeDialogOpen.value = false
@@ -3214,7 +3805,7 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     return
   }
   const taskProfessionalVideo = taskMode === 'video' && professionalVideo.value
-  const taskPrompt = taskProfessionalVideo
+  const taskPrompt = taskProfessionalVideo && videoShots.value.length > 1
     ? videoShots.value.map((shot, index) => `镜头 ${index + 1}：${videoShotPrompt(shot.prompt)}`).join('\n')
     : effectivePrompt.value
   const videoShotSnapshots = taskMode === 'video'
@@ -3238,7 +3829,10 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
           referenceFiles: referenceImages.value.map(reference => reference.file),
         }]
     : []
-  const taskAspectRatio = taskMode === 'video' ? videoShotSnapshots[0]?.aspectRatio || '16:9' : aspectRatio.value
+  const followSize = taskMode === 'image' && imageFollowsReference.value ? sizeForImage().split('x').map(Number) : null
+  const taskAspectRatio = taskMode === 'video'
+    ? videoShotSnapshots[0]?.aspectRatio || '16:9'
+    : followSize ? ratioForDimensions(followSize[0], followSize[1]) : aspectRatio.value
   const taskReferenceCount = taskMode === 'video'
     ? videoShotSnapshots.reduce((sum, shot) => sum + shot.referenceFiles.length, 0)
     : referenceImages.value.length
@@ -3262,6 +3856,9 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
         aspectRatio: taskAspectRatio,
         resolution: imageResolution.value,
         sizeMode: imageCapability.value === 'image2' ? imageSizeMode.value : 'ratio',
+        // Every other model of this group's image capability, same series
+        // first, tried in turn when the selected model keeps failing.
+        fallbackModels: orderImageFallbackModels(taskModel, modelOptions.value),
       }
     : null
   const videoSnapshot: VideoGenerationSnapshot | null = taskMode === 'video'
@@ -3279,7 +3876,7 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     prompt: taskPrompt,
     model: taskModel,
     provider: taskMode === 'image'
-      ? imageCapabilities.find(item => item.id === imageCapability.value)?.label || imageCapability.value
+      ? `${imageCapabilities.find(item => item.id === imageCapability.value)?.label || imageCapability.value} 生图`
       : `${videoProviderLabel(taskModel)} 视频`,
     groupName: taskGroup.name,
     groupId: taskGroup.id,
@@ -3298,6 +3895,9 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     frameDurationMs: taskMode === 'image' ? imageSnapshot?.frameDurationMs : undefined,
     background: taskMode === 'image' ? imageSnapshot?.background : undefined,
     referenceCount: taskReferenceCount,
+    // Kept so reopening, reusing or editing the work brings the uploads back.
+    referenceBlobs: taskMode === 'image' && imageSnapshot?.referenceFiles.length ? [...imageSnapshot.referenceFiles] : undefined,
+    shotReferenceBlobs: taskMode === 'video' && taskReferenceCount ? videoSnapshot?.shots.map(shot => [...shot.referenceFiles]) : undefined,
     videoGenerationMethod: taskMode === 'video' ? videoSnapshot?.shots[0]?.generationMethod : undefined,
     outputCount: taskMode === 'image' ? imageSnapshot?.outputCount : videoSnapshot?.shots.length,
     requestedDuration: taskMode === 'video' ? videoSnapshot?.shots.reduce((sum, shot) => sum + shot.duration, 0) : undefined,
@@ -3316,33 +3916,52 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     version: 'v1',
     source,
   }
+  await runGeneration(work, imageSnapshot, videoSnapshot, { select: true, revealPageTop })
+}
+
+async function runGeneration(
+  work: CreatorHistoryItem,
+  imageSnapshot: ImageGenerationSnapshot | null,
+  videoSnapshot: VideoGenerationSnapshot | null,
+  options: { select?: boolean; revealPageTop?: boolean; startedAt?: number; retryImageIndexes?: number[]; resumedVideoShots?: ResumedVideoShots } = {},
+) {
+  const taskMode = work.type
   const task = reactive<GenerationTask>({
     id: work.id,
     mode: taskMode,
-    prompt: taskPrompt,
+    prompt: work.prompt,
     phase: 'submitting',
     hasExactProgress: false,
     percent: 0,
     progress: taskMode === 'image' ? '正在提交画面描述，请稍候' : '正在提交视频任务，请稍候',
-    startedAt: now,
+    startedAt: options.startedAt ?? work.createdAt,
   })
   const restoreSettingsScroll = captureSettingsScroll()
   activeGenerations.set(work.id, task)
-  generationClock.value = now
+  generationClock.value = task.startedAt
   if (generationTimer === undefined) {
     generationTimer = window.setInterval(() => { generationClock.value = Date.now() }, 1000)
   }
-  historyItems.value = [work, ...historyItems.value]
-  selectedWork.value = work
-  historyFilter.value = taskMode
+  // Retrying one slot regenerates the existing work in place.
+  const existing = historyItems.value.some(item => item.id === work.id)
+  historyItems.value = existing
+    ? historyItems.value.map(item => item.id === work.id ? work : item)
+    : [work, ...historyItems.value]
+  if (existing && selectedWork.value?.id === work.id) selectedWork.value = work
+  if (options.select) {
+    selectedWork.value = work
+    historyFilter.value = taskMode
+  }
   restoreSettingsScroll()
-  revealCanvasOnMobile(revealPageTop)
+  if (options.select) revealCanvasOnMobile(options.revealPageTop)
   let releaseShotLock: (() => void) | null = null
   try {
-    if (work.shotQueue) releaseShotLock = await acquireVideoShotLock(work.id)
+    // Every video holds this lock while it runs, so another window can tell a
+    // submission still in progress from one a closed page left behind.
+    if (taskMode === 'video') releaseShotLock = await acquireVideoShotLock(work.id)
     await persistWork(work)
-    if (taskMode === 'image' && imageSnapshot) await generateImageWork(work, imageSnapshot, task)
-    else if (videoSnapshot) await generateVideoWork(work, videoSnapshot, task)
+    if (taskMode === 'image' && imageSnapshot) await runImageWork(work, imageSnapshot, task, options.retryImageIndexes)
+    else if (videoSnapshot) await generateVideoWork(work, videoSnapshot, task, options.resumedVideoShots)
     work.status = 'completed'
     work.completedAt = Date.now()
     work.updatedAt = work.completedAt
@@ -3352,7 +3971,7 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
     await persistWork(work)
     if (historyItems.value.some(item => item.id === work.id)) applyHistoryUpdate(cloneWork(work))
     if (missingOutputCount(work)) appStore.showWarning(work.error || `已生成 ${work.outputs.length} ${work.type === 'image' ? '张，部分图片' : '段，部分镜头'}生成失败`)
-    else appStore.showSuccess('作品生成完成')
+    else if (!task.restoredRedraws) appStore.showSuccess('作品生成完成')
   } catch (error) {
     if (error instanceof VideoContentDownloadError && work.requestId && !work.outputs.length) {
       // The task finished upstream; the existing reload view fetches it again.
@@ -3381,6 +4000,13 @@ async function generateFromCurrentSettings(source: string, revealPageTop = false
       await persistWork(work)
       return
     }
+    if (disposed && taskMode === 'video') {
+      // The page went away (navigation, reload) while the video was still
+      // rendering. Its task ID is already saved, so the work stays pending and
+      // the next studio view reattaches to it; writing "failed" here would
+      // also overwrite the result a newer page may have saved meanwhile.
+      return
+    }
     work.status = 'failed'
     work.updatedAt = Date.now()
     work.error = creatorGenerationErrorMessage(error, taskMode, imageSnapshot?.capability, videoSnapshot?.model)
@@ -3407,20 +4033,77 @@ function loadCreatorImageBlob(apiKey: string, url: string): Promise<Blob> {
   return download
 }
 
+// Remote image links being copied into the browser. Their link may not load in
+// an <img> (CORS, cross-origin isolated page), so the card keeps loading until
+// the local copy replaces it instead of flashing "图片加载失败".
+const savingImageSources = reactive(new Set<string>())
+
+async function whileSavingImages<T>(sources: string[], save: () => Promise<T>): Promise<T> {
+  const remote = sources.filter(source => /^https?:\/\//i.test(source) && !savingImageSources.has(source))
+  remote.forEach(source => savingImageSources.add(source))
+  try {
+    return await save()
+  } finally {
+    remote.forEach(source => savingImageSources.delete(source))
+  }
+}
+
+// The download gateway or the image CDN sometimes fails briefly (502/504,
+// rate limits, a dropped connection). Retry quietly before warning the user.
+const IMAGE_SAVE_RETRY_DELAYS_MS = [2000, 5000, 10000, 20000]
+
+function isTransientImageSaveError(error: unknown) {
+  const status = typeof error === 'object' && error ? Number((error as { status?: unknown }).status) || 0 : 0
+  if (status) return status === 408 || status === 425 || status === 429 || status >= 500
+  return error instanceof TypeError || /failed to fetch|network/i.test(errorMessage(error, ''))
+}
+
 async function localImageOutput(apiKey: string, output: string): Promise<string> {
   if (!/^https?:\/\//i.test(output)) return output
-  const blob = await loadCreatorImageBlob(apiKey, output)
-  return fileToDataUrl(blob)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fileToDataUrl(await loadCreatorImageBlob(apiKey, output))
+    } catch (error) {
+      if (disposed || attempt >= IMAGE_SAVE_RETRY_DELAYS_MS.length || !isTransientImageSaveError(error)) throw error
+      await delay(IMAGE_SAVE_RETRY_DELAYS_MS[attempt])
+    }
+  }
 }
 
 async function retryLocalImageSave() {
-  const work = selectedWork.value
-  if (!work || work.type !== 'image') return
-  historicalImageSaves.delete(work.id)
-  localSaveWarning.value = ''
-  await preserveHistoricalImage(work)
-  // Also retry IndexedDB if the image is already self-contained in memory.
-  await persistWork(work)
+  const work = localSaveRetryTarget.value
+  if (!work || retryingLocalSave.value) return
+  const workId = work.id
+  if (work.status === 'pending' || activeGenerations.has(workId)) {
+    appStore.showWarning('该作品仍在生成中，请等生成完成后再重试保存原图', 6000)
+    return
+  }
+  retryingLocalSave.value = true
+  try {
+    historicalImageSaves.delete(workId)
+    // An explicit retry should report a repeated failure even if it was dismissed before.
+    writeDismissedSaveWarnings(readDismissedSaveWarnings().filter(id => id !== workId))
+    localSaveWarning.value = ''
+    localSaveWarningWorkId.value = null
+    creatorHistory.resetStorage?.()
+    const hasRemoteOutput = (item: CreatorHistoryItem) => item.outputs.some(output => /^https?:\/\//i.test(output))
+    if (hasRemoteOutput(work)) {
+      await preserveHistoricalImage(work)
+    } else {
+      // The image is already self-contained in memory; only the browser write failed.
+      if (await persistWork(work) === false) return
+    }
+    const latest = historyItems.value.find(item => item.id === workId) || work
+    if (localSaveWarning.value) return
+    if (hasRemoteOutput(latest)) {
+      if (latest.imagePersistenceError) showImageSaveWarning(latest, true)
+      else appStore.showWarning('作品已被其他操作更新，请稍后再重试保存原图', 6000)
+      return
+    }
+    appStore.showSuccess('原图已保存到浏览器本地')
+  } finally {
+    retryingLocalSave.value = false
+  }
 }
 
 async function preserveHistoricalImages() {
@@ -3430,7 +4113,9 @@ async function preserveHistoricalImages() {
     // Recover still-valid links while the page is open, before they expire.
     for (const work of [...historyItems.value]) {
       if (disposed) break
-      await preserveHistoricalImage(work)
+      // Deferred slots are empty; read the saved originals before recovering the remaining links.
+      const deferredLinks = work.imageOutputsPending && work.outputs.some(output => /^https?:\/\//i.test(output))
+      await preserveHistoricalImage(deferredLinks ? await loadHistoryImages(work).catch(() => work) : work)
     }
   } finally { historicalImageRecoveryRunning = false }
 }
@@ -3441,9 +4126,9 @@ function preserveHistoricalImage(work: CreatorHistoryItem): Promise<void> {
   if (existing) return existing
   const revision = work.updatedAt
   const outputs = [...work.outputs]
-  const saving = (async () => {
+  const saving = whileSavingImages(outputs, async () => {
+    const key = findKeyForWork(work)
     try {
-      const key = findKeyForWork(work)
       const localOutputs: string[] = []
       for (const output of outputs) localOutputs.push(await localImageOutput(key?.key || '', output))
       // Do not resurrect an evicted/deleted work or overwrite another tab's edit.
@@ -3453,38 +4138,50 @@ function preserveHistoricalImage(work: CreatorHistoryItem): Promise<void> {
       delete recovered.imagePersistenceError
       const saved = await persistWork(recovered, revision)
       if (saved !== undefined) applyHistoryUpdate(recovered)
-    } catch {
-      work.imagePersistenceError = '原图暂时无法保存。上游临时链接可能已失效；已失效且未保存的图片无法从历史记录恢复。'
-      if (selectedWork.value?.id === work.id) localSaveWarning.value = work.imagePersistenceError
+    } catch (error) {
+      console.warn('[creator] failed to save original image locally', error)
+      work.imagePersistenceError = imageSaveFailureMessage(work, imageSaveFailureReason(error, Boolean(key?.key)))
+      if (selectedWork.value?.id === work.id) showImageSaveWarning(work)
     }
-  })()
+  })
   historicalImageSaves.set(work.id, saving)
   return saving
 }
 
 async function generateImageWork(work: CreatorHistoryItem, input: ImageGenerationSnapshot, task: GenerationTask) {
+  settleImageWork(work, input, await requestImageSlots(work, input, task))
+}
+
+// Requests the unsettled slots (or only onlyIndex) and returns the last request
+// failure; several calls may run on the same work at once.
+async function requestImageSlots(work: CreatorHistoryItem, input: ImageGenerationSnapshot, task: GenerationTask, onlyIndex?: number) {
   task.phase = 'generating'
   task.hasExactProgress = false
   const requestCount = Math.max(1, input.outputCount || 1)
   // A resumed work already holds the images synced from its earlier tasks.
   const initialOutputCount = Math.min(work.outputs.length, requestCount)
+  work.imageOutputIndexes = work.outputs.map((_, index) => work.imageOutputIndexes?.[index] ?? index)
+  const settledIndexes = new Set([...work.imageOutputIndexes, ...(work.imageFailedIndexes || [])])
+  // A slot being redrawn on its own is not requested again by the batch.
+  const requestedIndexes = onlyIndex === undefined
+    ? Array.from({ length: requestCount }, (_, index) => index).filter(index => !settledIndexes.has(index) && !regeneratingImageKeys.has(`${work.id}:${index}`))
+    : [onlyIndex]
   const isGeminiProtocol = input.platform === 'gemini' || input.platform === 'antigravity'
   // Gemini generateContent returns one image per call and some upstreams
   // ignore n, so keep requesting until the batch is full (one call per image
   // at most). Image2 always asks for a single image per request.
-  const requestAttempts = requestCount - initialOutputCount
+  const requestAttempts = requestedIndexes.length
   const requestsSingleImage = input.capability === 'image2' || isGeminiProtocol
   const usesOpenAIImageSize = input.capability === 'image2'
-  const usesGptImageModel = /^gpt-image-/i.test(input.model.trim())
   // GPT Image models return b64_json by default and reject response_format.
   // Grok still needs the explicit response format so its temporary URLs are
   // converted into self-contained data URLs by the gateway.
-  const usesBase64Response = !isGeminiProtocol && !usesGptImageModel && input.capability === 'grok'
+  const usesBase64Response = (model: string) => !isGeminiProtocol && !/^gpt-image-/i.test(model.trim()) && input.capability === 'grok'
   const outputs: string[] = work.outputs.slice(0, initialOutputCount)
-  const imageRequest = () => ({
-    model: input.model,
+  const imageRequest = (model: string) => ({
+    model,
     prompt: input.prompt,
-    n: requestsSingleImage ? 1 : requestCount - outputs.length,
+    n: requestsSingleImage ? 1 : Math.max(1, requestedIndexes.length - (outputs.length - initialOutputCount)),
     size: input.size,
     quality: input.quality,
     outputFormat: input.outputFormat,
@@ -3493,7 +4190,7 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     background: 'auto',
     // Grok may return temporary cross-origin URLs that browsers cannot save
     // through the download attribute. Base64 keeps the result self-contained.
-    ...(usesBase64Response ? { responseFormat: 'b64_json' } : {}),
+    ...(usesBase64Response(model) ? { responseFormat: 'b64_json' } : {}),
     referenceImages: input.referenceFiles,
     protocol: (isGeminiProtocol ? 'gemini' : 'openai') as 'gemini' | 'openai',
     ...(!usesOpenAIImageSize ? {
@@ -3503,44 +4200,99 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   })
   // A server-side task keeps the result through a refresh; gateways without
   // async image tasks fall back to one synchronous request.
-  const generate = async (): Promise<{ result: ImageGenerationResult; taskId?: string }> => {
-    const request = imageRequest()
-    const taskId = asyncImageUnavailableKeys.has(input.apiKey) ? null : await submitCreatorImageTask(input.apiKey, request)
-    if (!taskId) {
-      asyncImageUnavailableKeys.add(input.apiKey)
-      return { result: await generateCreatorImage(input.apiKey, request) }
+  // Every failure leaves as an ImageAttemptError that says whether a new
+  // request is safe; only an unfinished server task leaves as pending.
+  const generate = async (index: number, model: string): Promise<{ result: ImageGenerationResult; taskId?: string }> => {
+    const request = imageRequest(model)
+    let submitted: Awaited<ReturnType<typeof submitCreatorImageTask>> = null
+    try {
+      submitted = asyncImageUnavailableKeys.has(input.apiKey) ? null : await submitCreatorImageTask(input.apiKey, request)
+    } catch (error) {
+      throw new ImageAttemptError(error, isRetryableImageRequestError(error, input.capability))
     }
+    if (!submitted) {
+      asyncImageUnavailableKeys.add(input.apiKey)
+      let result: ImageGenerationResult
+      try {
+        result = await generateCreatorImage(input.apiKey, request)
+      } catch (error) {
+        throw new ImageAttemptError(error, isRetryableImageRequestError(error, input.capability))
+      }
+      if (result.billingId) work.billingIds = [...(work.billingIds || []), result.billingId]
+      if (!hasUsableImage(result)) throw new ImageAttemptError(new EmptyImageResultError(), true)
+      return { result }
+    }
+    const taskId = submitted.id
     work.imageTaskIds = [...(work.imageTaskIds || []), taskId]
+    work.imageTaskIndexes = { ...work.imageTaskIndexes, [taskId]: index }
+    if (submitted.billingId) work.billingIds = [...(work.billingIds || []), submitted.billingId]
     work.updatedAt = Date.now()
     await persistWork(work)
+    let result: ImageGenerationResult
     try {
-      return { result: await waitForImageTask(input.apiKey, taskId, input.outputFormat), taskId }
+      result = await waitForImageTask(input.apiKey, taskId, input.outputFormat)
     } catch (error) {
       if (error instanceof ImageTaskFailedError) {
         work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+        // A failed task is never charged.
+        if (submitted.billingId) work.billingIds = work.billingIds?.filter(id => id !== submitted.billingId)
+        forgetImageTaskIndex(work, taskId)
         await persistWork(work)
-        throw error.cause
+        // The task ended without an image, so a new one cannot double-charge.
+        throw new ImageAttemptError(error.cause, !isPermanentImageError(error.cause))
       }
       // The task may still finish; never resubmit it.
       throw new ImageTaskPendingError(error)
     }
-  }
-  const generateWithRetry = async (index: number) => {
-    try {
-      return await generate()
-    } catch (error) {
-      if (error instanceof ImageTaskPendingError || input.capability !== 'grok' || !isRetryableGrokTransientError(error)) throw error
-      task.progress = 'Grok 上游暂时不可用，2 秒后自动重试（1/1）'
-      await delay(2000)
-      task.progress = requestCount > 1
-        ? `正在重试第 ${initialOutputCount + index + 1} / ${requestCount} 张图片`
-        : '正在重新调用 Grok 图片模型'
-      return await generate()
+    if (!hasUsableImage(result)) {
+      // A finished task without images bills no image; drop it and ask again.
+      work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+      forgetImageTaskIndex(work, taskId)
+      await persistWork(work)
+      throw new ImageAttemptError(new EmptyImageResultError(), true)
     }
+    return { result, taskId }
+  }
+  // Retries the current model once, then each other model of this group's
+  // capability once, same series first. Only failures that billed nothing
+  // are retried; a permanent failure stops at once.
+  const generateWithRetry = async (index: number) => {
+    const models = [input.model, ...(input.fallbackModels || []).filter(model => model !== input.model)]
+    let lastFailure: ImageAttemptError | undefined
+    for (let modelIndex = 0; modelIndex < models.length; modelIndex++) {
+      const model = models[modelIndex]
+      const attempts = modelIndex === 0 ? 2 : 1
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        // Retries and model fallbacks are silent; the progress text keeps
+        // showing the normal "generating" message.
+        if (lastFailure) {
+          await delay(2000)
+          if (disposed) throw lastFailure.original
+        }
+        try {
+          const generated = await generate(index, model)
+          if (model !== input.model) {
+            work.fallbackModels = [...new Set([...(work.fallbackModels || []), model])]
+          }
+          return generated
+        } catch (error) {
+          if (!(error instanceof ImageAttemptError)) throw error
+          if (!error.retryable) throw error.original
+          lastFailure = error
+        }
+      }
+    }
+    throw lastFailure?.original
   }
   // One failed image must not discard the images that already succeeded.
   let lastError: unknown
-  task.failedCount = 0
+  task.failedCount = work.imageFailedIndexes?.length || 0
+  const markFailed = (indexes: number[], error: unknown) => {
+    work.imageFailedIndexes = [...new Set([...(work.imageFailedIndexes || []), ...indexes])]
+    task.failedCount = work.imageFailedIndexes.length
+    // The failed card shows this reason while the other images are still drawing.
+    work.error = partialImageError(work, requestCount, error, input.capability)
+  }
   if (requestsSingleImage && requestAttempts > 1) {
     // Single-image requests run all at once; each image is saved as soon as
     // it finishes, so a slow or failed one never holds back the others.
@@ -3552,19 +4304,22 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
     updateProgress()
     let pendingError: ImageTaskPendingError | undefined
     let saveError: unknown
-    await Promise.all(Array.from({ length: requestAttempts }, async (_, index) => {
+    await Promise.all(requestedIndexes.map(async index => {
       let generated
       try {
         generated = await generateWithRetry(index)
       } catch (error) {
         if (error instanceof ImageTaskPendingError) pendingError ??= error
-        else lastError = error
-        task.failedCount = (task.failedCount || 0) + 1
+        else {
+          lastError = error
+          markFailed([index], error)
+          await persistWork(work)
+        }
         updateProgress()
         return
       }
       try {
-        await saveImageBatch(work, generated.result, generated.taskId, input)
+        await saveImageBatch(work, generated.result, generated.taskId, input, index)
         finished++
       } catch (error) {
         saveError ??= error
@@ -3579,29 +4334,149 @@ async function generateImageWork(work: CreatorHistoryItem, input: ImageGeneratio
   else for (let index = 0; index < requestAttempts && outputs.length < requestCount; index++) {
     const failedNote = task.failedCount ? `（${task.failedCount} 张失败）` : ''
     task.progress = requestCount > 1
-      ? `正在生成第 ${initialOutputCount + index + 1} / ${requestCount} 张图片${failedNote}`
-      : '正在调用图片模型，请稍候'
+      ? `正在生成第 ${requestedIndexes[index] + 1} / ${requestCount} 张图片${failedNote}`
+      : '正在调用图片模型'
     let generated
     try {
-      generated = await generateWithRetry(index)
+      generated = await generateWithRetry(requestedIndexes[index])
     } catch (error) {
       if (error instanceof ImageTaskPendingError) throw error
       lastError = error
-      task.failedCount = requestsSingleImage ? task.failedCount + 1 : requestCount - outputs.length
+      markFailed(requestsSingleImage ? [requestedIndexes[index]] : requestedIndexes.filter(slot => !work.imageOutputIndexes?.includes(slot)), error)
+      await persistWork(work)
       // A batch request already asked for every remaining image.
       if (!requestsSingleImage) break
       continue
     }
     task.progress = '图片已生成，正在保存原图到当前浏览器'
-    await saveImageBatch(work, generated.result, generated.taskId, input)
+    await saveImageBatch(work, generated.result, generated.taskId, input, requestsSingleImage || onlyIndex !== undefined ? requestedIndexes[index] : undefined)
     outputs.splice(0, outputs.length, ...work.outputs)
   }
-  work.outputs = outputs
-  if (!work.outputs.length) throw lastError ?? new Error('模型没有返回可用图片')
-  if (lastError && outputs.length < requestCount) {
-    const reason = creatorGenerationErrorMessage(lastError, 'image', input.capability)
-    work.error = `已生成 ${outputs.length} / ${requestCount} 张，其余 ${requestCount - outputs.length} 张生成失败：${reason}`
+  // Read work.outputs again: another request on this work may have saved images meanwhile.
+  work.outputs = work.outputs.slice(0, requestCount)
+  return lastError
+}
+
+function partialImageError(work: CreatorHistoryItem, requestCount: number, error: unknown, capability?: ImageCapability) {
+  // A slot retry keeps the earlier failure reason for the slots still missing.
+  const reason = error
+    ? creatorGenerationErrorMessage(error, 'image', capability)
+    : (work.error || '').replace(PARTIAL_ERROR_PREFIX, '')
+  return reason
+    ? `已生成 ${work.outputs.length} / ${requestCount} 张，其余 ${requestCount - work.outputs.length} 张生成失败：${reason}`
+    : work.error
+}
+
+function settleImageWork(work: CreatorHistoryItem, input: ImageGenerationSnapshot, lastError: unknown) {
+  const requestCount = Math.max(1, input.outputCount || 1)
+  if (!work.outputs.length) throw lastError ?? new EmptyImageResultError()
+  work.error = work.outputs.length >= requestCount ? undefined : partialImageError(work, requestCount, lastError, input.capability)
+}
+
+type ImageRun = { retry: (index: number) => void; work: CreatorHistoryItem; task: GenerationTask }
+// Failed images retried while their work is still generating join that run.
+const imageRuns = new Map<string, ImageRun>()
+const joinableImageWorkIds = reactive(new Set<string>())
+// Works whose failed image is being redrawn from the result view. They keep
+// the result layout and only the retried card shows a loader.
+const inPlaceImageRetryIds = reactive(new Set<string>())
+
+function isInPlaceImageRetry(work: CreatorHistoryItem) {
+  return work.type === 'image' && inPlaceImageRetryIds.has(work.id)
+}
+
+// Video works whose missing shots are being generated again from the result
+// view. Like image retries, they keep the result layout.
+const inPlaceVideoRetryIds = reactive(new Set<string>())
+
+type VideoRun = {
+  work: CreatorHistoryItem
+  shots: VideoGenerationSnapshot['shots']
+  // Starts a failed shot again, or with redraw a finished one; false when the shot is still running.
+  join: (index: number, redraw: boolean) => boolean
+}
+// In-place video runs that more shots can join.
+const videoRuns = new Map<string, VideoRun>()
+const joinableVideoWorkIds = reactive(new Set<string>())
+
+function isInPlaceRetry(work: CreatorHistoryItem) {
+  return isInPlaceImageRetry(work) || (work.type === 'video' && inPlaceVideoRetryIds.has(work.id))
+}
+
+function isRegeneratingImage(work: CreatorHistoryItem, index: number) {
+  return work.type === 'image' && regeneratingImageKeys.has(`${work.id}:${index}`)
+}
+
+// A redrawn image still waiting for its new image; the overlay hides as soon
+// as the new image is shown, while it is still being saved to the browser.
+function isAwaitingRedrawnImage(work: CreatorHistoryItem, index: number) {
+  return isRegeneratingImage(work, index) && !work.outputs.some((output, outputIndex) => output && (work.imageOutputIndexes?.[outputIndex] ?? outputIndex) === index)
+}
+
+// Same rule as the retry button inside a failed image slot, so the toolbar copy is clickable exactly when that one is.
+function canRetryMissingImage(work: CreatorHistoryItem, entry: { output: string; state: string; index: number }) {
+  if (work.type !== 'image' || entry.output || entry.state !== 'failed' || isRegeneratingImage(work, entry.index)) return false
+  const joinable = joinableImageWorkIds.has(work.id)
+  if (work.status === 'pending' && !isInPlaceImageRetry(work) && !joinable) return false
+  return !activeGenerations.has(work.id) || joinable
+}
+
+// A missing image or video shot that is being generated again in its own slot.
+function isRegeneratingSlot(work: CreatorHistoryItem, index: number) {
+  return work.type === 'video'
+    ? regeneratingShotKeys.has(`${work.id}:${index}`) && !work.outputs.some((output, outputIndex) => output && shotIndexForOutput(work, outputIndex) === index)
+    : isRegeneratingImage(work, index)
+}
+
+// Slots of the open work being generated again in place and still without their new result.
+const hasRegeneratingSlot = computed(() => {
+  const work = selectedWork.value
+  if (!work) return false
+  return Array.from({ length: resultOutputCount(work) }, (_, index) => index)
+    .some(index => work.type === 'image' ? isAwaitingRedrawnImage(work, index) : isRegeneratingSlot(work, index))
+})
+
+// Requests one slot again inside a running work. A redrawn slot that gets no
+// new image takes its original image back.
+function requestImageSlotAgain(work: CreatorHistoryItem, input: ImageGenerationSnapshot, task: GenerationTask, index: number) {
+  return requestImageSlots(work, input, task, index).then(async error => {
+    if (restoreRedrawnImage(work, index)) {
+      task.restoredRedraws = (task.restoredRedraws || 0) + 1
+      applyHistoryUpdate(cloneWork(work))
+      await persistWork(work)
+      appStore.showWarning(`图片 ${index + 1} 重新生成失败，已保留原图`)
+    }
+    return error
+  }).finally(() => {
+    regeneratingImageKeys.delete(`${work.id}:${index}`)
+    redrawnImageFallbacks.delete(`${work.id}:${index}`)
+  })
+}
+
+async function runImageWork(work: CreatorHistoryItem, input: ImageGenerationSnapshot, task: GenerationTask, retryIndexes?: number[]) {
+  const jobs: Promise<void>[] = []
+  let lastError: unknown
+  let fatalError: unknown
+  const start = (index?: number) => {
+    jobs.push((index === undefined ? requestImageSlots(work, input, task) : requestImageSlotAgain(work, input, task, index)).then(
+      error => { if (error) lastError = error },
+      error => { fatalError ??= error },
+    ))
   }
+  imageRuns.set(work.id, { retry: start, work, task })
+  joinableImageWorkIds.add(work.id)
+  try {
+    // A slot retry requests only the chosen slots, each on its own.
+    if (retryIndexes?.length) retryIndexes.forEach(index => start(index))
+    else start()
+    // Retries clicked while waiting add more jobs; finish when none are left.
+    while (jobs.length) await Promise.all(jobs.splice(0))
+  } finally {
+    imageRuns.delete(work.id)
+    joinableImageWorkIds.delete(work.id)
+  }
+  if (fatalError) throw fatalError
+  settleImageWork(work, input, lastError)
 }
 
 type ImageBatchSettings = Pick<ImageGenerationSnapshot, 'apiKey' | 'capability' | 'outputCount' | 'sizeMode' | 'aspectRatio' | 'size'> & { outputFormat?: string }
@@ -3623,36 +4498,83 @@ function warnIgnoredSpecialFormat(outputs: string[], format: string | undefined)
 }
 
 // Saves one finished request into the work, and forgets its server task in the
-// same write so a refresh never loads the same image twice.
-async function saveImageBatch(work: CreatorHistoryItem, result: ImageGenerationResult, taskId: string | undefined, input: ImageBatchSettings) {
+// same write so a refresh never loads the same image twice. The image is shown
+// as soon as it arrives; the original is copied into the browser afterwards.
+async function saveImageBatch(work: CreatorHistoryItem, result: ImageGenerationResult, taskId: string | undefined, input: ImageBatchSettings, requestedIndex?: number) {
   const requestCount = Math.max(1, input.outputCount || 1)
-  const batchOutputs: string[] = []
-  for (const item of result.data) {
-    if (!item.url) continue
-    try {
-      batchOutputs.push(await localImageOutput(input.apiKey, item.url))
-    } catch {
-      batchOutputs.push(item.url)
-      work.imagePersistenceError = '原图尚未保存到本地，上游链接可能失效。请重试保存或立即下载原图。'
-      localSaveWarning.value = work.imagePersistenceError
-    }
-  }
-  warnIgnoredSpecialFormat(batchOutputs, input.outputFormat)
-  // Save the provider bytes unchanged. Requested dimensions are generation
-  // parameters; they must never resize, crop or re-encode the finished image.
-  const sourceSizes = await Promise.all(batchOutputs.map(readCreatorImageSize))
-  // Concurrent requests save into the same work, so read its outputs only
-  // after every await and append synchronously to keep the other images.
-  const remaining = Math.max(0, requestCount - work.outputs.length)
+  const sources = result.data.map(item => item.url).filter((url): url is string => Boolean(url))
+  // Concurrent requests save into the same work, so place the new images
+  // synchronously to keep the other images.
   const previousSizes = work.outputs.map((_, index) => work.imageOutputSizes?.[index] || '')
   const previousUpstreamSizes = work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || '')
-  work.imageOutputSizes = [...previousSizes, ...sourceSizes.slice(0, remaining)]
-  work.upstreamImageSizes = [...previousUpstreamSizes, ...sourceSizes.slice(0, remaining)]
+  const previousIndexes = work.outputs.map((_, index) => work.imageOutputIndexes?.[index] ?? index)
+  const startIndex = requestedIndex ?? (taskId ? work.imageTaskIndexes?.[taskId] : undefined)
+  const occupied = new Set([...previousIndexes, ...(work.imageFailedIndexes || [])])
+  const freeSlots = Array.from({ length: requestCount }, (_, slot) => slot).filter(slot => !occupied.has(slot)).length
+  const remaining = Math.max(0, Math.min(requestCount - work.outputs.length, freeSlots))
+  const added = sources.slice(0, remaining)
+  const addedIndexes = added.map((_, offset) => {
+    let index = (startIndex ?? 0) + offset
+    while (occupied.has(index) && index < requestCount) index++
+    if (index >= requestCount) index = Array.from({ length: requestCount }, (_, slot) => slot).find(slot => !occupied.has(slot)) ?? index
+    occupied.add(index)
+    return index
+  })
+  work.imageOutputIndexes = [...previousIndexes, ...addedIndexes]
+  work.imageOutputSizes = [...previousSizes, ...added.map(() => '')]
+  work.upstreamImageSizes = [...previousUpstreamSizes, ...added.map(() => '')]
   work.actualOutputSize = work.imageOutputSizes[0] || undefined
-  work.outputs = [...work.outputs, ...batchOutputs.slice(0, remaining)]
-  if (taskId) work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+  work.outputs = [...work.outputs, ...added]
+  if (taskId) {
+    work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+    forgetImageTaskIndex(work, taskId)
+  }
+  work.updatedAt = Date.now()
+  if (added.length && historyItems.value.some(item => item.id === work.id)) applyHistoryUpdate(cloneWork(work))
+  // Cleared only after the local copies are in work.outputs, so no card sees the link fail in between.
+  await whileSavingImages(added, () => replaceWithLocalImages(work, input, added, addedIndexes))
+}
+
+async function replaceWithLocalImages(work: CreatorHistoryItem, input: ImageBatchSettings, added: string[], addedIndexes: number[]) {
+  const localOutputs = await Promise.all(added.map(async source => {
+    try {
+      return await localImageOutput(input.apiKey, source)
+    } catch (error) {
+      console.warn('[creator] failed to save original image locally', error)
+      work.imagePersistenceError = imageSaveFailureMessage(work, imageSaveFailureReason(error, Boolean(input.apiKey)))
+      showImageSaveWarning(work)
+      return source
+    }
+  }))
+  warnIgnoredSpecialFormat(localOutputs, input.outputFormat)
+  // Save the provider bytes unchanged. Requested dimensions are generation
+  // parameters; they must never resize, crop or re-encode the finished image.
+  const sourceSizes = await Promise.all(localOutputs.map(readCreatorImageSize))
+  // Other requests may have changed the work meanwhile; replace each image
+  // only if its slot still holds the shown link.
+  const outputs = [...work.outputs]
+  const sizes = work.outputs.map((_, index) => work.imageOutputSizes?.[index] || '')
+  const upstreamSizes = work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || '')
+  addedIndexes.forEach((slot, offset) => {
+    const position = work.imageOutputIndexes?.indexOf(slot) ?? -1
+    if (position < 0 || outputs[position] !== added[offset]) return
+    outputs[position] = localOutputs[offset]
+    sizes[position] = sourceSizes[offset]
+    upstreamSizes[position] = sourceSizes[offset]
+  })
+  work.outputs = outputs
+  work.imageOutputSizes = sizes
+  work.upstreamImageSizes = upstreamSizes
+  work.actualOutputSize = sizes[0] || undefined
   work.updatedAt = Date.now()
   await persistWork(work)
+}
+
+function forgetImageTaskIndex(work: CreatorHistoryItem, taskId: string) {
+  if (!work.imageTaskIndexes) return
+  const indexes = { ...work.imageTaskIndexes }
+  delete indexes[taskId]
+  work.imageTaskIndexes = indexes
 }
 
 // Keys whose gateway answered without async image tasks (no object storage).
@@ -3673,11 +4595,71 @@ class ImageTaskPendingError extends Error {
   }
 }
 
+// One image request failed; retryable means it billed nothing and a new
+// request may succeed.
+class ImageAttemptError extends Error {
+  constructor(readonly original: unknown, readonly retryable: boolean) {
+    super(errorMessage(original, '图片生成失败'))
+  }
+}
+
+// The request succeeded but carried no image (no image is billed).
+class EmptyImageResultError extends Error {
+  constructor() {
+    super('模型没有返回可用图片')
+  }
+}
+
+function hasUsableImage(result: ImageGenerationResult) {
+  return result.data.some(item => Boolean(item.url))
+}
+
+function isEmptyImageResultError(error: unknown) {
+  return error instanceof EmptyImageResultError
+}
+
+function creatorErrorStatus(error: unknown) {
+  const candidate = typeof error === 'object' && error ? error as { status?: unknown; code?: unknown } : {}
+  const status = Number(candidate.status)
+  if (Number.isFinite(status) && status > 0) return status
+  const code = Number(candidate.code)
+  return Number.isFinite(code) ? code : 0
+}
+
+// The provider could not fetch an input image from its own storage; a new
+// submission uploads it again.
+const PROVIDER_IMAGE_FETCH_FAILURE = /image_fetch_failed|image_download_error|failed to (?:download|fetch) the provided image|could not reach the image host/i
+// A new request cannot fix these: moderation, billing, auth or parameters.
+const PERMANENT_IMAGE_FAILURE = /moderat|safety|content[_\s-]?policy|policy[_\s-]?violation|violat|nsfw|审核|违规|敏感|insufficient|余额|额度不足|quota exceeded|unauthori|forbidden|permission denied|output_format|only supports\s+n\s*=|unknown parameter/i
+
+function isPermanentImageError(error: unknown) {
+  const message = errorMessage(error, '')
+  if (PROVIDER_IMAGE_FETCH_FAILURE.test(message)) return false
+  if ([400, 401, 402, 403, 404, 413, 422].includes(creatorErrorStatus(error))) return true
+  return PERMANENT_IMAGE_FAILURE.test(message)
+}
+
+// A failed request is only resent when the gateway reported that it did not
+// reach a billed result. Timeouts and dropped connections stay final: the
+// gateway may still finish and bill that request.
+function isRetryableImageRequestError(error: unknown, capability: ImageCapability) {
+  if (isPermanentImageError(error)) return false
+  const message = errorMessage(error, '')
+  // No account of the group can serve this kind of request at all.
+  if (/no available compatible accounts/i.test(message)) return false
+  const status = creatorErrorStatus(error)
+  if ([429, 500, 502, 503].includes(status)) return true
+  if (status === 504 && capability === 'grok') return true
+  return isNoAvailableAccountError(error)
+    || PROVIDER_IMAGE_FETCH_FAILURE.test(message)
+    || /upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway|no available/i.test(message)
+}
+
 async function waitForImageTask(apiKey: string, taskId: string, outputFormat: string) {
   let consecutiveFailures = 0
   for (let attempt = 0; attempt < IMAGE_TASK_MAX_POLLS; attempt++) {
-    if (disposed) throw new Error('页面已关闭，任务可稍后从历史记录继续查看')
-    if (attempt > 0) await delay(IMAGE_TASK_POLL_INTERVAL_MS)
+    if (attempt > 0) await delayUntilDisposed(IMAGE_TASK_POLL_INTERVAL_MS)
+    if (disposed) throw new Error(PAGE_CLOSED_MESSAGE)
     let status: Awaited<ReturnType<typeof getCreatorImageTask>>
     try {
       status = await getCreatorImageTask(apiKey, taskId, { outputFormat })
@@ -3729,13 +4711,35 @@ async function resumeImageWork(work: CreatorHistoryItem) {
   }
   let lastError: unknown
   let interrupted = false
-  let taskFailed = false
+  let taskFailed = Boolean(work.imageFailedIndexes?.length)
+  // Finished images can be redrawn, and failed ones retried, while the rest
+  // are still syncing, as in a run started on this page.
+  const redrawJobs: Promise<void>[] = []
+  const retry = imageRetrySnapshot(work, requestCount)
+  if (!('error' in retry)) {
+    imageRuns.set(work.id, {
+      work,
+      task,
+      retry: index => {
+        redrawJobs.push(requestImageSlotAgain(work, retry.snapshot, task, index).then(
+          error => { if (error) lastError = error },
+          error => { interrupted = true; lastError = error },
+        ))
+      },
+    })
+    joinableImageWorkIds.add(work.id)
+  }
   try {
     for (const taskId of taskIds) {
       try {
         const result = await waitForImageTask(key.key, taskId, work.outputFormat || 'png')
         task.progress = '图片已生成，正在保存原图到当前浏览器'
         await saveImageBatch(work, result, taskId, settings)
+        // The next saved task may still be drawing; do not leave "saving" on screen while waiting for it.
+        if (work.outputs.length < requestCount) {
+          const failed = work.imageFailedIndexes?.length || 0
+          task.progress = `正在同时生成 ${requestCount} 张图片（已完成 ${work.outputs.length} 张${failed ? `，${failed} 张失败` : ''}）`
+        }
       } catch (error) {
         if (disposed) return
         if (!(error instanceof ImageTaskFailedError)) {
@@ -3745,7 +4749,10 @@ async function resumeImageWork(work: CreatorHistoryItem) {
         }
         lastError = error.cause
         taskFailed = true
+        const index = work.imageTaskIndexes?.[taskId]
+        if (index !== undefined) work.imageFailedIndexes = [...new Set([...(work.imageFailedIndexes || []), index])]
         work.imageTaskIds = work.imageTaskIds?.filter(id => id !== taskId)
+        forgetImageTaskIndex(work, taskId)
         await persistWork(work)
       }
     }
@@ -3781,6 +4788,9 @@ async function resumeImageWork(work: CreatorHistoryItem) {
         }
       }
     }
+    while (redrawJobs.length) await Promise.all(redrawJobs.splice(0))
+    if (disposed) return
+    taskFailed ||= Boolean(work.imageFailedIndexes?.length)
     if (interrupted) {
       // Unfinished tasks stay saved; the next refresh continues from here.
       applyHistoryUpdate(cloneWork(work))
@@ -3789,7 +4799,8 @@ async function resumeImageWork(work: CreatorHistoryItem) {
     }
     if (work.outputs.length) {
       work.status = 'completed'
-      if (work.outputs.length < requestCount && taskFailed) {
+      if (work.outputs.length >= requestCount) work.error = undefined
+      else if (taskFailed) {
         work.error = `已同步 ${work.outputs.length} / ${requestCount} 张；其余图片生成失败或任务已中断，请带回参数重新生成。`
       } else if (work.outputs.length < requestCount && !continued) {
         work.error = `已同步 ${work.outputs.length} / ${requestCount} 张；其余图片在页面刷新前未提交，且参考图未保存，请带回参数继续生成。`
@@ -3806,6 +4817,10 @@ async function resumeImageWork(work: CreatorHistoryItem) {
     if (work.status === 'completed') appStore.showSuccess('图片已同步到本地')
     else appStore.showError(work.error || '图片生成失败')
   } finally {
+    if (imageRuns.get(work.id)?.task === task) {
+      imageRuns.delete(work.id)
+      joinableImageWorkIds.delete(work.id)
+    }
     activeGenerations.delete(work.id)
     if (!activeGenerations.size && generationTimer !== undefined) {
       window.clearInterval(generationTimer)
@@ -3969,7 +4984,7 @@ const IMAGE_CAPABILITY_PROVIDER_NAMES: Record<ImageCapability, string> = {
 
 function localizeSvgGenerationError(message: string) {
   if (/svg\s+generation\s+requires\b/i.test(message)) {
-    return 'SVG 生成请求未通过校验。请点击“带回参数重试”；若仍失败，请切换创作分组，或改用 PNG / JPEG / WebP 格式。'
+    return 'SVG 生成请求未通过校验。请点击“重新生成”；若仍失败，请切换创作分组，或改用 PNG / JPEG / WebP 格式。'
   }
   return message
 }
@@ -3981,23 +4996,31 @@ function creatorGenerationErrorMessage(
   videoModel = '',
 ) {
   const message = localizeSvgGenerationError(errorMessage(error, '生成失败'))
+  if (mode === 'image' && isEmptyImageResultError(error)) {
+    return '模型没有返回可用图片，已自动重试仍未成功。可能是提示词或参考图触发了上游的安全过滤，请调整描述后重新生成，或稍后再试。'
+  }
   if (mode === 'video' || capability === 'grok') {
     if (isRetryableGrokTransientError(error)) {
       const videoProvider = videoProviderLabel(videoModel)
       return mode === 'video'
-        ? `${videoProvider} 视频上游暂时不可用，系统已自动重试 ${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length} 次。请稍后带回参数重试；如果频繁出现，请为当前分组增加可用 ${videoProvider} 账号。`
+        ? `${videoProvider} 视频上游暂时不可用，系统已自动重试 ${VIDEO_SUBMISSION_RETRY_DELAYS_MS.length} 次。请稍后点击“重新生成”；如果频繁出现，请为当前分组增加可用 ${videoProvider} 账号。`
         : 'Grok 上游服务暂时不可用，系统已自动重试一次。请稍后再试；如果频繁出现，请为该分组增加可用 Grok 账号。'
     }
-    if (mode === 'video') return message
+    // Cloudflare stopped waiting for the create; the provider may still have
+    // accepted it, so a quick resubmission could be billed twice.
+    if (mode === 'video' && creatorErrorStatus(error) === 524) {
+      return '视频提交等待上游响应超时（524）。上游可能仍在处理该任务，请稍等几分钟后查看账单与历史记录，再决定是否重新生成，避免重复扣费。'
+    }
+    if (mode === 'video') return localizeVideoTaskError(message)
   } else {
     // Only Grok image requests are auto-retried; other providers must name
     // their own upstream instead of reusing the Grok-specific hint.
     const provider = IMAGE_CAPABILITY_PROVIDER_NAMES[capability]
     if (isNoAvailableAccountError(error)) {
-      return `当前创作分组暂无可用的 ${provider} 账号，请切换创作分组或稍后重试；如果频繁出现，请为该分组增加可用 ${provider} 账号。`
+      return `当前创作分组暂无可用的 ${provider} 账号，请切换分组或稍后重试。`
     }
     if (isRetryableGrokTransientError(error)) {
-      return `${provider} 上游服务暂时不可用，请稍后点击“带回参数重试”；如果频繁出现，请检查该分组的 ${provider} 账号状态。`
+      return `${provider} 上游暂时不可用，请稍后重试。`
     }
   }
   if (/output_format/i.test(message) && /invalid|unsupported|not supported|无效|不支持/i.test(message)) {
@@ -4010,7 +5033,7 @@ function creatorGenerationErrorMessage(
     return '当前图片模型每次请求只能生成 1 张图片；系统已自动按单张请求处理。若仍失败，请切换创作分组或稍后重试。'
   }
   if (/unknown parameter:\s*["']?tools\[0\]\.n|tools\[0\]\.n/i.test(message)) {
-    return '当前图片通道不支持批量参数；系统已自动改为逐张生成。请点击“带回参数重试”。'
+    return '当前图片通道不支持批量参数；系统已自动改为逐张生成。请点击“重新生成”。'
   }
   if (/no available compatible accounts/i.test(message)) {
     return '当前创作分组没有可用的兼容图片账号，请切换创作分组或稍后重试。'
@@ -4019,7 +5042,7 @@ function creatorGenerationErrorMessage(
     return '当前 gpt-image-2 图片通道不支持所选 4K 尺寸，请切换创作分组或改用 1K / 2K。'
   }
   if (/timeout|timed out|deadline exceeded|network|upstream request failed|gateway timeout|连接|超时|网络/i.test(message)) {
-    return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“带回参数重试”，不要连续重复提交。'
+    return '图片模型响应较慢或网络暂时不稳定，网关会自动切换可用通道。请稍后点击“重新生成”，不要连续重复提交。'
   }
   return message
 }
@@ -4033,6 +5056,32 @@ function isRetryableGrokTransientError(error: unknown) {
   return /upstream service temporarily unavailable|service temporarily unavailable|service unavailable|bad gateway/i.test(
     candidate.error?.message || candidate.message || '',
   )
+}
+
+// Reading a task never bills or submits anything, so a status/content read can
+// safely retry every transient failure: gateway 5xx, key queue 429, and a
+// connection dropped while a refreshed page fires its first requests.
+function isTransientVideoLookupError(error: unknown) {
+  if (isMissingVideoRequest(error)) return false
+  if (isRetryableGrokTransientError(error)) return true
+  const candidate = typeof error === 'object' && error ? error as { status?: number } : {}
+  // 520-524 are Cloudflare origin errors (524: origin read timeout).
+  if ([408, 425, 429, 500, 520, 521, 522, 523, 524].includes(Number(candidate.status))) return true
+  return /failed to fetch|load failed|networkerror|network error|upstream request failed|upstream transport failed|timed out|timeout|连接中断|网关超时|视频内容不完整/i
+    .test(errorMessage(error, ''))
+}
+
+const VIDEO_LOOKUP_RETRY_DELAYS_MS = [1000, 2500, 5000]
+
+async function withVideoLookupRetry<T>(read: () => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await read()
+    } catch (error) {
+      if (disposed || attempt >= VIDEO_LOOKUP_RETRY_DELAYS_MS.length || !isTransientVideoLookupError(error)) throw error
+      await delay(VIDEO_LOOKUP_RETRY_DELAYS_MS[attempt])
+    }
+  }
 }
 
 // The gateway answers an empty or exhausted account pool with 503
@@ -4060,13 +5109,16 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
   const blobByShot = new Map<number, Blob>()
   const urlByShot = new Map<number, string>()
   const failedShots = new Set<number>(resumed?.failedShots)
+  const redrawFallbacks = new Map(resumed?.redrawFallbacks)
+  // Shots that got a new video in this run; without any, the complete video is unchanged.
+  let producedShots = 0
   let lastError: unknown = resumed?.lastError
   for (const [position, shotIndex] of (resumed?.shotIndexes || []).entries()) {
     requestIdByShot.set(shotIndex, resumed!.requestIds[position])
     const blob = resumed!.outputBlobs[position]
     if (blob) {
       blobByShot.set(shotIndex, blob)
-      urlByShot.set(shotIndex, createTrackedObjectUrl(blob))
+      urlByShot.set(shotIndex, resumed!.outputUrls?.[position] || createTrackedObjectUrl(blob))
     }
   }
   const isSettled = (index: number) => requestIdByShot.has(index) || failedShots.has(index)
@@ -4094,6 +5146,10 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
       }
     }
     work.updatedAt = Date.now()
+    // The result cards read history rather than the task, so each finished shot
+    // shows in its card at once. Updating it before each save also lets the copy
+    // read back from storage reuse these blobs, so finished players keep their URLs.
+    if (historyItems.value.some(item => item.id === work.id)) applyHistoryUpdate(cloneWork(work))
   }
 
   // A single shot reports straight into the task. Multiple shots each get their
@@ -4110,14 +5166,7 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
       startedAt: Date.now(),
     })
     : task)
-  // Initialize reactive shot outputs for the UI to track finished shots.
-  if (multiShot) {
-    task.shotOutputs = reactive(new Map())
-    task.failedShots = reactive(new Set(failedShots))
-    for (const [index, url] of urlByShot.entries()) {
-      task.shotOutputs.set(index, url)
-    }
-  }
+  task.shotTasks = shotTasks
   const refreshProgress = () => {
     if (!multiShot) return
     const finished = blobByShot.size
@@ -4158,7 +5207,10 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
         created = await createCreatorVideo(key, request)
         break
       } catch (error) {
-        if (!isRetryableGrokTransientError(error) || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
+        // A create rejected because the provider could not read the image
+        // created no task, so it is sent again like a temporary outage.
+        const retryable = isRetryableGrokTransientError(error) || PROVIDER_IMAGE_FETCH_FAILURE.test(errorMessage(error, ''))
+        if (!retryable || attempt >= VIDEO_SUBMISSION_RETRY_DELAYS_MS.length) throw error
         const retryNumber = attempt + 1
         const retryDelay = VIDEO_SUBMISSION_RETRY_DELAYS_MS[attempt]
         const delaySeconds = retryDelay / 1000
@@ -4184,24 +5236,63 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
     const shotTask = shotTasks[index]
     try {
       let requestId = requestIdByShot.get(index)
-      if (!requestId) {
-        requestId = await submitShot(index, shotTask)
-        requestIdByShot.set(index, requestId)
-        syncShotState()
-        await persistWork(work)
+      let videoBlob: Blob
+      for (let resubmits = 0; ; resubmits++) {
+        if (!requestId) {
+          requestId = await submitShot(index, shotTask)
+          requestIdByShot.set(index, requestId)
+          syncShotState()
+          await persistWork(work)
+        }
+        shotTask.phase = 'generating'
+        try {
+          // Relay videos can take up to 30 minutes; keep polling longer than for Grok.
+          videoBlob = await waitForVideo(key, requestId, multiShot ? 0 : index, multiShot ? 1 : shots.length, shotTask, relayVideo ? 450 : 150)
+          break
+        } catch (error) {
+          // The provider could not read the reference image it was sent. That
+          // task failed unbilled; send the same images again. A shot resumed
+          // after a refresh no longer holds its images and is left failed.
+          const shot = shots[index]
+          const hasImages = shot.generationMethod === 'text' || shot.referenceFiles.length > 0
+          if (disposed || !hasImages || resubmits >= VIDEO_IMAGE_FETCH_RESUBMITS || !PROVIDER_IMAGE_FETCH_FAILURE.test(errorMessage(error, ''))) throw error
+          const label = multiShot ? `镜头 ${index + 1} ` : ''
+          shotTask.phase = 'submitting'
+          shotTask.hasExactProgress = false
+          shotTask.progress = `${label}上游读取参考图失败，3 秒后自动重试（${resubmits + 1}/${VIDEO_IMAGE_FETCH_RESUBMITS}）`
+          requestIdByShot.delete(index)
+          requestId = undefined
+          await delay(3000)
+        }
       }
-      shotTask.phase = 'generating'
-      // Relay videos can take up to 30 minutes; keep polling longer than for Grok.
-      const videoBlob = await waitForVideo(key, requestId, multiShot ? 0 : index, multiShot ? 1 : shots.length, shotTask, relayVideo ? 450 : 150)
       blobByShot.set(index, videoBlob)
       const url = createTrackedObjectUrl(videoBlob)
       urlByShot.set(index, url)
+      redrawFallbacks.delete(index)
+      producedShots++
+      regeneratingShotKeys.delete(`${work.id}:${index}`)
       shotTask.percent = 100
-      // Update task's reactive shot outputs so the UI shows the finished video immediately.
-      if (multiShot && task.shotOutputs) task.shotOutputs.set(index, url)
       syncShotState()
+      // The shot is already on screen; count it now rather than after the slow IndexedDB write.
+      refreshProgress()
       await persistWork(work)
     } catch (error) {
+      const original = redrawFallbacks.get(index)
+      if (original) {
+        // A failed redraw puts the shot's original video back in its slot.
+        redrawFallbacks.delete(index)
+        requestIdByShot.set(index, original.requestId)
+        blobByShot.set(index, original.blob)
+        urlByShot.set(index, original.url)
+        shotTask.percent = 100
+        task.restoredRedraws = (task.restoredRedraws || 0) + 1
+        regeneratingShotKeys.delete(`${work.id}:${index}`)
+        syncShotState()
+        await persistWork(work)
+        if (!disposed) appStore.showWarning(`镜头 ${index + 1} 重新生成失败，已保留原视频`)
+        refreshProgress()
+        return
+      }
       // A single-shot video, or a closed page, still fails as a whole.
       if (!multiShot || disposed) throw error
       // Download interruptions keep the requestId so the user can reload later;
@@ -4211,21 +5302,59 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
       failedShots.add(index)
       if (!isDownloadFailure) requestIdByShot.delete(index)
       shotTask.percent = 100
-      // Update task's reactive failed shots so the UI marks the shot as failed immediately.
-      if (task.failedShots) task.failedShots.add(index)
+      regeneratingShotKeys.delete(`${work.id}:${index}`)
       syncShotState()
       await persistWork(work)
     }
     refreshProgress()
   }
 
-  const pendingShots = shots.map((_, index) => index).filter(index => !blobByShot.has(index) && !failedShots.has(index))
+  const jobs: Promise<void>[] = []
+  let fatal: { reason: unknown } | undefined
+  const startShot = (index: number) => {
+    jobs.push(runShot(index).catch((reason) => { fatal ??= { reason } }))
+  }
+  // Another shot of this work, clicked while the run is going: it starts at once.
+  const join = (index: number, redraw: boolean) => {
+    if (index < 0 || index >= shots.length) return false
+    if (blobByShot.has(index)) {
+      if (!redraw) return false
+      redrawFallbacks.set(index, { blob: blobByShot.get(index)!, url: urlByShot.get(index)!, requestId: requestIdByShot.get(index)! })
+      blobByShot.delete(index)
+      urlByShot.delete(index)
+    } else if (failedShots.has(index)) {
+      failedShots.delete(index)
+    } else return false
+    requestIdByShot.delete(index)
+    Object.assign(shotTasks[index], { phase: 'submitting', hasExactProgress: false, percent: 0, progress: '', startedAt: Date.now() })
+    if (work.shotQueue) {
+      work.shotQueue = {
+        ...work.shotQueue,
+        referenceBlobs: work.shotQueue.referenceBlobs.map((blobs, slot) => slot === index ? [...shots[index].referenceFiles] : blobs),
+      }
+    }
+    syncShotState()
+    void persistWork(work)
+    refreshProgress()
+    startShot(index)
+    return true
+  }
+  const joinable = inPlaceVideoRetryIds.has(work.id)
+  if (joinable) {
+    videoRuns.set(work.id, { work, shots, join })
+    joinableVideoWorkIds.add(work.id)
+  }
+  shots.forEach((_, index) => { if (!blobByShot.has(index) && !failedShots.has(index)) startShot(index) })
   refreshProgress()
   try {
-    const settled = await Promise.allSettled(pendingShots.map(runShot))
-    const fatal = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+    // Shots joined while waiting add more jobs; finish when none are left.
+    while (jobs.length) await Promise.all(jobs.splice(0))
     if (fatal) throw fatal.reason
   } finally {
+    if (joinable) {
+      videoRuns.delete(work.id)
+      joinableVideoWorkIds.delete(work.id)
+    }
     stopProgressWatch?.()
   }
   syncShotState()
@@ -4238,7 +5367,7 @@ async function generateVideoWork(work: CreatorHistoryItem, input: VideoGeneratio
     const failedLabels = [...failedShots].sort((left, right) => left - right).map(index => index + 1).join('、')
     work.error = `已生成 ${work.outputs.length} / ${shots.length} 段，其余 ${failedShots.size} 段生成失败（镜头 ${failedLabels}）：${reason}`
   }
-  if (outputBlobs.length > 1) {
+  if (outputBlobs.length > 1 && (producedShots || !work.mergedOutput)) {
     task.progress = failedShots.size ? '已完成的镜头正在合成完整视频' : '所有镜头已完成，正在合成完整视频'
     await composeWorkVideo(work, outputBlobs, false)
   }
@@ -4254,17 +5383,17 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
 
   let consecutiveStatusFailures = 0
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    if (disposed) throw new Error('页面已关闭，任务可稍后从历史记录继续查看')
-    if (attempt > 0) await delay(4000)
+    if (attempt > 0) await delayUntilDisposed(4000)
+    if (disposed) throw new Error(PAGE_CLOSED_MESSAGE)
     let status: Awaited<ReturnType<typeof getCreatorVideoStatus>>
     try {
       status = await getCreatorVideoStatus(apiKey, requestId)
       consecutiveStatusFailures = 0
     } catch (error) {
-      if (!isRetryableGrokTransientError(error)) throw error
+      if (!isTransientVideoLookupError(error)) throw error
       consecutiveStatusFailures++
       if (consecutiveStatusFailures >= VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES) {
-        throw new Error('视频任务已提交，但状态查询连续失败。任务可能仍在生成，请稍后在历史记录中重新打开该作品查看结果，不要重复提交。')
+        throw new VideoStatusLookupError('视频任务已提交，但状态查询连续失败。任务可能仍在生成，请稍后在历史记录中重新打开该作品查看结果，不要重复提交。')
       }
       task.progress = `任务状态查询暂时失败，正在自动重试（${consecutiveStatusFailures}/${VIDEO_STATUS_MAX_CONSECUTIVE_FAILURES - 1}）`
       continue
@@ -4325,10 +5454,24 @@ async function waitForVideo(apiKey: string, requestId: string, shotIndex: number
   throw new Error('视频生成等待超时，请稍后刷新历史记录')
 }
 
+// Provider videos often carry one keyframe every ~10 s, which makes dragging the
+// progress bar stutter; re-encode them in the browser right after download.
+async function seekableVideo(blob: Blob) {
+  try {
+    if (!await needsSeekableReencode(blob)) return blob
+    const { reencodeVideoForSeeking } = await import('@/services/videoComposer')
+    return await reencodeVideoForSeeking(blob)
+  } catch {
+    return blob
+  }
+}
+
 async function downloadFinishedVideo(apiKey: string, requestId: string, task: GenerationTask) {
   for (let attempt = 0; ; attempt++) {
     try {
-      return await getCreatorVideoContent(apiKey, requestId)
+      const blob = await getCreatorVideoContent(apiKey, requestId)
+      task.progress = '正在优化视频，让进度条拖动更流畅'
+      return await seekableVideo(blob)
     } catch (error) {
       if (disposed || isMissingVideoRequest(error)) throw error
       if (attempt >= VIDEO_CONTENT_RETRY_DELAYS_MS.length) throw new VideoContentDownloadError(VIDEO_CONTENT_DOWNLOAD_FAILED_MESSAGE)
@@ -4336,6 +5479,17 @@ async function downloadFinishedVideo(apiKey: string, requestId: string, task: Ge
       await delay(VIDEO_CONTENT_RETRY_DELAYS_MS[attempt])
     }
   }
+}
+
+function localSaveFailureMessage(errorName?: string) {
+  const reason = errorName === 'QuotaExceededError'
+    ? '浏览器分配给本站的存储空间已满，可删除部分旧作品（尤其是视频）后重试'
+    : errorName === 'IndexedDBUnavailable'
+      ? '当前浏览器禁用了本地存储（如无痕窗口），请换用普通窗口'
+      : errorName === 'IndexedDBOpenFailed'
+        ? '本地存储打开失败，可能有其他旧标签页占用，请关闭其他创作中心标签页后重试'
+        : `本地存储写入失败${errorName ? `（${errorName}）` : ''}`
+  return `${reason}：部分作品仅在本次页面中保留，请立即下载原图；刷新后可能丢失。`
 }
 
 async function persistWork(work: CreatorHistoryItem, expectedUpdatedAt?: number) {
@@ -4349,15 +5503,33 @@ async function persistWork(work: CreatorHistoryItem, expectedUpdatedAt?: number)
     ? await creatorHistory.put(storedWork)
     : await creatorHistory.put(storedWork, expectedUpdatedAt)
   if (saved === false) {
-    localSaveWarning.value = '浏览器空间不足或本地存储不可用：部分作品仅在本次页面中保留，请立即下载原图；刷新后可能丢失。'
+    localSaveWarningWorkId.value = null
+    localSaveWarning.value = localSaveFailureMessage(creatorHistory.lastWriteError?.())
   }
+  reportEvictedVideos()
   return saved
+}
+
+// The history store frees space by dropping the local copy of the oldest
+// finished videos; they reload from the server when opened, while the server
+// still keeps the task.
+function reportEvictedVideos() {
+  const ids = creatorHistory.takeEvictedVideos?.() || []
+  if (!ids.length) return
+  for (const item of historyItems.value) {
+    if (ids.includes(item.id)) item.videoBlobsEvicted = true
+  }
+  appStore.showWarning(`浏览器存储空间不足，已清理 ${ids.length} 个较早视频的本地副本。打开时会从服务端重新下载，视频服务已清理的任务将无法恢复，重要视频请及时下载。`, 8000)
 }
 
 function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...work,
     outputs: [...work.outputs],
+    imageOutputIndexes: work.imageOutputIndexes ? [...work.imageOutputIndexes] : undefined,
+    imageTaskIndexes: work.imageTaskIndexes ? { ...work.imageTaskIndexes } : undefined,
+    imageFailedIndexes: work.imageFailedIndexes ? [...work.imageFailedIndexes] : undefined,
+    fallbackModels: work.fallbackModels ? [...work.fallbackModels] : undefined,
     upstreamImageSizes: work.upstreamImageSizes ? [...work.upstreamImageSizes] : undefined,
     imageOutputSizes: work.imageOutputSizes ? [...work.imageOutputSizes] : undefined,
     videoBlobs: work.videoBlobs ? [...work.videoBlobs] : undefined,
@@ -4371,6 +5543,9 @@ function cloneWork(work: CreatorHistoryItem): CreatorHistoryItem {
     shotActualOutputSizes: work.shotActualOutputSizes ? [...work.shotActualOutputSizes] : undefined,
     shotOutputIndexes: work.shotOutputIndexes ? [...work.shotOutputIndexes] : undefined,
     imageTaskIds: work.imageTaskIds ? [...work.imageTaskIds] : undefined,
+    referenceBlobs: work.referenceBlobs ? [...work.referenceBlobs] : undefined,
+    shotReferenceBlobs: work.shotReferenceBlobs ? work.shotReferenceBlobs.map(blobs => [...blobs]) : undefined,
+    billingIds: work.billingIds ? [...work.billingIds] : undefined,
   }
 }
 
@@ -4404,13 +5579,26 @@ function sameVideoBlob(left?: Blob, right?: Blob) {
 }
 
 function reuseLoadedVideoBlobs(work: CreatorHistoryItem, previous?: CreatorHistoryItem) {
-  if (work.type !== 'video' || !previous || previous === work || previous.requestId !== work.requestId) return
+  if (work.type !== 'video' || !previous || previous === work) return
   const previousBlobs = previous.videoBlobs
-  if (previousBlobs && work.videoBlobs?.length === previousBlobs.length
-    && work.videoBlobs.every((blob, index) => sameVideoBlob(blob, previousBlobs[index]))) {
-    work.videoBlobs = [...previousBlobs]
+  const sameTasks = previous.requestId === work.requestId
+  if (previousBlobs?.length && work.videoBlobs?.length) {
+    // Each shot is matched by its own task, so retrying a missing shot (which
+    // adds a task) keeps the finished shots' blobs, URLs and players.
+    const previousTasks = (previous.requestId || '').split(',').map(id => id.trim())
+    const tasks = (work.requestId || '').split(',').map(id => id.trim())
+    work.videoBlobs = work.videoBlobs.map((blob, index) => {
+      const previousIndex = sameTasks ? index : tasks[index] ? previousTasks.indexOf(tasks[index]) : -1
+      const loaded = previousIndex >= 0 ? previousBlobs[previousIndex] : undefined
+      return loaded && sameVideoBlob(blob, loaded) ? loaded : blob
+    })
   }
   if (sameVideoBlob(work.mergedVideoBlob, previous.mergedVideoBlob)) work.mergedVideoBlob = previous.mergedVideoBlob
+  // A copy freed from storage stays playable for the rest of this page session.
+  if (sameTasks && work.videoBlobsEvicted && !work.videoBlobs?.length && !work.outputs.length && previousBlobs?.length) {
+    work.videoBlobs = [...previousBlobs]
+    work.mergedVideoBlob ??= previous.mergedVideoBlob
+  }
 }
 
 function restorePersistedVideoOutputs(work: CreatorHistoryItem) {
@@ -4469,6 +5657,8 @@ function openHistoryWork(work: CreatorHistoryItem) {
   const fromDrawer = compactHistory.value && historyDrawerOpen.value
   historyDrawerOpen.value = false
   void selectWork(work)
+  // Each opened work starts at the top of the canvas, not where the previous one was scrolled.
+  void nextTick(() => { if (canvasPanelElement.value) canvasPanelElement.value.scrollTop = 0 })
   // Wait for the drawer watcher to release the body scroll lock.
   if (fromDrawer) void nextTick(() => { window.scrollTo?.({ top: 0, behavior: 'smooth' }) })
 }
@@ -4510,7 +5700,20 @@ function endHistoryDrag() {
   historyDragOffset.value = 0
 }
 
+let selectWorkSequence = 0
+
 async function selectWork(work: CreatorHistoryItem) {
+  const sequence = ++selectWorkSequence
+  if (work.imageOutputsPending) {
+    try {
+      work = await loadHistoryImages(work)
+    } catch (error) {
+      appStore.showError(errorMessage(error, '读取作品图片失败'))
+      return
+    }
+    // A later click wins over this slower read.
+    if (sequence !== selectWorkSequence || disposed) return
+  }
   if (studioMode.value !== work.type) modeSelections[studioMode.value] = selectedWork.value?.id || null
   restorePersistedVideoOutputs(work)
   selectedWork.value = work
@@ -4519,27 +5722,98 @@ async function selectWork(work: CreatorHistoryItem) {
   const shouldRefreshVideo = !activeGenerations.has(work.id) && work.type === 'video'
     && Boolean(work.requestId)
     && (work.status === 'pending' || !work.outputs.length || needsMergedVideo)
-  if (shouldRefreshVideo) loadingVideoWorkId.value = work.id
+  // A pending video tracks its server task in the background, so opening it
+  // shows the live progress directly instead of a status check first.
+  const trackingVideo = shouldRefreshVideo && work.status === 'pending'
+    && !hasPendingShotQueue(work) && trackPendingVideo(work)
+  if (shouldRefreshVideo && !trackingVideo) loadingVideoWorkId.value = work.id
   await restoreWorkSettings(work)
   if (work.type === 'image' && !activeGenerations.has(work.id)) {
     await preserveHistoricalImage(work)
-    if (work.imagePersistenceError) localSaveWarning.value = work.imagePersistenceError
+    showImageSaveWarning(work)
     await readHistoricalImageSizes(selectedWork.value?.id === work.id ? selectedWork.value : work)
     // A refreshed page reattaches to the server-side image tasks right away.
     if (work.status === 'pending' && work.imageTaskIds?.length) void resumeImageWork(work)
   }
   // A refreshed page resumes submitting a multi-shot video's remaining shots.
   if (!activeGenerations.has(work.id) && work.type === 'video'
-    && work.status === 'pending' && work.shotQueue && work.shotQueue.nextIndex < (work.shotCount || 0)) {
+    && work.status === 'pending' && hasPendingShotQueue(work)) {
     void resumeVideoShotQueue(work)
     return
   }
-  if (shouldRefreshVideo) await refreshVideoWork(work, true)
+  void failInterruptedVideoSubmission(work)
+  // Without a background tracker (no usable key yet), check once and show the result.
+  if (shouldRefreshVideo && !trackingVideo) await refreshVideoWork(work, true, work.status === 'pending')
+}
+
+const INTERRUPTED_VIDEO_SUBMISSION_MESSAGE = '提交视频任务时页面被刷新或关闭，没有拿到任务编号，无法继续同步。请点击“重新生成”再试一次。'
+// Without the Web Locks API another window's submission cannot be seen, so
+// only a work left this long without a task ID counts as interrupted.
+const INTERRUPTED_VIDEO_SUBMISSION_AGE_MS = 10 * 60 * 1000
+const checkingInterruptedVideoIds = new Set<string>()
+
+// A single-shot video gets its task ID only when the submission returns. A page
+// refreshed or closed before that leaves the work pending with nothing to
+// track, so it would wait forever; once no window is submitting it, fail it.
+async function failInterruptedVideoSubmission(work: CreatorHistoryItem) {
+  const interrupted = (item: CreatorHistoryItem | undefined): item is CreatorHistoryItem => Boolean(item
+    && item.type === 'video' && item.status === 'pending' && !item.requestId && !item.outputs.length
+    && !hasPendingShotQueue(item) && !activeGenerations.has(item.id) && !resumingVideoShotQueues.has(item.id))
+  if (disposed || !interrupted(work) || checkingInterruptedVideoIds.has(work.id)) return
+  checkingInterruptedVideoIds.add(work.id)
+  try {
+    const locks = typeof navigator === 'undefined' ? undefined : navigator.locks
+    if (locks) {
+      // The submitting window holds this lock for the whole run; a held lock
+      // means the submission is still going.
+      await locks.request(`creator-video-shots:${work.id}`, { ifAvailable: true }, async (lock) => {
+        if (lock) await markInterrupted()
+      }).catch(() => undefined)
+    } else if (Date.now() - work.updatedAt >= INTERRUPTED_VIDEO_SUBMISSION_AGE_MS) {
+      await markInterrupted()
+    }
+  } finally {
+    checkingInterruptedVideoIds.delete(work.id)
+  }
+
+  async function markInterrupted() {
+    // Another window may have saved the task ID meanwhile.
+    const latest = await creatorHistory.get(work.id)
+    if (disposed || !interrupted(latest)) return
+    const failed: CreatorHistoryItem = { ...latest, status: 'failed', error: INTERRUPTED_VIDEO_SUBMISSION_MESSAGE, updatedAt: Date.now() }
+    // A conflicting write means another window changed the work first.
+    if (await persistWork(failed, latest.updatedAt) === undefined) return
+    applyHistoryUpdate(cloneWork(failed))
+  }
+}
+
+function hasPendingShotQueue(work: CreatorHistoryItem) {
+  return Boolean(work.shotQueue && work.shotQueue.nextIndex < (work.shotCount || 0))
+}
+
+// Reattach a pending video to its server task without waiting for the user to
+// open it. Returns false when no tracker could start, e.g. no usable key.
+// Covers the whole tracker, including its follow-up check after a failure.
+const trackedVideoIds = new Set<string>()
+function trackPendingVideo(work: CreatorHistoryItem) {
+  if (trackedVideoIds.has(work.id)) return true
+  if (disposed || work.type !== 'video' || work.status !== 'pending' || !work.requestId
+    || activeGenerations.has(work.id) || hasPendingShotQueue(work)) return false
+  const key = findKeyForWork(work)
+  if (!key) return false
+  if (videoHistoryFeedback.value?.workId === work.id) videoHistoryFeedback.value = null
+  trackedVideoIds.add(work.id)
+  void resumeVideoTracking(work, key.key, new Map()).finally(() => trackedVideoIds.delete(work.id))
+  return true
 }
 
 // Reloading from an error card keeps the spinner inside that same card, then
 // the finished video replaces it directly instead of flashing a separate loading card.
 const reloadingVideoInPlaceId = ref('')
+// A failed video reloaded from its card shows the spinner in that card.
+function isReloadingVideoCard(work: CreatorHistoryItem) {
+  return reloadingVideoInPlaceId.value === work.id && !work.outputs.length && !needsVideoDownload(work)
+}
 function isLoadingSelectedVideo(work: CreatorHistoryItem) {
   return loadingVideoWorkId.value === work.id || reloadingVideoInPlaceId.value === work.id
 }
@@ -4583,6 +5857,7 @@ async function reloadVideoInPlace(work: CreatorHistoryItem, quiet = false) {
 
 // A manual check of a still-rendering task resumes live polling, so progress
 // lost to a page refresh is shown again until the video loads.
+let lastVideoCheckToast = ''
 async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume = !quiet) {
   if (checkingVideoHistory.value || activeGenerations.has(work.id) || !work.requestId) {
     if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
@@ -4604,6 +5879,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
   work.apiKeyId = key.id
   if (key.group_id) work.groupId = key.group_id
   if (matchedGroup?.name) work.groupName = matchedGroup.name
+  loadingVideoWorkId.value = work.id
   checkingVideoHistory.value = true
   videoHistoryFeedback.value = null
   let resumeWork: CreatorHistoryItem | undefined
@@ -4621,18 +5897,18 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
     // later shot fails; older records still fail as a whole.
     const tracksShots = Boolean(work.shotOutputIndexes) && requestIds.length === work.shotOutputIndexes?.length
     for (const [requestIndex, requestId] of requestIds.entries()) {
-      const status = await getCreatorVideoStatus(key.key, requestId)
+      const status = await withVideoLookupRetry(() => getCreatorVideoStatus(key.key, requestId))
       const normalized = String(status.status || '').toLowerCase()
       if (['failed', 'error', 'cancelled', 'canceled', 'expired'].includes(normalized)) {
         failedError = normalized === 'expired'
-          ? '该视频任务已过期，无法继续查询。请带回原参数重新生成。'
+          ? `${evictedVideoNote(work)}该视频任务已过期，无法继续查询。请带回原参数重新生成。`
           : videoHistoryErrorMessage(status.error, '视频生成失败，请带回原参数重试。')
         continue
       }
       keptRequestIds.push(requestId)
       if (tracksShots) keptShotIndexes.push(work.shotOutputIndexes![requestIndex])
       if (['completed', 'succeeded', 'success', 'done'].includes(normalized) || status.url) {
-        const blob = await getCreatorVideoContent(key.key, requestId)
+        const blob = await seekableVideo(await withVideoLookupRetry(() => getCreatorVideoContent(key.key, requestId)))
         loadedBlobs.set(requestId, blob)
         outputBlobs.push(blob)
         outputs.push(createTrackedObjectUrl(blob))
@@ -4653,6 +5929,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
     if (outputs.length) {
       work.outputs = outputs
       work.videoBlobs = outputBlobs
+      work.videoBlobsEvicted = undefined
     }
     // A work failed only by an interrupted download recovers once every task loads.
     const recovered = work.status === 'failed' && !failedError && outputs.length > 0 && outputs.length === requestIds.length
@@ -4669,6 +5946,7 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
     await persistWork(work)
     historyItems.value = historyItems.value.map(item => item.id === work.id ? cloneWork(work) : item)
     if (selectedWork.value?.id === work.id) selectedWork.value = historyItems.value.find(item => item.id === work.id) || work
+    lastVideoCheckToast = ''
     if (work.status === 'failed') {
       videoHistoryFeedback.value = null
       if (!quiet) appStore.showError(work.error || '视频生成失败，请带回原参数重试。')
@@ -4684,7 +5962,8 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
       if (!quiet) appStore.showSuccess('视频已生成并加载')
     }
   } catch (error) {
-    const message = videoHistoryErrorMessage(error, '任务状态检查失败，请稍后重试。')
+    const missing = isMissingVideoRequest(error) || /expired|已过期/i.test(errorMessage(error, ''))
+    const message = `${missing ? evictedVideoNote(work) : ''}${videoHistoryErrorMessage(error, '任务状态检查失败，请稍后重试。')}`
     if (isMissingVideoRequest(error)) {
       work.status = 'failed'
       work.error = message
@@ -4696,7 +5975,12 @@ async function refreshVideoWork(work: CreatorHistoryItem, quiet = false, resume 
     } else {
       videoHistoryFeedback.value = { workId: work.id, tone: 'error', message }
     }
-    if (!quiet) appStore.showError(message)
+    // The inline card already shows the error; repeat the toast only when it changes.
+    const toastKey = `${work.id}:${message}`
+    if (!quiet && lastVideoCheckToast !== toastKey) {
+      lastVideoCheckToast = toastKey
+      appStore.showError(message)
+    }
   } finally {
     checkingVideoHistory.value = false
     if (loadingVideoWorkId.value === work.id) loadingVideoWorkId.value = ''
@@ -4724,10 +6008,27 @@ async function resumeVideoTracking(work: CreatorHistoryItem, apiKey: string, loa
   const relayVideo = isMiniMaxH3Model(work.model) || isSeedanceVideoModel(work.model)
   let failed = false
   try {
-    const blobs: Blob[] = []
-    for (const [index, requestId] of requestIds.entries()) {
-      blobs.push(loadedBlobs.get(requestId)
-        ?? await waitForVideo(apiKey, requestId, index, requestIds.length, task, relayVideo ? 450 : 150))
+    let blobs: Blob[] = []
+    for (let round = 0; ; round++) {
+      try {
+        blobs = []
+        for (const [index, requestId] of requestIds.entries()) {
+          const blob = loadedBlobs.get(requestId)
+            ?? await waitForVideo(apiKey, requestId, index, requestIds.length, task, relayVideo ? 450 : 150)
+          loadedBlobs.set(requestId, blob)
+          blobs.push(blob)
+        }
+        break
+      } catch (error) {
+        // A status endpoint that is briefly unreachable says nothing about the
+        // task; keep showing the sync progress and try again instead of an error.
+        if (disposed || !(error instanceof VideoStatusLookupError) || round >= VIDEO_TRACKING_RETRY_DELAYS_MS.length) throw error
+        const waitMs = VIDEO_TRACKING_RETRY_DELAYS_MS[round]
+        task.progress = `任务状态暂时无法查询，${waitMs / 1000} 秒后自动重试`
+        await delayUntilDisposed(waitMs)
+        if (disposed) throw error
+        task.progress = '正在同步视频任务进度'
+      }
     }
     work.videoBlobs = blobs
     work.outputs = blobs.map(createTrackedObjectUrl)
@@ -4753,8 +6054,15 @@ async function resumeVideoTracking(work: CreatorHistoryItem, apiKey: string, loa
       generationTimer = undefined
     }
   }
-  // Let the one-off check classify upstream failures, expiry and timeouts.
-  if (failed) await refreshVideoWork(work, false, false)
+  // Let the one-off check classify upstream failures, expiry and timeouts;
+  // background trackers of works the user is not viewing stay quiet.
+  if (failed) {
+    // Only one check runs at a time; wait for another work's check instead of skipping.
+    while (checkingVideoHistory.value && !disposed) await delayUntilDisposed(300)
+    if (disposed) return
+    const latest = historyItems.value.find(item => item.id === work.id) || work
+    await refreshVideoWork(latest, selectedWork.value?.id !== work.id, false)
+  }
 }
 
 // Holds a cross-tab lock while a multi-shot work submits shots, so two windows
@@ -4866,6 +6174,10 @@ function isVideoDownloadFailure(work: CreatorHistoryItem) {
     && /failed to fetch|load failed|networkerror|network error|连接中断|视频内容不完整|视频内容为空/i.test(work.error || '')
 }
 
+function evictedVideoNote(work: CreatorHistoryItem) {
+  return work.videoBlobsEvicted ? '本地副本已在浏览器存储空间不足时清理，' : ''
+}
+
 function isMissingVideoRequest(error: unknown) {
   const candidate = error as { status?: number; code?: string } | null
   const message = errorMessage(error, '').toLowerCase()
@@ -4874,8 +6186,30 @@ function isMissingVideoRequest(error: unknown) {
     || /video request not found|video task not found|request does not exist/.test(message)
 }
 
+// Relays answer a task the provider gave up on with an English sentence.
+function localizeVideoTaskError(message: string) {
+  if (PROVIDER_IMAGE_FETCH_FAILURE.test(message)) {
+    return '上游读取参考图失败，系统已自动重新提交仍未成功。请稍后点击“重新生成”；若反复出现，请换一张图片（建议 JPG / PNG）或切换创作分组。'
+  }
+  if (/provider could not complete this video/i.test(message)) {
+    return '上游未能完成这个视频，可重新生成。'
+  }
+  // Seedance request checks reject a model that left the catalog or lost its
+  // group price; point the user at another model instead of the raw English.
+  const unsupportedModel = message.match(/unsupported seedance model\s+"?([^"]*)"?/i)
+  if (unsupportedModel) {
+    const model = unsupportedModel[1]?.trim()
+    return `当前视频模型${model ? `「${model}」` : ''}暂不可用，可能已下架或正在维护。请在右侧“视频模型”中换一个模型后重新生成。`
+  }
+  const disabledModel = message.match(/seedance model\s+(\S+)\s+is disabled or its group price is not configured/i)
+  if (disabledModel) {
+    return `视频模型「${disabledModel[1]}」在当前创作分组未开放。请换一个视频模型，或切换创作分组后重新生成。`
+  }
+  return message
+}
+
 function videoHistoryErrorMessage(error: unknown, fallback: string) {
-  const message = errorMessage(error, '').trim()
+  const message = localizeVideoTaskError(errorMessage(error, '').trim())
   const normalized = message.toLowerCase()
   if (isMissingVideoRequest(error)) {
     return '未找到该视频任务，任务可能已过期或已被视频服务清理。请带回原参数重新生成。'
@@ -4883,6 +6217,9 @@ function videoHistoryErrorMessage(error: unknown, fallback: string) {
   if (/expired|已过期/.test(normalized)) return '该视频任务已过期，无法继续查询。请带回原参数重新生成。'
   if (/failed to fetch|network|connection|网络|连接/.test(normalized)) return '网络连接失败，暂时无法检查视频任务，请稍后重试。'
   if (/timeout|timed out|超时/.test(normalized)) return '检查视频任务超时，请稍后重试。'
+  if ((error as { status?: number } | null)?.status === 429 || /rate limit|too many requests|concurrency slot|wait queue/.test(normalized)) {
+    return '当前同步请求较多，视频任务仍在生成，请稍后再同步。'
+  }
   if (/temporarily unavailable|service unavailable|暂时不可用/.test(normalized)) return '视频服务暂时不可用，请稍后重试。'
   return /[\u3400-\u9fff]/.test(message) ? message : fallback
 }
@@ -4917,10 +6254,13 @@ async function composeWorkVideo(work: CreatorHistoryItem, blobs: Blob[], notifyF
 
 async function recomposeVideo(work: CreatorHistoryItem) {
   if (composingWorkId.value) return
+  manualComposeWorkId.value = work.id
   try {
     const blobs = await readVideoSegmentBlobs(work)
     work.videoBlobs = blobs
     await composeWorkVideo(work, blobs, true)
+    // The user is watching this card already; swap in the video without hiding it again.
+    markCompleteVideoReady(work.mergedOutput)
     work.updatedAt = Date.now()
     await persistWork(work)
     historyItems.value = historyItems.value.map(item => item.id === work.id ? cloneWork(work) : item)
@@ -4928,6 +6268,8 @@ async function recomposeVideo(work: CreatorHistoryItem) {
     if (work.mergedOutput) appStore.showSuccess('完整视频已重新合成')
   } catch (error) {
     appStore.showError(errorMessage(error, '完整视频合成失败'))
+  } finally {
+    if (manualComposeWorkId.value === work.id) manualComposeWorkId.value = ''
   }
 }
 
@@ -4973,8 +6315,32 @@ async function readVideoSegmentBlobs(work: CreatorHistoryItem): Promise<Blob[]> 
   }))
 }
 
+// Deleting takes two clicks on the same button: the first arms it, the second (within a few seconds) deletes.
+const DELETE_CONFIRM_MS = 3000
+const deleteConfirmWorkId = ref('')
+let deleteConfirmTimer: ReturnType<typeof setTimeout> | undefined
+
+function clearDeleteConfirm() {
+  if (deleteConfirmTimer) clearTimeout(deleteConfirmTimer)
+  deleteConfirmTimer = undefined
+  deleteConfirmWorkId.value = ''
+}
+
+function requestRemoveWork(work: CreatorHistoryItem) {
+  if (activeGenerations.has(work.id)) return
+  if (deleteConfirmWorkId.value === work.id) {
+    clearDeleteConfirm()
+    void removeWork(work)
+    return
+  }
+  clearDeleteConfirm()
+  deleteConfirmWorkId.value = work.id
+  deleteConfirmTimer = setTimeout(clearDeleteConfirm, DELETE_CONFIRM_MS)
+}
+
 async function removeWork(work: CreatorHistoryItem) {
   if (activeGenerations.has(work.id)) return
+  noteHistoryRemoval(work.id)
   await creatorHistory.remove(work.id)
   historyItems.value = historyItems.value.filter(item => item.id !== work.id)
   if (selectedWork.value?.id === work.id) selectedWork.value = null
@@ -5002,6 +6368,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       imageCapability.value = work.imageCapability || inferImageCapability(work)
       imageResolution.value = work.resolution || '1K'
       aspectRatio.value = work.aspectRatio || '1:1'
+      imageFollowReference.value = false
       if (imageCapability.value === 'image2') restoreImage2SizeSettings(work)
       else {
         imageSizeMode.value = 'ratio'
@@ -5009,7 +6376,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
       }
       outputCount.value = Math.max(1, Math.min(4, work.outputCount || work.outputs.length || 1))
       imageQuality.value = work.quality || 'auto'
-      outputFormat.value = work.outputFormat || 'png'
+      outputFormat.value = availableImageOutputFormat(work.outputFormat)
       gifFrameCount.value = clampGifSetting(work.frameCount, GIF_FRAME_COUNT_RANGE)
       gifFrameDurationMs.value = clampGifSetting(work.frameDurationMs, GIF_FRAME_DURATION_RANGE)
     } else {
@@ -5036,7 +6403,7 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
         prompt: shotPrompt,
         duration: work.shotDurations?.[index] || Math.max(1, Math.round((work.requestedDuration || 8) / shotPrompts.length)),
         generationMethod: work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text',
-        referenceImages: [],
+        referenceImages: referenceImagesFromBlobs(work.shotReferenceBlobs?.[index], work.id),
         aspectRatio: work.shotAspectRatios?.[index] || work.aspectRatio || '16:9',
         followSourceAspect: work.shotFollowSourceAspects?.[index] ?? true,
         resolution: work.shotResolutions?.[index] || historicalVideoResolution,
@@ -5046,7 +6413,23 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     } else {
       professionalVideo.value = false
       prompt.value = work.prompt
-      if (work.type === 'video') videoDuration.value = work.requestedDuration || work.shotDurations?.[0] || 8
+      referenceImages.value = referenceImagesFromBlobs(work.type === 'image' ? work.referenceBlobs : work.shotReferenceBlobs?.[0], work.id)
+      if (work.type === 'video') {
+        videoDuration.value = work.requestedDuration || work.shotDurations?.[0] || 8
+        // Opening the shot editor on this work starts from its own single shot,
+        // not the shots of a previously opened multi-shot work.
+        videoShots.value = [{
+          id: crypto.randomUUID(),
+          prompt: work.prompt,
+          duration: videoDuration.value,
+          generationMethod: videoGenerationMethod.value,
+          referenceImages: referenceImagesFromBlobs(work.shotReferenceBlobs?.[0], work.id),
+          aspectRatio: aspectRatio.value,
+          followSourceAspect: videoFollowSourceAspect.value,
+          resolution: historicalVideoResolution,
+        }]
+        selectedShotId.value = videoShots.value[0].id
+      }
     }
 
     restoreSettingsScroll()
@@ -5055,25 +6438,36 @@ async function restoreWorkSettings(work: CreatorHistoryItem) {
     await loadModels()
     if (sequence !== restoreSettingsSequence) return
     restoreSettingsScroll = captureSettingsScroll()
-    // Reference videos keep their model when it still takes references;
-    // otherwise pick a reference-capable model of the current group.
-    const restoringReferenceVideo = work.type === 'video' && requiresReferenceVideo15.value && !supportsReferenceVideo(work.model)
-    if (work.model && !restoringReferenceVideo) {
+    if (work.model) {
       if (!modelOptions.value.includes(work.model)) modelOptions.value = [work.model, ...modelOptions.value]
       selectedModel.value = work.model
     }
-    if (restoringReferenceVideo) syncVideoModelForGenerationMethod()
     if (work.type === 'video') {
       videoResolution.value = videoResolutionOptions.value.includes(historicalVideoResolution)
         ? historicalVideoResolution
         : videoResolutionOptions.value.includes('720p') ? '720p' : videoResolutionOptions.value[0]
+      if (!professionalVideo.value && videoShots.value.length === 1) videoShots.value[0].resolution = videoResolution.value
     }
   } finally {
     if (sequence === restoreSettingsSequence) {
       restoringWorkSettings.value = false
+      fitVideoMethodsToModel()
+      trimReferenceImages()
       restoreSettingsScroll()
     }
   }
+}
+
+// Rebuilds the reference list of a reopened work from the files saved with it.
+function referenceImagesFromBlobs(blobs: Blob[] | undefined, workId: string): ReferenceImage[] {
+  return (blobs || [])
+    .filter(blob => blob instanceof Blob && blob.size > 0)
+    .map((blob, index) => {
+      const file = blob instanceof File
+        ? blob
+        : new File([blob], `creator-reference-${workId}-${index + 1}.${(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, { type: blob.type || 'image/png' })
+      return { file, url: URL.createObjectURL(file) }
+    })
 }
 
 function restoreImage2SizeSettings(work: CreatorHistoryItem) {
@@ -5095,6 +6489,18 @@ function restoreImage2SizeSettings(work: CreatorHistoryItem) {
   }
 
   const match = /^(\d+)x(\d+)$/.exec(outputSize)
+  // Ratio mode only yields a non-preset size when it followed the first reference;
+  // reopen it that way while that reference is still saved with the work.
+  const followedReference = work.imageSizeMode === 'ratio'
+    && (work.referenceBlobs || []).some(blob => blob instanceof Blob && blob.size > 0)
+  if (match && followedReference) {
+    const [width, height] = [Number(match[1]), Number(match[2])]
+    imageSizeMode.value = 'ratio'
+    imageResolution.value = customImageResolution(width, height)
+    aspectRatio.value = nearestImageRatio(imageResolution.value, width / height)
+    imageFollowReference.value = true
+    return
+  }
   if (match) {
     const [width, height] = normalizeCustomImageSize(Number(match[1]), Number(match[2]))
     imageSizeMode.value = 'custom'
@@ -5123,22 +6529,531 @@ async function reuseWork(work: CreatorHistoryItem) {
   revealSettingsOnMobile()
 }
 
+// Submits the work again with its saved settings. When those settings can no
+// longer be submitted as-is (references not kept in history, model gone),
+// they stay in the editor for the user to fix instead.
 async function regenerateWork(work: CreatorHistoryItem) {
-  if (regeneratingWorkId.value) return
-  regeneratingWorkId.value = work.id
+  if (restoringWorkSettings.value) return
+  await restoreWorkSettings(work)
+  if (selectedWork.value?.id !== work.id) return
+  const restoredReferenceCount = studioMode.value === 'video' && professionalVideo.value
+    ? videoShots.value.reduce((sum, shot) => sum + shot.referenceImages.length, 0)
+    : referenceImages.value.length
+  const missingReferences = restoredReferenceCount < (work.referenceCount || 0)
+  if (!missingReferences && canGenerate.value) {
+    await generateFromCurrentSettings('重新生成', true)
+    return
+  }
+  selectedWork.value = null
+  await nextTick()
+  revealSettingsOnMobile()
+  appStore.showWarning(missingReferences
+    ? '原参考图未保存在历史中，已带回参数，请重新上传参考图后生成'
+    : '已带回参数，当前设置无法直接重新生成，请检查后再点击生成')
+}
+
+// The group, key and reference images an in-place image retry reuses from the work.
+type ImageRetrySource = { error: string } | { sourceGroup: Group; sourceKey: ApiKey; referenceFiles: File[] }
+function imageRetrySource(work: CreatorHistoryItem): ImageRetrySource {
+  const sourceGroup = groups.value.find(group => work.groupId ? group.id === work.groupId : group.name === work.groupName)
+  const sourceKeys = apiKeys.value.filter(key => key.status === 'active' && key.group_id === sourceGroup?.id)
+  const sourceKey = sourceKeys.find(key => key.id === work.apiKeyId) || sourceKeys[0]
+  if (!sourceGroup || sourceGroup.status !== 'active' || !sourceKey || !work.model) {
+    return { error: '原作品的分组、Key 或模型当前不可用，无法重新生成此图片' }
+  }
+  const referenceFiles = (work.referenceBlobs || [])
+    .filter(blob => blob instanceof Blob && blob.size > 0)
+    .map((blob, index) => blob instanceof File
+      ? blob
+      : new File([blob], `creator-reference-${work.id}-${index + 1}.${(blob.type.split('/')[1] || 'png').replace('jpeg', 'jpg')}`, { type: blob.type || 'image/png' }))
+  if (referenceFiles.length < (work.referenceCount || 0)) {
+    return { error: '原参考图未保存在历史中，无法自动重新生成；请重新上传参考图后再生成' }
+  }
+  return { sourceGroup, sourceKey, referenceFiles }
+}
+
+// The request settings an in-place image retry reuses from the work.
+function imageRetrySnapshot(work: CreatorHistoryItem, imageCount: number): { error: string } | { snapshot: ImageGenerationSnapshot; sourceGroup: Group; sourceKey: ApiKey } {
+  const source = imageRetrySource(work)
+  if ('error' in source) return source
+  const { sourceGroup, sourceKey, referenceFiles } = source
+  const capability = work.imageCapability || inferImageCapability(work)
+  const aspectRatio = work.aspectRatio || '1:1'
+  const resolution = work.resolution || '1K'
+  const sizeMode = work.imageSizeMode || (work.outputSize === 'auto' ? 'auto' : 'ratio')
+  const snapshot: ImageGenerationSnapshot = {
+    apiKey: sourceKey.key,
+    platform: sourceGroup.platform,
+    capability,
+    model: work.model,
+    prompt: work.prompt,
+    outputCount: imageCount,
+    size: work.outputSize || (capability === 'image2' && sizeMode === 'auto' ? 'auto' : image2SizeFor(resolution, aspectRatio)),
+    quality: work.quality || 'auto',
+    outputFormat: availableImageOutputFormat(work.outputFormat),
+    ...(work.outputFormat === 'gif' ? {
+      frameCount: clampGifSetting(work.frameCount, GIF_FRAME_COUNT_RANGE),
+      frameDurationMs: clampGifSetting(work.frameDurationMs, GIF_FRAME_DURATION_RANGE),
+    } : {}),
+    background: work.background || 'auto',
+    referenceFiles,
+    aspectRatio,
+    resolution,
+    sizeMode,
+  }
+  if (!snapshot.prompt.trim() || snapshot.prompt.length > (capability === 'image2' ? 32000 : 8000)) {
+    return { error: '原作品的提示词为空或超出长度限制，无法自动重新生成此图片' }
+  }
+  return { snapshot, sourceGroup, sourceKey }
+}
+
+// A single failed image is redrawn in the same work. When its group, key or
+// reference images are gone, bring the settings back for editing instead.
+async function retryFailedSingleImage(work: CreatorHistoryItem) {
+  if ('error' in imageRetrySource(work)) return regenerateWork(work)
+  await regenerateImageOutput(work, 0)
+}
+
+// Retries one failed image slot inside the same work; finished images stay put.
+function regenerateImageOutput(work: CreatorHistoryItem, imageIndex: number) {
+  return regenerateImageOutputs(work, [imageIndex])
+}
+
+// Missing image slots that can be retried right now: not produced, not already
+// redrawing, and not still waiting on their first result.
+function missingImageIndexes(work: CreatorHistoryItem) {
+  if (work.type !== 'image') return []
+  if (work.status === 'pending' && !isInPlaceImageRetry(work) && !joinableImageWorkIds.has(work.id)) return []
+  const produced = new Set(work.outputs.map((output, outputIndex) => output ? work.imageOutputIndexes?.[outputIndex] ?? outputIndex : -1))
+  const failed = new Set(work.imageFailedIndexes || [])
+  return Array.from({ length: resultOutputCount(work) }, (_, index) => index)
+    .filter(index => !produced.has(index) && (work.status !== 'pending' || failed.has(index)))
+    .filter(index => !regeneratingImageKeys.has(`${work.id}:${index}`))
+}
+
+// The banner action: every missing image is generated again in this same work.
+function regenerateMissingImages(work: CreatorHistoryItem) {
+  return regenerateImageOutputs(work, missingImageIndexes(work))
+}
+
+// Retries the chosen failed image slots inside the same work; finished images
+// stay put and each new image fills its own position.
+async function regenerateImageOutputs(work: CreatorHistoryItem, imageIndexes: number[]) {
+  const running = imageRuns.get(work.id)
+  if (running) {
+    // The work is still generating: request these slots alongside the others.
+    const live = running.work
+    const joining = [...new Set(imageIndexes)].filter(index => !regeneratingImageKeys.has(`${work.id}:${index}`) && live.imageFailedIndexes?.includes(index))
+    if (!joining.length) return
+    joining.forEach(index => regeneratingImageKeys.add(`${work.id}:${index}`))
+    live.imageFailedIndexes = (live.imageFailedIndexes || []).filter(index => !joining.includes(index))
+    running.task.failedCount = live.imageFailedIndexes.length
+    live.updatedAt = Date.now()
+    joining.forEach(index => running.retry(index))
+    // Show the slots drawing at once instead of waiting for the history write.
+    applyHistoryUpdate(cloneWork(live))
+    await persistWork(live)
+    return
+  }
+  const imageCount = resultOutputCount(work)
+  if (work.type !== 'image' || work.status === 'pending' || activeGenerations.has(work.id)) return
+  const producedIndexes = work.outputs.map((_, outputIndex) => work.imageOutputIndexes?.[outputIndex] ?? outputIndex)
+  const targets = [...new Set(imageIndexes)]
+    .filter(index => Number.isInteger(index) && index >= 0 && index < imageCount)
+    .filter(index => !producedIndexes.includes(index) && !regeneratingImageKeys.has(`${work.id}:${index}`))
+    .sort((left, right) => left - right)
+  if (!targets.length) return
+  const retryKeys = targets.map(index => `${work.id}:${index}`)
+
+  retryKeys.forEach(key => regeneratingImageKeys.add(key))
   try {
-    await restoreWorkSettings(work)
-    const shotPrompts = workShotPrompts(work)
-    if (work.type === 'video' && shotPrompts.length > 1) selectedShotId.value = videoShots.value[0].id
-    selectedWork.value = null
-    await nextTick()
-    if (!canGenerate.value) {
-      appStore.showError('无法按原参数重新生成，请检查原分组、模型和提示词是否仍然可用')
+    const prepared = imageRetrySnapshot(work, imageCount)
+    if ('error' in prepared) {
+      appStore.showWarning(prepared.error)
       return
     }
-    void generateFromCurrentSettings('重新生成', true)
+    const { snapshot, sourceGroup, sourceKey } = prepared
+
+    // Only the chosen slots are requested again; every other missing slot stays failed.
+    const retryWork = cloneWork(work)
+    retryWork.status = 'pending'
+    retryWork.outputCount = imageCount
+    retryWork.imageOutputIndexes = producedIndexes
+    retryWork.imageFailedIndexes = Array.from({ length: imageCount }, (_, index) => index)
+      .filter(index => !targets.includes(index) && !producedIndexes.includes(index))
+    retryWork.apiKeyId = sourceKey.id
+    retryWork.groupId = sourceGroup.id
+    retryWork.updatedAt = Date.now()
+    delete retryWork.completedAt
+    // Stay on the result view; the retried card shows its own loader.
+    inPlaceImageRetryIds.add(work.id)
+    await runGeneration(retryWork, snapshot, null, { startedAt: retryWork.updatedAt, retryImageIndexes: targets })
   } finally {
-    regeneratingWorkId.value = ''
+    inPlaceImageRetryIds.delete(work.id)
+    // The run releases each key when its slot finishes; this covers early exits.
+    if (!imageRuns.has(work.id)) retryKeys.forEach(key => regeneratingImageKeys.delete(key))
+  }
+}
+
+type RedrawnImage = { output: string; size: string; upstreamSize: string }
+// The original image of each slot being redrawn, put back if no new image arrives.
+const redrawnImageFallbacks = reactive(new Map<string, RedrawnImage>())
+
+// A finished image can be redrawn whenever its work is idle, and also while
+// other images of the same work are still being generated: it joins that run.
+function canRedrawImage(work: CreatorHistoryItem) {
+  return work.type === 'image' && (joinableImageWorkIds.has(work.id) || (work.status !== 'pending' && !activeGenerations.has(work.id)))
+}
+
+// Takes a finished image out of its slot so the slot can be generated again.
+function takeImageSlot(work: CreatorHistoryItem, imageIndex: number): RedrawnImage | undefined {
+  const slots = work.outputs.map((_, index) => work.imageOutputIndexes?.[index] ?? index)
+  const outputIndex = slots.indexOf(imageIndex)
+  if (outputIndex < 0) return undefined
+  const previous = {
+    output: work.outputs[outputIndex],
+    size: work.imageOutputSizes?.[outputIndex] || '',
+    upstreamSize: work.upstreamImageSizes?.[outputIndex] || '',
+  }
+  const keep = (_: unknown, index: number) => index !== outputIndex
+  const sizes = work.outputs.map((_, index) => work.imageOutputSizes?.[index] || '')
+  const upstreamSizes = work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || '')
+  work.outputs = work.outputs.filter(keep)
+  work.imageOutputIndexes = slots.filter(keep)
+  work.imageOutputSizes = sizes.filter(keep)
+  work.upstreamImageSizes = upstreamSizes.filter(keep)
+  work.actualOutputSize = work.imageOutputSizes[0] || undefined
+  work.imageFailedIndexes = (work.imageFailedIndexes || []).filter(index => index !== imageIndex)
+  return previous
+}
+
+// Puts the original image back into a redrawn slot that got no new image.
+function restoreRedrawnImage(work: CreatorHistoryItem, imageIndex: number) {
+  const previous = redrawnImageFallbacks.get(`${work.id}:${imageIndex}`)
+  if (!previous) return false
+  redrawnImageFallbacks.delete(`${work.id}:${imageIndex}`)
+  const slots = work.outputs.map((_, index) => work.imageOutputIndexes?.[index] ?? index)
+  if (slots.includes(imageIndex)) return false
+  const count = resultOutputCount(work)
+  work.imageOutputSizes = work.outputs.map((_, index) => work.imageOutputSizes?.[index] || '').concat(previous.size)
+  work.upstreamImageSizes = work.outputs.map((_, index) => work.upstreamImageSizes?.[index] || '').concat(previous.upstreamSize)
+  work.outputs = [...work.outputs, previous.output]
+  work.imageOutputIndexes = [...slots, imageIndex]
+  work.actualOutputSize = work.imageOutputSizes[0] || undefined
+  work.imageFailedIndexes = (work.imageFailedIndexes || []).filter(index => index !== imageIndex)
+  // Slots still drawing are not failures; only report the ones that did fail.
+  work.error = work.outputs.length >= count || !work.imageFailedIndexes.length ? undefined : partialImageError(work, count, undefined)
+  work.updatedAt = Date.now()
+  return true
+}
+
+// Redraws a finished image in its own slot. The slot shows a loader while it
+// runs; if no new image arrives, the original image is put back. Other images
+// of the same work can be redrawn at the same time.
+async function redrawImageOutput(work: CreatorHistoryItem, imageIndex: number) {
+  if (work.type !== 'image') return
+  const key = `${work.id}:${imageIndex}`
+  if (regeneratingImageKeys.has(key)) return
+  const running = imageRuns.get(work.id)
+  if (running) {
+    // Join the run already generating this work instead of waiting for it.
+    const live = running.work
+    const previous = takeImageSlot(live, imageIndex)
+    if (!previous) return
+    redrawnImageFallbacks.set(key, previous)
+    regeneratingImageKeys.add(key)
+    live.updatedAt = Date.now()
+    running.retry(imageIndex)
+    applyHistoryUpdate(cloneWork(live))
+    await persistWork(live)
+    return
+  }
+  if (work.status === 'pending' || activeGenerations.has(work.id)) return
+  const base = cloneWork(work)
+  const previous = takeImageSlot(base, imageIndex)
+  if (!previous) return
+  redrawnImageFallbacks.set(key, previous)
+  try {
+    await regenerateImageOutput(base, imageIndex)
+  } finally {
+    redrawnImageFallbacks.delete(key)
+  }
+
+  // A work still pending on a server task fills the slot on a later refresh.
+  const current = historyItems.value.find(item => item.id === work.id)
+  if (!current || current.status === 'pending' || activeGenerations.has(work.id)) return
+  const currentSlots = current.outputs.map((_, index) => current.imageOutputIndexes?.[index] ?? index)
+  if (currentSlots.includes(imageIndex)) return
+  const restored = cloneWork(current)
+  const count = resultOutputCount(restored)
+  restored.imageOutputSizes = restored.outputs.map((_, index) => restored.imageOutputSizes?.[index] || '').concat(previous.size)
+  restored.upstreamImageSizes = restored.outputs.map((_, index) => restored.upstreamImageSizes?.[index] || '').concat(previous.upstreamSize)
+  restored.outputs = [...restored.outputs, previous.output]
+  restored.imageOutputIndexes = [...currentSlots, imageIndex]
+  restored.actualOutputSize = restored.imageOutputSizes[0] || undefined
+  restored.imageFailedIndexes = (restored.imageFailedIndexes || []).filter(index => index !== imageIndex)
+  restored.status = 'completed'
+  restored.completedAt ??= Date.now()
+  restored.error = restored.outputs.length >= count ? undefined : partialImageError(restored, count, undefined)
+  restored.updatedAt = Date.now()
+  applyHistoryUpdate(restored)
+  await persistWork(restored)
+  appStore.showWarning('这张图片重新生成失败，已保留原图')
+}
+
+function regenerateVideoShot(work: CreatorHistoryItem, shotIndex: number) {
+  return regenerateVideoShots(work, [shotIndex])
+}
+
+// A missing shot can be generated again once it failed, also while other shots are redone in place.
+function canRetryMissingShot(work: CreatorHistoryItem, entry: { output: string; state: string; index: number }) {
+  return !entry.output && entry.state === 'failed' && (work.status !== 'pending' || isInPlaceRetry(work))
+    && !isRegeneratingSlot(work, entry.index) && canRedrawVideo(work)
+}
+
+// Shots of a video work that produced no output.
+function missingVideoShotIndexes(work: CreatorHistoryItem) {
+  const produced = new Set(work.outputs.map((output, index) => output ? shotIndexForOutput(work, index) : -1))
+  return Array.from({ length: resultOutputCount(work) }, (_, index) => index).filter(index => !produced.has(index))
+}
+
+// Progress of each video shot still being generated, shown on its own card:
+// shots of a new video drawing into their cards, and shots redone in place.
+const shotProgress = computed(() => {
+  const progress = new Map<number, { label: string; percent?: number }>()
+  const work = selectedWork.value
+  if (!work || work.type !== 'video') return progress
+  const task = activeGenerations.get(work.id)
+  const count = resultOutputCount(work)
+  for (let index = 0; index < count; index++) {
+    const entry = resultEntries.value[index]
+    if (!isRegeneratingSlot(work, index) && !(entry && isDrawingEntry(entry))) continue
+    // A single shot reports into the task itself, also when a refreshed page resumes it.
+    const shot = task?.shotTasks?.[index] ?? (count === 1 ? task : undefined)
+    if (!shot) progress.set(index, { label: task && !task.shotTasks ? '正在同步任务进度' : '正在准备任务' })
+    else if (/重试/.test(shot.progress)) progress.set(index, { label: shot.progress.replace(/^镜头 \d+ /, '') })
+    else if (shot.phase === 'submitting') progress.set(index, { label: '正在提交任务' })
+    else if (shot.percent >= 100) progress.set(index, { label: '已生成，正在加载视频', percent: 100 })
+    else if (!shot.hasExactProgress) progress.set(index, { label: '已提交，正在排队' })
+    else progress.set(index, { label: `生成中 ${shot.percent}%`, percent: shot.percent })
+  }
+  return progress
+})
+
+// The video banner: shots that still need a retry, and shots being redone in place.
+const selectedVideoNotice = computed(() => {
+  const work = selectedWork.value
+  // A video that failed outright lists its shots too, like a failed image batch.
+  if (!work || work.type !== 'video' || (!isInPlaceRetry(work) && !missingOutputCount(work) && work.status !== 'failed')) return null
+  const missing = missingVideoShotIndexes(work)
+  const regenerating = missing.filter(index => regeneratingShotKeys.has(`${work.id}:${index}`))
+  const failed = missing.filter(index => !regenerating.includes(index))
+  // A single shot has nothing to list; its card shows the failure or the progress.
+  if (!missing.length || !isMultiShotVideo(work)) return null
+  const shots = (indexes: number[]) => `镜头 ${indexes.map(index => index + 1).join('、')}`
+  const label = [
+    failed.length ? `${shots(failed)} 未生成` : '',
+    regenerating.length ? `${shots(regenerating)} 正在重新生成` : '',
+  ].filter(Boolean).join('，')
+  return { failed, regenerating, label }
+})
+
+// The banner action: every missing shot is generated again in this same work.
+function regenerateMissingVideoShots(work: CreatorHistoryItem) {
+  return regenerateVideoShots(work, missingVideoShotIndexes(work))
+}
+
+// The generation settings of every shot of a saved video work, without reference images.
+function savedVideoShots(work: CreatorHistoryItem): VideoGenerationSnapshot['shots'] {
+  const shotCount = resultOutputCount(work)
+  const prompts = workShotPrompts(work)
+  return Array.from({ length: shotCount }, (_, index) => ({
+    prompt: prompts[index] || '',
+    duration: work.shotDurations?.[index] || Math.max(1, Math.round((work.requestedDuration || 8 * shotCount) / shotCount)),
+    resolution: work.shotResolutions?.[index] || work.resolution || '720p',
+    aspectRatio: work.shotAspectRatios?.[index] || work.aspectRatio || '16:9',
+    followSourceAspect: work.shotFollowSourceAspects?.[index] ?? true,
+    generationMethod: work.shotGenerationMethods?.[index] || work.videoGenerationMethod
+      || (shotCount === 1 && work.referenceCount ? 'image' : 'text'),
+    referenceFiles: [],
+  }))
+}
+
+// Gives a shot its saved reference images. False when the shot cannot run
+// again as saved: missing references or an unusable prompt.
+function loadSavedShotReferences(work: CreatorHistoryItem, shot: VideoGenerationSnapshot['shots'][number], index: number) {
+  const shotCount = resultOutputCount(work)
+  const promptLimit = isMiniMaxH3Model(work.model || '') ? 7000 : 8000
+  const referenceBlobs = (work.shotReferenceBlobs?.[index] || work.shotQueue?.referenceBlobs[index] || [])
+    .filter(blob => blob instanceof Blob && blob.size > 0)
+  const requiredReferenceCount = shot.generationMethod === 'text' ? 0 : Math.max(1,
+    work.shotReferenceCounts?.[index] ?? (shotCount === 1 ? work.referenceCount || 1 : referenceBlobs.length))
+  const usable = referenceBlobs.length >= requiredReferenceCount
+    && !(shot.generationMethod === 'reference' && !supportsReferenceVideo(work.model || ''))
+    && Boolean(shot.prompt.trim()) && shot.prompt.length <= promptLimit
+  if (usable) shot.referenceFiles = referenceBlobs
+  return usable
+}
+
+function warnUnusableShots(count: number) {
+  appStore.showWarning(count === 1
+    ? '该镜头的参考图未保存在历史中，或提示词为空/超出长度限制，无法自动重新生成；请带回参数修改后再生成'
+    : '这些镜头的参考图未保存在历史中，或提示词为空/超出长度限制，无法自动重新生成；请带回参数修改后再生成')
+}
+
+// Adds shots to the in-place run already generating this work, so any shot can
+// be regenerated while others are still running.
+function joinVideoRun(run: VideoRun, requestedIndexes: number[], redraw: boolean) {
+  const live = run.work
+  const skipped: number[] = []
+  for (const index of [...new Set(requestedIndexes)].sort((left, right) => left - right)) {
+    const key = `${live.id}:${index}`
+    const shot = run.shots[index]
+    if (!shot || regeneratingShotKeys.has(key)) continue
+    if (!loadSavedShotReferences(live, shot, index)) {
+      skipped.push(index)
+      continue
+    }
+    regeneratingShotKeys.add(key)
+    if (!run.join(index, redraw)) regeneratingShotKeys.delete(key)
+  }
+  if (skipped.length) warnUnusableShots(skipped.length)
+}
+
+// Redraws a finished shot in its own slot. Its card shows the progress while
+// it runs; if no new video arrives, the original video is put back.
+function redrawVideoShot(work: CreatorHistoryItem, shotIndex: number) {
+  return regenerateVideoShots(work, [shotIndex], { redraw: true })
+}
+
+// A shot can be regenerated whenever its work is idle, and also while other
+// shots of the same work are being regenerated in place: it joins that run.
+function canRedrawVideo(work: CreatorHistoryItem) {
+  return work.type === 'video' && (joinableVideoWorkIds.has(work.id) || (work.status !== 'pending' && !activeGenerations.has(work.id)))
+}
+
+// Generates the chosen missing shots again inside the same work, like a failed
+// image slot: finished shots stay where they are, the new shots fill their own
+// positions, and the complete video is stitched again once they finish.
+async function regenerateVideoShots(work: CreatorHistoryItem, requestedIndexes: number[], options: { redraw?: boolean } = {}) {
+  if (work.type !== 'video') return
+  const run = videoRuns.get(work.id)
+  if (run) return joinVideoRun(run, requestedIndexes, Boolean(options.redraw))
+  if (work.status === 'pending' || activeGenerations.has(work.id)) return
+  const shotCount = resultOutputCount(work)
+  const missing = new Set(missingVideoShotIndexes(work))
+  const targets = [...new Set(requestedIndexes)]
+    .filter(index => Number.isInteger(index) && index >= 0 && index < shotCount && (missing.has(index) || options.redraw))
+    .filter(index => !regeneratingShotKeys.has(`${work.id}:${index}`))
+    .sort((left, right) => left - right)
+  if (!targets.length) return
+  const retryKeys = targets.map(index => `${work.id}:${index}`)
+  retryKeys.forEach(key => regeneratingShotKeys.add(key))
+  try {
+    // Resolve the saved group directly; the editor may be on an unrelated draft.
+    const sourceGroup = groups.value.find(group => work.groupId ? group.id === work.groupId : group.name === work.groupName)
+    const sourceKeys = apiKeys.value.filter(key => key.status === 'active' && key.group_id === sourceGroup?.id)
+    const sourceKey = sourceKeys.find(key => key.id === work.apiKeyId) || sourceKeys[0]
+    if (!sourceGroup || sourceGroup.status !== 'active' || !sourceKey || !work.model) {
+      appStore.showWarning('原作品的分组、Key 或模型当前不可用，无法重新生成镜头')
+      return
+    }
+
+    // Finished shots come first in requestId / shotOutputIndexes, so the first
+    // outputs.length entries are the shots this retry keeps as they are.
+    const requestIds = (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+    const finishedCount = work.outputs.length
+    if (finishedCount && requestIds.length < finishedCount) {
+      appStore.showWarning('该作品缺少已完成镜头的任务记录，无法在当前位置重新生成；请使用顶部“重新生成”')
+      return
+    }
+
+    const shots = savedVideoShots(work)
+    const skipped: number[] = []
+    const retryIndexes = targets.filter(index => {
+      const usable = loadSavedShotReferences(work, shots[index], index)
+      if (!usable) skipped.push(index)
+      return usable
+    })
+    if (!retryIndexes.length) {
+      warnUnusableShots(targets.length)
+      return
+    }
+
+    let finishedBlobs: Blob[] = []
+    if (finishedCount) {
+      try {
+        finishedBlobs = await readVideoSegmentBlobs(work)
+      } catch (error) {
+        appStore.showError(errorMessage(error, '已生成的镜头素材读取失败，暂时无法在当前作品中重新生成'))
+        return
+      }
+    }
+    if (activeGenerations.has(work.id)) return
+
+    const retrySet = new Set(retryIndexes)
+    // Finished shots being redrawn leave their slot until the new video arrives.
+    const finishedShots = work.outputs.map((_, index) => shotIndexForOutput(work, index))
+    const kept = finishedShots.map(shotIndex => !retrySet.has(shotIndex))
+    const redrawFallbacks = new Map<number, RedrawnShot>()
+    finishedShots.forEach((shotIndex, position) => {
+      if (!kept[position]) redrawFallbacks.set(shotIndex, { blob: finishedBlobs[position], url: work.outputs[position], requestId: requestIds[position] })
+    })
+    const stillFailed = [...missing].filter(index => !retrySet.has(index)).sort((left, right) => left - right)
+    const previousReason = (work.error || '').replace(PARTIAL_ERROR_PREFIX, '')
+    const now = Date.now()
+    const retryWork = cloneWork(work)
+    retryWork.status = 'pending'
+    retryWork.error = undefined
+    retryWork.apiKeyId = sourceKey.id
+    retryWork.groupId = sourceGroup.id
+    retryWork.groupName = sourceGroup.name
+    retryWork.videoBlobs = finishedBlobs.length ? finishedBlobs.filter((_, position) => kept[position]) : retryWork.videoBlobs
+    retryWork.outputs = work.outputs.filter((_, position) => kept[position])
+    retryWork.updatedAt = now
+    delete retryWork.completedAt
+    if (shotCount > 1) {
+      // Saved with the work so a refreshed page continues these shots in place;
+      // older works did not store every per-shot setting the resume reads.
+      retryWork.shotCount = shotCount
+      retryWork.shotPrompts = shots.map(shot => shot.prompt)
+      retryWork.shotDurations = shots.map(shot => shot.duration)
+      retryWork.shotResolutions = shots.map(shot => shot.resolution)
+      retryWork.shotAspectRatios = shots.map(shot => shot.aspectRatio)
+      retryWork.shotFollowSourceAspects = shots.map(shot => shot.followSourceAspect)
+      retryWork.shotGenerationMethods = shots.map(shot => shot.generationMethod)
+      retryWork.shotQueue = {
+        nextIndex: retryIndexes[0],
+        failedIndexes: stillFailed,
+        failureReason: stillFailed.length && previousReason ? previousReason : undefined,
+        referenceBlobs: shots.map((shot, index) => retrySet.has(index) ? [...shot.referenceFiles] : []),
+      }
+    }
+    const snapshot: VideoGenerationSnapshot = { apiKey: sourceKey.key, model: work.model, shots }
+    const resumed: ResumedVideoShots = {
+      requestIds: requestIds.slice(0, finishedCount).filter((_, position) => kept[position]),
+      shotIndexes: finishedShots.filter((_, position) => kept[position]),
+      outputBlobs: finishedBlobs.filter((_, position) => kept[position]),
+      outputUrls: work.outputs.filter((_, position) => kept[position]),
+      failedShots: stillFailed,
+      lastError: stillFailed.length && previousReason ? new Error(previousReason) : undefined,
+      redrawFallbacks,
+    }
+    // Only the finished shots' tasks stay; the retried shots get new ones.
+    retryWork.requestId = resumed.requestIds.join(',') || undefined
+    retryWork.shotOutputIndexes = [...resumed.shotIndexes]
+    const shotLabel = retryIndexes.map(index => index + 1).join('、')
+    if (skipped.length) {
+      appStore.showWarning(`镜头 ${skipped.map(index => index + 1).join('、')} 的参考图未保存或提示词不可用，已跳过；其余镜头正在当前位置重新生成`)
+    } else {
+      appStore.showInfo(`镜头 ${shotLabel} 正在当前位置重新生成`)
+    }
+    // Stay on the result view; only the retried cards show a loader.
+    inPlaceVideoRetryIds.add(work.id)
+    await runGeneration(retryWork, null, snapshot, { startedAt: now, resumedVideoShots: resumed })
+  } finally {
+    inPlaceVideoRetryIds.delete(work.id)
+    retryKeys.forEach(key => regeneratingShotKeys.delete(key))
   }
 }
 
@@ -5167,15 +7082,19 @@ async function useOutputAsReference(output: string, work: CreatorHistoryItem, in
     const file = new File([blob], `creator-reference-${work.id}-${index + 1}.${extension}`, { type: mimeType })
     await restoreWorkSettings(work)
     const restoreSettingsScroll = captureSettingsScroll()
-    const previousOutputFormat = outputFormat.value
+    // Editing continues from this output alone; the work's original references
+    // are already reflected in it and would only duplicate the subject.
+    const originalReferences = activeReferenceImages.value.splice(0)
     await addReferenceFiles([file])
-    if (!activeReferenceImages.value.length) return
+    if (!activeReferenceImages.value.length) {
+      activeReferenceImages.value.push(...originalReferences)
+      return
+    }
+    originalReferences.forEach(reference => URL.revokeObjectURL(reference.url))
     selectedWork.value = null
     restoreSettingsScroll()
     await nextTick()
-    appStore.showSuccess(previousOutputFormat === 'svg' && outputFormat.value === 'png'
-      ? '已加入参考图并带回参数，输出格式已自动切换为 PNG'
-      : '已将作品加入参考图，并带回当时的生成参数')
+    appStore.showSuccess('已将作品加入参考图，并带回当时的生成参数')
   } catch (error) {
     appStore.showError(errorMessage(error, '无法将作品加入参考图'))
   } finally {
@@ -5231,8 +7150,84 @@ function newCreation() {
   restoreSettingsScroll()
 }
 
+// One click puts the settings panel back to its first-load state for the
+// current mode. Running tasks, history and the selected result are untouched.
+async function resetSettings() {
+  const sequence = ++restoreSettingsSequence
+  restoringWorkSettings.value = true
+  try {
+    imageCapability.value = 'image2'
+    videoCapability.value = 'seedance'
+    clearReferenceImages()
+    prompt.value = ''
+    professionalVideo.value = false
+    aspectRatio.value = studioMode.value === 'image' ? '1:1' : '16:9'
+    imageResolution.value = '1K'
+    imageSizeMode.value = 'auto'
+    imageCustomWidth.value = 1024
+    imageCustomHeight.value = 1024
+    imageFollowReference.value = false
+    imageQuality.value = 'auto'
+    outputFormat.value = 'png'
+    gifFrameCount.value = GIF_FRAME_COUNT_RANGE.fallback
+    gifFrameDurationMs.value = GIF_FRAME_DURATION_RANGE.fallback
+    outputCount.value = 1
+    videoDuration.value = 8
+    videoResolution.value = '720p'
+    videoGenerationMethod.value = 'text'
+    videoFollowSourceAspect.value = true
+    videoShots.value = [{
+      id: crypto.randomUUID(), prompt: '', duration: 8,
+      generationMethod: 'text', referenceImages: [],
+      aspectRatio: '16:9', followSourceAspect: true, resolution: '720p',
+    }]
+    selectedShotId.value = videoShots.value[0].id
+    imageSizeDialogOpen.value = false
+    videoParamsDialogOpen.value = false
+    promptToolExpanded.value = false
+    activeTemplateIndex.value = 0
+    promptTemplatePage.value = 0
+    selectedGroupId.value = availableGroups.value[0]?.id || 0
+    settingsScrollElement.value?.scrollTo?.({ top: 0 })
+    await nextTick()
+    if (sequence !== restoreSettingsSequence) return
+    await loadModels()
+    if (sequence !== restoreSettingsSequence) return
+    if (!imageResolutionOptions.value.includes(imageResolution.value)) imageResolution.value = imageResolutionOptions.value[0] || '1K'
+    fitVideoSettingsToRelayTier()
+    fitVideoMethodsToModel()
+    startTemplateAutoplay()
+    appStore.showSuccess('已清空参数')
+  } finally {
+    if (sequence === restoreSettingsSequence) restoringWorkSettings.value = false
+  }
+}
+
 function continueCreating() {
   newCreation()
+}
+
+// Waiting on one model should not block trying the same prompt with another:
+// bring the running task's prompt and settings back into the editor so the
+// user only has to pick the new model. The task keeps generating in the background.
+// Only a second click on this button is ignored; a restore still running from
+// opening the work is simply superseded, so a quick click is never dropped.
+let reusingWork = false
+async function reuseForAnotherModel(work: CreatorHistoryItem | null) {
+  if (!work || reusingWork) return
+  const model = work.model
+  reusingWork = true
+  try {
+    await restoreWorkSettings(work)
+  } finally {
+    reusingWork = false
+  }
+  if (selectedWork.value?.id !== work.id) return
+  selectedWork.value = null
+  await nextTick()
+  // On mobile the button sits far down the result; start again from the page top.
+  revealCanvasOnMobile(true)
+  appStore.showSuccess(model ? `已带入提示词和参数，当前模型为「${model}」` : '已带入提示词和参数')
 }
 
 function workShotPrompts(work: CreatorHistoryItem): string[] {
@@ -5251,7 +7246,21 @@ function isMultiShotVideo(work: CreatorHistoryItem) {
 }
 
 function resultOutputCount(work: CreatorHistoryItem) {
-  return Math.max(1, work.outputCount || work.shotCount || work.outputs.length || 1)
+  const indexes = work.type === 'video' ? work.shotOutputIndexes : work.imageOutputIndexes
+  return Math.max(1, work.outputCount || 0, work.shotCount || 0, work.outputs.length,
+    work.type === 'video' ? workShotPrompts(work).length : 0, ...(indexes || []).map(index => index + 1))
+}
+
+// A failed single image shows the full failure box instead of an empty slot.
+// A failed video keeps its card, which shows the failure (or the progress of
+// its retry) where the video would appear.
+function isSingleSlotFailure(work: CreatorHistoryItem) {
+  return work.type === 'image' && (work.status === 'failed' || isInPlaceRetry(work)) && !work.outputs.some(Boolean) && resultOutputCount(work) === 1
+}
+
+// The failed shot of a single-shot video: its card says why it failed.
+function isSingleVideoFailure(work: CreatorHistoryItem, entry: { state: string }) {
+  return work.type === 'video' && !isMultiShotVideo(work) && entry.state === 'failed'
 }
 
 // Images that finished before a later request failed stay usable.
@@ -5271,7 +7280,14 @@ function hasResultActions(work: CreatorHistoryItem) {
 
 // Failed works can be retried as-is or abandoned for a fresh creation.
 function hasRetryActions(work: CreatorHistoryItem) {
-  return hasResultActions(work) || work.status === 'failed'
+  return hasResultActions(work) || work.status === 'failed' || hasVideoHistoryCheckError(work)
+}
+
+function hasVideoHistoryCheckError(work: CreatorHistoryItem) {
+  return work.type === 'video'
+    && work.status === 'pending'
+    && videoHistoryFeedback.value?.workId === work.id
+    && videoHistoryFeedback.value.tone === 'error'
 }
 
 function missingOutputCount(work: CreatorHistoryItem) {
@@ -5288,13 +7304,7 @@ function shotIndexForOutput(work: CreatorHistoryItem, index: number) {
 
 function videoShotTitle(work: CreatorHistoryItem, index: number) {
   const title = `${videoProviderLabel(work.model)} 视频`
-  return isMultiShotVideo(work) ? `${title} · 镜头 ${shotIndexForOutput(work, index) + 1}` : title
-}
-
-function failedShotLabel(work: CreatorHistoryItem) {
-  const produced = new Set(work.shotOutputIndexes || [])
-  const failed = Array.from({ length: resultOutputCount(work) }, (_, index) => index).filter(index => !produced.has(index))
-  return failed.length ? `镜头 ${failed.map(index => index + 1).join('、')} ` : ''
+  return isMultiShotVideo(work) ? `${title} · 镜头 ${index + 1}` : title
 }
 
 // A complete video needs at least two finished shots to stitch together.
@@ -5302,14 +7312,62 @@ function hasCompleteVideo(work: CreatorHistoryItem) {
   return isMultiShotVideo(work) && work.outputs.length > 1
 }
 
+// While shots are still generating or being composed, the card stays away; a
+// composition the user started by hand keeps its card so the button shows progress.
+function showCompleteVideoCard(work: CreatorHistoryItem) {
+  if (work.status === 'failed' || !hasCompleteVideo(work)) return false
+  if (work.mergedOutput || work.mergeError) return true
+  if (work.status === 'pending') return false
+  return composingWorkId.value !== work.id || manualComposeWorkId.value === work.id
+}
+
+function isPreparingCompleteVideo(work: CreatorHistoryItem) {
+  return Boolean(work.mergedOutput) && !readyCompleteVideos.value.has(work.mergedOutput!)
+}
+
+function markCompleteVideoReady(src?: string) {
+  if (src) readyCompleteVideos.value.add(src)
+}
+
+// Some browsers never decode a hidden video's first frame; reveal it anyway after a short wait.
+const COMPLETE_VIDEO_REVEAL_FALLBACK_MS = 6000
+let completeVideoRevealTimer: ReturnType<typeof setTimeout> | undefined
+watch(() => selectedWork.value?.mergedOutput, src => {
+  if (completeVideoRevealTimer !== undefined) clearTimeout(completeVideoRevealTimer)
+  completeVideoRevealTimer = undefined
+  if (!src || readyCompleteVideos.value.has(src)) return
+  completeVideoRevealTimer = setTimeout(() => {
+    completeVideoRevealTimer = undefined
+    markCompleteVideoReady(src)
+  }, COMPLETE_VIDEO_REVEAL_FALLBACK_MS)
+})
+onBeforeUnmount(() => {
+  if (completeVideoRevealTimer !== undefined) clearTimeout(completeVideoRevealTimer)
+})
+
 function completedVideoDuration(work: CreatorHistoryItem) {
   if (!work.shotOutputIndexes || !work.shotDurations) return work.requestedDuration || 0
   return work.outputs.reduce((sum, _output, index) => sum + (work.shotDurations?.[shotIndexForOutput(work, index)] || 0), 0)
 }
 
-function partialImageReason(work: CreatorHistoryItem) {
-  const reason = (work.error || '').replace(/^已生成 \d+ \/ \d+ [张段]，其余 \d+ [张段]生成失败(?:（[^）]*）)?：/, '')
-  return reason ? `失败原因：${localizeSvgGenerationError(reason)}` : ''
+const PARTIAL_ERROR_PREFIX = /^已生成 \d+ \/ \d+ [张段]，其余 \d+ [张段]生成失败(?:（[^）]*）)?：/
+
+// History saved before the messages were shortened still holds the long wording.
+const LEGACY_LONG_IMAGE_ERRORS: Array<[RegExp, string]> = [
+  [/^(.+?) 上游服务暂时不可用，请稍后点击“重新生成”；如果频繁出现，请检查该分组的 .+? 账号状态。$/, '$1 上游暂时不可用，请稍后重试。'],
+  [/^当前创作分组暂无可用的 (.+?) 账号，请切换创作分组或稍后重试；如果频繁出现，请为该分组增加可用 .+? 账号。$/, '当前创作分组暂无可用的 $1 账号，请切换分组或稍后重试。'],
+]
+
+function imageFailureReason(work: CreatorHistoryItem) {
+  let reason = (work.error || '').replace(PARTIAL_ERROR_PREFIX, '')
+  for (const [pattern, replacement] of LEGACY_LONG_IMAGE_ERRORS) reason = reason.replace(pattern, replacement)
+  return reason ? localizeVideoTaskError(localizeSvgGenerationError(reason)) : ''
+}
+
+// The sync summary ("已同步 3 / 4 张；…") only repeats the banner's own count.
+function missingImageBannerReason(work: CreatorHistoryItem) {
+  if (/^已同步 \d+ \/ \d+ 张；/.test(work.error || '')) return ''
+  return imageFailureReason(work)
 }
 
 function historyWorkTitle(work: CreatorHistoryItem) {
@@ -5318,24 +7376,60 @@ function historyWorkTitle(work: CreatorHistoryItem) {
 }
 
 function resultDescription(work: CreatorHistoryItem, index: number) {
-  return work.type === 'video' ? workShotPrompts(work)[shotIndexForOutput(work, index)] || work.prompt : work.prompt
+  return work.type === 'video' ? workShotPrompts(work)[index] || work.prompt : work.prompt
+}
+
+function missingResultTags(work: CreatorHistoryItem, index: number) {
+  if (isAutoImageSize(work)) return metaParts(modelLabel(work.model), '自动尺寸', work.outputFormat?.toUpperCase())
+  if (work.type === 'image') {
+    const size = work.outputSize?.replace('x', '×')
+    const dimensions = /^(\d+)×(\d+)$/.exec(size || '')
+    const tier = work.resolution || (dimensions ? customImageResolution(Number(dimensions[1]), Number(dimensions[2])) : undefined)
+    return metaParts(modelLabel(work.model), work.aspectRatio, tier, size, work.outputFormat?.toUpperCase())
+  }
+  const method = work.shotGenerationMethods?.[index] || work.videoGenerationMethod || 'text'
+  const ratio = method === 'image' && work.shotFollowSourceAspects?.[index]
+    ? '跟随原图' : work.shotAspectRatios?.[index] || work.aspectRatio
+  const duration = work.shotDurations?.[index] || (!isMultiShotVideo(work) ? work.requestedDuration : undefined)
+  return metaParts(videoModelLabel(work.model), ratio, work.shotResolutions?.[index] || work.resolution,
+    duration ? `${duration} 秒` : undefined, videoGenerationMethodLabelFor(method))
+}
+
+// With GPT Image "auto" the model picks the size, so the work's ratio and tier
+// are only leftovers from the size panel; the real shape is known per image once it returns.
+function isAutoImageSize(work: CreatorHistoryItem) {
+  return work.type === 'image' && (work.imageSizeMode === 'auto' || work.outputSize === 'auto')
+}
+
+// The slot's own size, else the first size any image of the batch came back with.
+function knownAutoImageSize(work: CreatorHistoryItem, index: number) {
+  const valid = (size?: string) => /^\d+x\d+$/.test(size || '')
+  const own = imageDisplayedSize(work, index)
+  if (valid(own)) return own
+  return [...(work.imageOutputSizes || []), ...(work.upstreamImageSizes || []), work.actualOutputSize].find(valid) || ''
+}
+
+function missingResultMediaStyle(work: CreatorHistoryItem, index: number) {
+  if (isAutoImageSize(work)) {
+    const ratio = simplifyPixelRatio(knownAutoImageSize(work, index))
+    return { aspectRatio: ratio ? ratio.replace(':', ' / ') : '1 / 1' }
+  }
+  const ratio = work.type === 'video' ? work.shotAspectRatios?.[index] || work.aspectRatio : work.aspectRatio
+  const match = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec(ratio || '')
+  return { aspectRatio: match ? `${match[1]} / ${match[2]}` : work.type === 'video' ? '16 / 9' : '1 / 1' }
+}
+
+function completeVideoTitle(work: CreatorHistoryItem) {
+  if (!work.mergedOutput) {
+    return missingOutputCount(work) ? '已生成的镜头已保留，等待合成完整视频' : '镜头素材已完成，等待合成完整视频'
+  }
+  return missingOutputCount(work) ? '已生成的镜头已按顺序合成' : '所有镜头已按顺序合成'
 }
 
 function completeVideoDescription(work: CreatorHistoryItem) {
-  const count = workShotPrompts(work).length
+  const count = work.outputs.length
   if (!work.mergedOutput) return `${count} 个镜头素材已保留，合成完成后可预览或下载完整视频。`
   return `${count} 个镜头已按时间顺序拼接，完整保留每段画面与声音，可直接预览或下载。`
-}
-
-function fullPromptText(work: CreatorHistoryItem) {
-  if (!isMultiShotVideo(work)) return work.prompt
-  return workShotPrompts(work).map((shotPrompt, index) => `镜头 ${index + 1}：${shotPrompt}`).join('\n')
-}
-
-// Roughly three lines on a laptop-width grid; shorter prompts render in full without a toggle.
-function isPromptLong(work: CreatorHistoryItem) {
-  const text = fullPromptText(work) || ''
-  return text.length > 150 || text.split('\n').length > 3
 }
 
 function shotDurationLabel(work: CreatorHistoryItem, index: number) {
@@ -5387,7 +7481,6 @@ function videoResultTags(work: CreatorHistoryItem, index: number) {
     workAspectRatio(work, index),
     videoResolutionTierLabel(work, index),
     shotDurationLabel(work, index),
-    workOutputFormatLabel(work),
     shotGenerationMethodLabel(work, index),
   ]
 }
@@ -5399,8 +7492,15 @@ function completeVideoResultTags(work: CreatorHistoryItem) {
     videoResolutionTierLabel(work),
     `总时长 ${completedVideoDuration(work)} 秒`,
     `${work.outputs.length} 个镜头`,
-    workOutputFormatLabel(work),
   )
+}
+
+// The requested tier (1K/2K/4K) is what was billed; derive it from pixels only for records saved without it.
+// "Auto" requests are billed by the returned size, so their tier always comes from the pixels.
+function imageResolutionTierLabel(work: CreatorHistoryItem, index: number) {
+  if (work.resolution && !isAutoImageSize(work)) return work.resolution
+  const match = /^(\d+)x(\d+)$/.exec(imageDisplayedSize(work, index))
+  return match ? customImageResolution(Number(match[1]), Number(match[2])) : ''
 }
 
 function imageDimensionsLabel(work: CreatorHistoryItem, index: number) {
@@ -5455,7 +7555,7 @@ function compactAspectRatio(value: number) {
 }
 
 function imageAspectRatioLabel(work: CreatorHistoryItem, index = 0) {
-  const requestedRatio = work.aspectRatio || ''
+  const requestedRatio = isAutoImageSize(work) ? '' : work.aspectRatio || ''
   const actualRatio = simplifyPixelRatio(imageDisplayedSize(work, index))
   if (!actualRatio) return compactAspectRatio(ratioValue(requestedRatio)) || '自动画幅'
   const requestedValue = ratioValue(requestedRatio)
@@ -5469,6 +7569,10 @@ function imageAspectRatioLabel(work: CreatorHistoryItem, index = 0) {
 }
 
 function workResolutionLabel(work: CreatorHistoryItem, index?: number) {
+  if (isAutoImageSize(work)) {
+    const size = imageDisplayedSize(work, index)
+    return /^\d+x\d+$/.test(size) ? `${imageResolutionTierLabel(work, index || 0)} · ${size.replace('x', '×')}` : '自动尺寸'
+  }
   const resolution = index === undefined ? work.resolution : work.shotResolutions?.[shotIndexForOutput(work, index)] || work.resolution
   const resolutionLabel = resolution || '默认清晰度'
   const actualOutputSize = work.type === 'image'
@@ -5551,7 +7655,14 @@ function handleVideoMetadata(event: Event, work: CreatorHistoryItem, index = 0, 
 
 function formatCompletionDuration(work: CreatorHistoryItem) {
   const milliseconds = work.generationDurationMs ?? Math.max(0, work.updatedAt - work.createdAt)
-  return `${Math.max(1, Math.round(milliseconds / 1000))} 秒`
+  return formatDurationSeconds(Math.max(1, Math.round(milliseconds / 1000)))
+}
+
+function formatDurationSeconds(totalSeconds: number) {
+  if (totalSeconds < 60) return `${totalSeconds} 秒`
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`
 }
 
 function formatResultTime(timestamp: number) {
@@ -5564,10 +7675,65 @@ function formatResultTime(timestamp: number) {
   }).format(timestamp)
 }
 
+// Actual charges looked up from usage records when a work is opened. Videos are
+// billed under their task IDs; images under the request IDs saved at generation.
+const workCosts = reactive(new Map<string, number | null>())
+// Billing lands shortly after a result. An ID still unbilled past this window
+// was never charged (a failed image task that was redrawn, a shot that never
+// ran), so the found charges are the total.
+const WORK_BILLING_GRACE_MS = 2 * 60_000
+const WORK_COST_RETRY_MS = 5_000
+
+function workCostIds(work: CreatorHistoryItem) {
+  if (work.type === 'video') return (work.requestId || '').split(',').map(id => id.trim()).filter(Boolean)
+  return work.billingIds || []
+}
+
+function workCostKey(work: CreatorHistoryItem) {
+  return `${work.id}:${workCostIds(work).join(',')}`
+}
+
+async function loadWorkCost(work: CreatorHistoryItem) {
+  const ids = workCostIds(work)
+  const key = workCostKey(work)
+  if (!ids.length || work.status === 'pending' || workCosts.has(key)) return
+  workCosts.set(key, null)
+  try {
+    const costs = await getCreatorCosts(ids)
+    const billed = ids.filter(id => id in costs)
+    // Multi-shot videos and image batches are billed per request, so right after
+    // the result a partial sum would undercount; keep querying until every ID is
+    // billed or the grace window has passed.
+    const settled = billed.length === ids.length || Date.now() - (work.completedAt || work.updatedAt) > WORK_BILLING_GRACE_MS
+    if (!settled) {
+      setTimeout(() => {
+        workCosts.delete(key)
+        if (selectedWork.value && workCostKey(selectedWork.value) === key) void loadWorkCost(selectedWork.value)
+      }, WORK_COST_RETRY_MS)
+    } else if (billed.length) {
+      workCosts.set(key, billed.reduce((total, id) => total + costs[id], 0))
+    } else {
+      workCosts.delete(key)
+    }
+  } catch {
+    workCosts.delete(key)
+  }
+}
+
+function workCostLabel(work: CreatorHistoryItem) {
+  const cost = workCosts.get(workCostKey(work))
+  if (cost != null) return formatScaled(cost, 1, 2)
+  return workCosts.has(workCostKey(work)) ? '查询中' : '—'
+}
+
+watch(() => selectedWork.value && `${workCostKey(selectedWork.value)}:${selectedWork.value.status}`, () => {
+  if (selectedWork.value) void loadWorkCost(selectedWork.value)
+}, { immediate: true })
+
 function resultParameterFields(work: CreatorHistoryItem) {
   const [tier, size] = workResolutionLabel(work).split(' · ')
-  const fields: Array<{ label: string; value: string; wide?: boolean }> = [
-    { label: '模型', value: work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model), wide: true },
+  const fields: Array<{ label: string; value: string }> = [
+    { label: '模型', value: work.type === 'video' ? videoModelLabel(work.model) : modelLabel(work.model) },
     { label: '类型', value: work.provider },
     { label: '画幅', value: work.type === 'image' ? imageAspectRatioLabel(work) : work.aspectRatio || '自动画幅' },
     { label: '清晰度', value: tier },
@@ -5584,6 +7750,7 @@ function resultParameterFields(work: CreatorHistoryItem) {
       : [
           { label: '完成耗时', value: formatCompletionDuration(work) },
           { label: '生成时间', value: formatResultTime(work.completedAt || work.updatedAt) },
+          { label: '总计费用', value: workCostLabel(work) },
         ]),
     { label: '输出格式', value: workOutputFormatLabel(work) },
     { label: '来源', value: work.source || '初版作品' },
@@ -5591,15 +7758,17 @@ function resultParameterFields(work: CreatorHistoryItem) {
   return fields.filter((field) => field.value)
 }
 
-// Shown while drawing, before real output sizes exist, so the requested size stands in.
+// Shown while an image is drawing, before real output sizes exist, so the requested size stands in.
+// A drawing video shot uses its own requested settings instead (missingResultTags).
 function generationTags(work: CreatorHistoryItem) {
-  if (work.type === 'video') {
+  // An "auto" image's size is unknown until it returns; other images of the batch may differ.
+  if (isAutoImageSize(work)) {
     return metaParts(
-      videoModelLabel(work.model),
-      work.aspectRatio || '自动画幅',
-      videoResolutionTierLabel(work),
-      work.requestedDuration ? `${work.requestedDuration} 秒` : undefined,
-      (work.shotCount || 1) > 1 ? `${work.shotCount} 个镜头` : undefined,
+      modelLabel(work.model),
+      '自动尺寸',
+      work.outputFormat?.toUpperCase(),
+      work.outputFormat === 'gif' && work.frameCount ? `${work.frameCount} 帧` : undefined,
+      work.referenceCount ? `${work.referenceCount} 张参考图` : undefined,
     )
   }
   const size = workResolutionLabel(work).split(' · ')[1]
@@ -5637,7 +7806,6 @@ function previewResult(output: string, type: StudioMode, index: number) {
 }
 
 function addShot() {
-  if (videoShots.value.length >= 6) return
   const previous = selectedShot.value
   const shot: VideoShot = {
     id: crypto.randomUUID(),
@@ -5719,7 +7887,8 @@ async function downloadAllOutputs(work: CreatorHistoryItem) {
 
 async function saveOutput(url: string, work: CreatorHistoryItem, index: number, timestamp: number) {
   const extension = work.type === 'video' ? 'mp4' : imageFileExtension(url)
-  const filename = `creator-${timestamp}-${index + 1}.${extension}`
+  const originalIndex = work.type === 'video' ? shotIndexForOutput(work, index) : work.imageOutputIndexes?.[index] ?? index
+  const filename = `creator-${timestamp}-${originalIndex + 1}.${extension}`
   let downloadUrl = url
   let temporaryUrl = ''
   const crossOriginDownload = work.type === 'image' && isCrossOriginHttpURL(url)
@@ -5813,8 +7982,24 @@ function delay(milliseconds: number) {
   return new Promise(resolve => window.setTimeout(resolve, milliseconds))
 }
 
+// Polling waits end as soon as the studio unmounts, so a closed page neither
+// sends one more status request nor finishes its work seconds later.
+function delayUntilDisposed(milliseconds: number) {
+  if (disposed) return Promise.resolve()
+  return new Promise<void>(resolve => {
+    const finish = () => {
+      window.clearTimeout(timer)
+      pendingDisposableDelays.delete(finish)
+      resolve()
+    }
+    const timer = window.setTimeout(finish, milliseconds)
+    pendingDisposableDelays.add(finish)
+  })
+}
+
 watch([studioMode, imageCapability, selectedModel, selectedApiKey], loadImagePricing)
 watch([studioMode, selectedModel, selectedApiKey], loadVideoPricing)
+watch([studioMode, videoCapability, selectableModelOptions, selectedApiKey], loadVideoOptionQuotes, { immediate: true })
 
 watch([studioMode, imageCapability, videoCapability], () => {
   if (restoringWorkSettings.value) return
@@ -5832,13 +8017,14 @@ watch(selectedGroupId, () => {
   void loadModels()
 })
 
-watch(maxReferenceImages, maximum => {
+function trimReferenceImages(maximum = maxReferenceImages.value) {
   while (activeReferenceImages.value.length > maximum) removeReference(activeReferenceImages.value.length - 1)
-})
+}
 
-watch(requiresReferenceVideo15, () => {
+// Restoring a work briefly passes through other models; trim once it settles.
+watch(maxReferenceImages, maximum => {
   if (restoringWorkSettings.value) return
-  syncVideoModelForGenerationMethod()
+  trimReferenceImages(maximum)
 })
 
 watch(maxOutputCount, maximum => {
@@ -5863,26 +8049,23 @@ watch(videoResolutionOptions, options => {
 })
 
 // Keep every shot within the selected relay tier: its duration range, its
-// aspect ratios, and no first-frame mode (relays take reference images instead).
-watch(selectedVideoRelayTier, tier => {
+// aspect ratios. Generation methods are fitted by fitVideoMethodsToModel.
+function fitVideoSettingsToRelayTier(tier = selectedVideoRelayTier.value) {
   if (!tier) return
-  const seedance = seedanceVideoTier(selectedModel.value)
   const clamp = (value: number) => snapSeedanceSeconds(tier, value)
   const ratios = tier.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
-  const ratio = (value: string) => ratios.includes(value) ? value : '16:9'
-  // Relays have no first-frame mode; tiers without uploads fall back to text.
-  // Tiers that need references also leave text-to-video.
-  const fallback: VideoGenerationMethod = seedance && !seedance.supportsUploadedReferences ? 'text' : 'reference'
-  const needsReference = 'requiresReference' in tier && tier.requiresReference
-  const method = (value: VideoGenerationMethod) => value === 'image' || (value === 'reference' && fallback === 'text') || (value === 'text' && needsReference) ? fallback : value
+  const ratio = (value: string) => ratios.includes(value) ? value : ratios.includes('16:9') ? '16:9' : ratios[0]
   videoDuration.value = clamp(videoDuration.value)
   aspectRatio.value = ratio(aspectRatio.value)
-  videoGenerationMethod.value = method(videoGenerationMethod.value)
   videoShots.value.forEach(shot => {
     shot.duration = clamp(shot.duration)
     shot.aspectRatio = ratio(shot.aspectRatio)
-    shot.generationMethod = method(shot.generationMethod)
   })
+}
+watch(selectedVideoRelayTier, tier => fitVideoSettingsToRelayTier(tier), { immediate: true })
+// Restoring a work briefly passes through other models; fit methods once it settles.
+watch([studioMode, selectedModel], ([, model]) => {
+  if (!restoringWorkSettings.value) fitVideoMethodsToModel(model)
 }, { immediate: true })
 
 // Grok has no relay tier; drop ratios it does not accept (e.g. 21:9 carried over from MiniMax).
@@ -5929,7 +8112,8 @@ function activateStudio() {
 
 onActivated(() => {
   activateStudio()
-  if (unsubscribeHistory) void syncHistory()
+  // KeepAlive also activates on the first mount, while the first load runs.
+  if (unsubscribeHistory && !initialHistorySync) void syncHistory()
 })
 onDeactivated(() => {
   studioActive = false
@@ -5954,6 +8138,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  clearDeleteConfirm()
   unsubscribeHistory?.()
   unsubscribeExternalHistory?.()
   window.removeEventListener('focus', syncVisibleHistory)
@@ -5961,6 +8146,7 @@ onBeforeUnmount(() => {
   imagePricingRequest?.abort()
   videoPricingRequest?.abort()
   disposed = true
+  ;[...pendingDisposableDelays].forEach(finish => finish())
   window.removeEventListener('paste', handlePaste)
   window.removeEventListener('keydown', handlePreviewKeydown)
   stopToolbarStuckTracking()
@@ -5976,7 +8162,15 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
-.local-save-warning { margin: 0; padding: 12px 20px; color: var(--creator-image-text, #8a601a); background: var(--creator-image-background, #fff8e8); font-size: 13px; }
+.local-save-warning { display: flex; align-items: center; gap: 12px; margin: 0; padding: 10px 12px 10px 20px; color: var(--creator-image-text, #8a601a); background: var(--creator-image-background, #fff8e8); font-size: 13px; }
+.local-save-warning-text { flex: 1; min-width: 0; }
+.local-save-warning-retry { flex-shrink: 0; padding: 6px 14px; border: 0; border-radius: 8px; background: #d97706; color: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; box-shadow: 0 1px 2px rgba(138, 96, 26, 0.25); }
+.local-save-warning-retry:hover { background: #b45309; }
+.local-save-warning-retry:disabled { opacity: 0.7; cursor: progress; }
+.local-save-warning-open { flex-shrink: 0; padding: 6px 12px; border: 1px solid rgba(138, 96, 26, 0.35); border-radius: 8px; background: transparent; color: inherit; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; }
+.local-save-warning-open:hover { background: rgba(138, 96, 26, 0.1); }
+.local-save-warning-close { flex-shrink: 0; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: inherit; font-size: 18px; line-height: 24px; cursor: pointer; }
+.local-save-warning-close:hover { background: rgba(138, 96, 26, 0.12); }
 /* Dialogs teleport to <body>, so they need their own copy of the design tokens. */
 .creator-studio,
 :global(.creator-dialog) {
@@ -5989,6 +8183,15 @@ onBeforeUnmount(() => {
   --creator-radius-small: 8px;
   --creator-surface-radius: 16px;
   --creator-radius-large: var(--creator-surface-radius);
+}
+
+/* Keep keyboard controls usable without drawing focus frames in the studio,
+   including nested players and settings dialogs teleported outside the page. */
+.creator-studio :deep(:focus),
+:global(.creator-dialog :focus) {
+  outline: none !important;
+  --tw-ring-shadow: 0 0 #0000 !important;
+  --tw-ring-offset-shadow: 0 0 #0000 !important;
 }
 
 .creator-studio {
@@ -6009,7 +8212,8 @@ onBeforeUnmount(() => {
   grid-template-columns: minmax(150px, 1fr) auto minmax(150px, 1fr);
   align-items: center;
   min-height: 66px;
-  padding: 8px 14px 8px 22px;
+  /* Same 16px inset as the history panel content below it. */
+  padding: 8px 16px;
   border-bottom: 1px solid var(--creator-line);
   background: rgb(255 255 255 / 96%);
 }
@@ -6085,7 +8289,6 @@ onBeforeUnmount(() => {
 .toolbar-actions { justify-content: flex-end; gap: 8px; }
 .new-creation-link { display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; padding: 0 12px; border: 1px solid #9cd9cf; border-radius: var(--creator-radius); background: #effbf8; color: var(--creator-accent-strong); font-size: 12px; font-weight: 700; white-space: nowrap; }
 .new-creation-link:hover { background: #dcf7ef; border-color: var(--creator-accent); }
-.new-creation-link:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 3px; }
 .history-tab-generating { display: inline-flex; align-items: center; gap: 4px; margin-left: 2px; padding: 1px 6px; border-radius: 999px; color: var(--creator-accent-strong); background: var(--creator-accent-soft); font-size: 11px; }
 .history-tab-generating .button-spinner { width: 10px; height: 10px; border-width: 1.5px; border-color: #c6e8df; border-top-color: var(--creator-accent); }
 /* Running work: one static glyph inside a rotating arc, over a soft shimmer. */
@@ -6097,8 +8300,6 @@ onBeforeUnmount(() => {
 .history-item.generating { border-color: #a5ddd4; }
 .history-copy small.history-progress { color: var(--creator-accent-strong); }
 .pending-image-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.generation-new-creation { flex: none; min-height: 36px; gap: 6px; padding: 0 14px; border-color: #e3ebe9; border-radius: var(--creator-radius); background: #fff; color: #475569; font-size: 13px; font-weight: 600; box-shadow: 0 1px 2px rgb(16 40 36 / 5%); transition: background 150ms ease, border-color 150ms ease, color 150ms ease; }
-.generation-new-creation:hover { border-color: var(--creator-accent); background: #effbf8; color: var(--creator-accent-strong); }
 .ready-status {
   white-space: nowrap;
   display: inline-flex;
@@ -6107,7 +8308,7 @@ onBeforeUnmount(() => {
   min-height: 34px;
   padding: 0 13px;
   border: 1px solid #86e7b8;
-  border-radius: 999px;
+  border-radius: var(--creator-radius);
   color: #07835f;
   background: #effcf6;
   font-size: 13px;
@@ -6115,21 +8316,26 @@ onBeforeUnmount(() => {
   line-height: 1;
 }
 .ready-status i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 4px rgb(7 131 95 / 8%); }
-.connection-action {
+.reset-settings-action {
+  flex: none;
+  white-space: nowrap;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border: 0;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 1px solid #d6dee6;
   border-radius: var(--creator-radius);
   color: #455468;
-  background: transparent;
-  transition: color 150ms ease, background 150ms ease, box-shadow 150ms ease;
+  background: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  transition: color 150ms ease, background 150ms ease, border-color 150ms ease;
 }
-.connection-action:hover { color: var(--creator-accent-strong); background: #edf9f7; box-shadow: inset 0 0 0 1px #cce8e3; }
-.connection-action:disabled { cursor: wait; opacity: .55; }
-.connection-action .pulsing { animation: creatorStatusPulse 900ms ease-in-out infinite alternate; }
+.reset-settings-action:hover { color: var(--creator-accent-strong); border-color: #9fd9cf; background: #edf9f7; }
+.reset-settings-action:disabled { cursor: wait; opacity: .55; }
 .icon-action,
   .collapse-action,
   .history-reopen,
@@ -6170,7 +8376,6 @@ onBeforeUnmount(() => {
 /* Compact-width history entry; shown by the 1120px breakpoint. */
 /* Same look as the desktop "历史记录" reopen button. */
 .history-drawer-toggle { position: relative; display: none; flex-shrink: 0; align-items: center; justify-content: center; }
-.history-drawer-toggle:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
 .history-drawer-toggle-live { position: absolute; top: -3px; right: -3px; width: 9px; height: 9px; border: 2px solid #fff; border-radius: 50%; background: var(--creator-accent); animation: creatorStatusPulse 900ms ease-in-out infinite alternate; }
 .history-drawer-handle { display: none; }
 .history-drawer-backdrop { position: fixed; z-index: 49; inset: 0; background: rgb(15 23 42 / 42%); opacity: 0; pointer-events: none; transition: opacity 200ms ease; }
@@ -6239,29 +8444,44 @@ onBeforeUnmount(() => {
 .history-drawer-toggle[aria-expanded="true"] { border-color: #a7e3d9; color: var(--creator-accent-strong); background: #fff; box-shadow: 0 4px 14px rgb(29 82 75 / 10%); }
 .history-drawer-toggle[aria-expanded="true"] small { color: #6e9e99; }
 /* Hover effects on the history entries are temporarily disabled. */
-.playground-history-reopen-button:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
 
-.history-heading { gap: 10px; padding: 22px 18px 14px; }
+.history-heading { gap: 10px; padding: 16px 16px 8px; }
 .history-heading > div:first-child { min-width: 0; flex: 1; }
 .history-heading h2,
 .settings-heading h2 { margin: 0; color: #172033; font-size: 16px; font-weight: 750; }
 .settings-heading p { margin: 3px 0 0; color: var(--creator-muted); font-size: 12px; }
 .history-count { display: inline-grid; place-items: center; min-width: 28px; height: 28px; padding: 0 6px; border-radius: var(--creator-radius-small); color: #8794a8; background: #f1f5f8; font-size: 12px; font-weight: 700; }
 .collapse-action { width: 34px; }
-.history-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 16px 14px; padding: 4px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius-large); background: #f2f7f6; }
+.history-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 3px; margin: 0 16px 16px; padding: 4px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius-large); background: #f2f7f6; }
 .history-tabs button { display: flex; align-items: center; justify-content: center; gap: 6px; min-height: 36px; border-radius: var(--creator-radius); color: #8090a6; font-size: 12px; font-weight: 650; }
 .history-tabs button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 2px 8px rgb(30 72 67 / 8%); }
 
-.history-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 12px 18px; scrollbar-color: #c5cbd1 transparent; scrollbar-width: thin; }
-.history-list::-webkit-scrollbar { width: 8px; }
-.history-list::-webkit-scrollbar-track { background: transparent; }
-.history-list::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
-.history-list::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
-.history-item { --history-item-bg: #fff; position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr) 28px; align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: var(--creator-radius); text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
+.history-list { min-height: 0; flex: 1 1 auto; overflow-y: auto; padding: 0 16px 16px; scrollbar-width: none; }
+.history-list::-webkit-scrollbar { display: none; }
+.history-pager { display: flex; flex: 0 0 auto; align-items: center; justify-content: center; padding: 12px 16px 14px; border-top: 1px solid var(--creator-line); }
+.history-pager-track { display: inline-flex; align-items: center; gap: 2px; max-width: 100%; padding: 3px; border: 1px solid var(--creator-line); border-radius: var(--creator-radius); background: #f2f7f6; }
+.history-pager button { display: grid; place-items: center; min-width: 28px; height: 28px; padding: 0 8px; border-radius: var(--creator-radius-small); color: #7a889b; font-size: 12px; font-weight: 650; font-variant-numeric: tabular-nums; transition: color .15s ease, background-color .15s ease, box-shadow .15s ease; }
+.history-pager .history-page-step { padding: 0; color: #8a97a8; }
+.history-pager button:hover:not(:disabled):not(.active) { color: var(--creator-accent-strong); background: rgb(255 255 255 / 70%); }
+.history-pager button:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 1px; }
+.history-pager button:disabled { opacity: .3; cursor: not-allowed; }
+.history-pager .history-page-number.active { color: var(--creator-accent-strong); background: #fff; font-weight: 750; box-shadow: 0 1px 2px rgb(30 72 67 / 10%), 0 2px 8px rgb(30 72 67 / 8%); cursor: default; }
+.history-page-gap { min-width: 16px; color: #a3afbf; font-size: 12px; text-align: center; }
+@media (prefers-reduced-motion: reduce) { .history-pager button { transition: none; } }
+.history-thumb-pending { position: absolute; inset: 0; background: linear-gradient(100deg, #e8f0ef 20%, #f4f8f7 50%, #e8f0ef 80%); background-size: 200% 100%; animation: history-thumb-shimmer 1.6s ease-in-out infinite; }
+@keyframes history-thumb-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .history-thumb-pending { animation: none; } }
+:global(.dark) .history-pager { border-color: #2b3c39; }
+:global(.dark) .history-pager-track { border-color: #344744; background: #192725; }
+:global(.dark) .history-pager button { color: #a9b8b5; }
+:global(.dark) .history-pager button:hover:not(:disabled):not(.active) { color: #71d9c9; background: rgb(255 255 255 / 6%); }
+:global(.dark) .history-pager .history-page-number.active { color: #71d9c9; background: #263532; box-shadow: 0 0 0 1px #3b514d, 0 2px 8px rgb(0 0 0 / 25%); }
+:global(.dark) .history-thumb-pending { background: linear-gradient(100deg, #243833 20%, #2d4540 50%, #243833 80%); background-size: 200% 100%; }
+.history-item { --history-item-bg: #fff; position: relative; display: grid; grid-template-columns: 52px minmax(0, 1fr); align-items: center; gap: 10px; width: 100%; height: 70px; margin-bottom: 8px; padding: 8px; overflow: hidden; border: 1px solid #dce6e4; border-radius: var(--creator-radius); text-align: left; background: #fff; box-shadow: 0 2px 8px rgb(29 61 57 / 4%); }
+.history-item:last-child { margin-bottom: 0; }
 .history-item:hover { --history-item-bg: #f7fcfb; border-color: #a5ddd4; background: #f7fcfb; box-shadow: 0 6px 16px rgb(29 81 73 / 8%); }
 .history-item.active { --history-item-bg: #eefbf8; border-color: #6fddcc; background: #eefbf8; box-shadow: 0 5px 14px rgb(24 138 121 / 8%); }
 .history-item-hitbox { position: absolute; z-index: 1; inset: 0; border-radius: inherit; }
-.history-item-hitbox:focus-visible { outline: 2px solid #39b9a5; outline-offset: -3px; }
 .history-preview { position: relative; display: grid; place-items: center; width: 52px; height: 52px; overflow: hidden; border-radius: var(--creator-radius-small); color: #8da09e; background: #e8f0ef; }
 .history-preview img,
 .history-preview video { width: 100%; height: 100%; object-fit: cover; }
@@ -6275,19 +8495,11 @@ onBeforeUnmount(() => {
 .history-copy small { margin-top: 5px; color: #95a1b2; font-size: 10px; }
 .history-preview,
 .history-copy { pointer-events: none; }
-/* Delete sits in its own grid column, so the title truncates before it instead of hiding under it.
-   The column is reserved even while the button is hidden, so hovering never reflows the text. */
-.history-item-actions { position: relative; z-index: 2; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 160ms ease; }
-/* Only keyboard focus on delete should reveal it after the pointer leaves the card. */
-.history-item:hover .history-item-actions,
-.history-item-actions:has(> .history-delete:focus-visible) { opacity: 1; pointer-events: auto; }
-.history-item-actions .history-delete { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; color: #8295a4; }
-.history-item-actions .history-delete:hover { color: #cc5252; background: #fff1f1; }
-.history-item-actions .history-delete:disabled { cursor: not-allowed; opacity: .4; }
 .history-empty { display: grid; justify-items: center; padding: 90px 22px 30px; text-align: center; color: #92a0b3; }
 .history-empty > span { display: grid; place-items: center; width: 58px; height: 58px; margin-bottom: 14px; border-radius: var(--creator-radius); background: #f3f7f7; }
 .history-empty strong { color: #58667a; font-size: 14px; }
 .history-empty p { margin: 7px 0 0; font-size: 12px; }
+.history-loading .button-spinner { width: 20px; height: 20px; border-color: #c6e8df; border-top-color: var(--creator-accent); }
 
 .canvas-panel {
   position: relative;
@@ -6300,17 +8512,12 @@ onBeforeUnmount(() => {
   flex-direction: column;
   overflow-x: hidden;
   overflow-y: auto;
-  scrollbar-color: #c5cbd1 transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
-.canvas-panel::-webkit-scrollbar { width: 9px; }
-.canvas-panel::-webkit-scrollbar-track { background: transparent; }
-.canvas-panel::-webkit-scrollbar-thumb { border: 2px solid #f3f8f7; border-radius: 999px; background: #c5cbd1; }
-.canvas-panel::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
+.canvas-panel::-webkit-scrollbar { display: none; }
 .canvas-panel > .result-workspace,
 .canvas-panel > .professional-workspace { flex: 0 0 auto; }
 .inspiration-workspace,
-.generation-state,
 .result-workspace,
 .professional-workspace {
   width: var(--creator-workspace-width);
@@ -6321,188 +8528,161 @@ onBeforeUnmount(() => {
   /* Historical results should start at the top of the scrollable canvas. */
   margin-block: 0;
 }
-.inspiration-workspace { max-width: 58rem; margin-inline: auto; padding: 46px 0 24px; }
+/* Cap the width on wide canvases and center both ways; auto margins collapse to 0 when it overflows, so scrolling still starts at the top. */
+.inspiration-workspace { flex: 0 0 auto; width: min(var(--creator-workspace-width), 68rem); margin: auto; padding: var(--creator-workspace-gutter) 0; }
 .inspiration-intro { text-align: center; }
-.inspiration-mark { display: inline-grid; place-items: center; width: 68px; height: 68px; border: 1px solid #79e3d2; border-radius: var(--creator-radius); color: var(--creator-accent-strong); background: #e8fbf7; }
+.inspiration-mark { display: inline-grid; place-items: center; width: 52px; height: 52px; border: 1px solid #9ee7db; border-radius: 16px; color: var(--creator-accent-strong); background: linear-gradient(160deg, #f1fdfa, #dcf6f1); box-shadow: 0 10px 24px -14px rgb(15 118 110 / 55%); }
 .eyebrow { margin: 18px 0 10px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: 0; }
+.inspiration-intro .eyebrow { margin: 16px 0 8px; letter-spacing: .16em; }
 .inspiration-intro h2,
-.generation-state h2,
 .result-heading h2 { margin: 0; color: #172033; font-size: 23px; font-weight: 780; }
-.inspiration-intro > p:last-child { margin: 10px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
+.inspiration-intro h2 { font-size: 24px; letter-spacing: .01em; }
+.inspiration-intro > p:last-child { margin: 8px auto 0; color: #7a8799; font-size: 13px; line-height: 1.7; }
 
-.featured-brief { margin-top: 22px; overflow: hidden; border: 1px solid #263c39; border-radius: var(--creator-radius-large); color: #eaf1ef; background: #101d1b; box-shadow: 0 24px 48px rgb(20 45 41 / 18%); }
-.brief-topline { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 12px; min-height: 60px; margin: 0 24px; border-bottom: 1px solid #2b3e3b; color: #9db3af; font-size: 11px; font-weight: 700; }
-.brief-topline > span:first-child { display: flex; align-items: center; gap: 6px; color: #b5d8d1; }
-.brief-topline > div { display: flex; gap: 7px; }
-.brief-topline button { width: 32px; height: 32px; border-color: #334b47; color: #b9cbc7; background: #182825; }
-.brief-stage { height: 256px; overflow: hidden; }
-.brief-body { display: grid; grid-template-columns: minmax(0, .88fr) minmax(0, 1.12fr); height: 100%; min-height: 0; padding: 24px; }
-.brief-summary { display: flex; flex-direction: column; align-items: flex-start; min-height: 0; padding-right: 24px; border-right: 1px solid #33423f; }
-.brief-summary > span { display: inline-flex; padding: 5px 9px; border: 1px solid #9a7744; border-radius: var(--creator-radius-small); color: #d6b374; background: #28251e; font-size: 10px; }
-.brief-summary h3 { margin: 16px 0 7px; color: #fff; font-size: 28px; font-weight: 760; }
-.brief-summary p { margin: 0; color: #a7b6b3; font-size: 12px; line-height: 1.7; }
-.brief-summary small { display: block; margin-top: auto; padding-top: 16px; color: #788b87; font-size: 10px; }
-.brief-copy { display: flex; align-items: flex-start; flex-direction: column; min-width: 0; min-height: 0; padding-left: 24px; }
-.brief-copy > small { flex-shrink: 0; color: #c2d3cf; font-size: 10px; font-weight: 800; letter-spacing: 0; }
-.brief-copy p { flex: 1; align-self: stretch; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #5c716d transparent; margin: 14px 0; color: #d2dedb; font-size: 13px; line-height: 1.8; }
-.brief-copy button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 7px; min-height: 40px; padding: 0 14px; border-radius: var(--creator-radius); color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; }
-.brief-copy button:hover { background: #edcc82; }
+.featured-brief { margin-top: 26px; overflow: hidden; border: 1px solid #22504a; border-radius: var(--creator-radius-large); color: #eaf1ef; background: radial-gradient(90% 120% at 0% 0%, rgb(45 212 191 / 9%), transparent 60%), radial-gradient(70% 90% at 100% 100%, rgb(223 186 105 / 6%), transparent 65%), #0f1c1a; box-shadow: 0 22px 44px -18px rgb(16 46 41 / 45%); container: featured-brief / inline-size; }
+/* Title, scrubber, position and arrows share one row so the card has a single navigation area. */
+.brief-topline { display: flex; align-items: center; gap: 18px; min-height: 58px; margin: 0 28px; border-bottom: 1px solid rgb(255 255 255 / 7%); color: #9db3af; font-size: 11px; font-weight: 700; }
+.brief-topline > span:first-child { display: flex; flex-shrink: 0; align-items: center; gap: 6px; color: #b5d8d1; letter-spacing: .06em; }
+.brief-topline > span:nth-child(2) { order: 2; flex-shrink: 0; color: #c9d8d4; font-variant-numeric: tabular-nums; letter-spacing: .04em; }
+.brief-topline > div:not(.brief-navigation) { display: flex; order: 3; flex-shrink: 0; gap: 6px; }
+.brief-topline button { width: 30px; height: 30px; border-color: rgb(255 255 255 / 10%); color: #b9cbc7; background: rgb(255 255 255 / 4%); }
+.brief-stage { height: 236px; overflow: hidden; }
+.brief-body { display: grid; grid-template-columns: minmax(180px, 34%) minmax(0, 1fr); height: 100%; min-height: 0; padding: 26px 28px; }
+.brief-summary { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; min-height: 0; padding-right: 28px; }
+.brief-summary > span { display: inline-flex; padding: 4px 9px; border: 1px solid rgb(223 186 105 / 45%); border-radius: 999px; color: #e2c07c; background: rgb(223 186 105 / 10%); font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.brief-summary h3 { max-width: 100%; margin: 14px 0 6px; overflow: hidden; color: #fff; font-size: 28px; font-weight: 760; line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.brief-summary p { margin: 0; color: #93a8a3; font-size: 12px; line-height: 1.7; }
+.brief-summary button { display: inline-flex; flex-shrink: 0; align-items: center; gap: 8px; min-height: 40px; margin-top: auto; padding: 0 16px; border-radius: var(--creator-radius); color: #2f2b20; background: #dfba69; font-size: 12px; font-weight: 750; box-shadow: 0 8px 18px -10px rgb(223 186 105 / 70%); transition: background 150ms ease, transform 150ms ease; }
+.brief-summary button:hover { background: #edcc82; transform: translateX(2px); }
+.brief-copy { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding-left: 28px; border-left: 1px solid rgb(255 255 255 / 8%); }
+.brief-copy > small { display: flex; flex-shrink: 0; align-items: center; justify-content: space-between; gap: 12px; color: #8fa7a1; font-size: 10px; font-weight: 750; letter-spacing: .12em; }
+.brief-copy > small > span { color: #667d78; font-weight: 600; letter-spacing: .02em; font-variant-numeric: tabular-nums; }
+.brief-copy p { flex: 1; min-height: 0; overflow-y: auto; overflow-wrap: anywhere; scrollbar-width: thin; scrollbar-color: #5c716d transparent; margin: 12px 0 0; color: #d9e4e1; font-size: 14px; line-height: 1.85; }
 .brief-slide-enter-active,
 .brief-slide-leave-active { transition: opacity 220ms ease, transform 220ms ease; }
 .brief-slide-enter-from { opacity: 0; transform: translateX(12px); }
 .brief-slide-leave-to { opacity: 0; transform: translateX(-12px); }
 @media (prefers-reduced-motion: reduce) { .brief-stage { transition: none; } }
-.brief-navigation { display: flex; align-items: center; gap: 16px; min-height: 58px; padding: 12px 24px; border-top: 1px solid #263a36; background: rgb(255 255 255 / 2%); }
-.brief-navigation > label { flex-shrink: 0; color: #9bb0aa; font-size: 11px; }
+.brief-navigation { display: flex; order: 1; flex: 1; align-items: center; min-width: 0; }
+.brief-navigation > label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .brief-range { appearance: none; flex: 1; min-width: 0; height: 24px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; cursor: pointer; }
-.brief-range::-webkit-slider-runnable-track { height: 3px; border-radius: 3px; background: linear-gradient(to right, #dfba69 var(--brief-progress), #3b514c var(--brief-progress)); }
-.brief-range::-moz-range-track { height: 3px; border-radius: 3px; background: linear-gradient(to right, #dfba69 var(--brief-progress), #3b514c var(--brief-progress)); }
-.brief-range::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border: 2px solid #101d1b; border-radius: 50%; background: #dfba69; box-shadow: 0 0 0 1px rgb(223 186 105 / 35%); transition: box-shadow 150ms ease; }
-.brief-range::-moz-range-thumb { width: 8px; height: 8px; border: 2px solid #101d1b; border-radius: 50%; background: #dfba69; box-shadow: 0 0 0 1px rgb(223 186 105 / 35%); }
+.brief-range::-webkit-slider-runnable-track { height: 2px; border-radius: 2px; background: linear-gradient(to right, #dfba69 var(--brief-progress), rgb(255 255 255 / 12%) var(--brief-progress)); }
+.brief-range::-moz-range-track { height: 2px; border-radius: 2px; background: linear-gradient(to right, #dfba69 var(--brief-progress), rgb(255 255 255 / 12%) var(--brief-progress)); }
+.brief-range::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; margin-top: -5px; border: 2px solid #0f1c1a; border-radius: 50%; background: #dfba69; box-shadow: 0 0 0 1px rgb(223 186 105 / 35%); transition: box-shadow 150ms ease; }
+.brief-range::-moz-range-thumb { width: 8px; height: 8px; border: 2px solid #0f1c1a; border-radius: 50%; background: #dfba69; box-shadow: 0 0 0 1px rgb(223 186 105 / 35%); }
 .brief-range:hover::-webkit-slider-thumb { box-shadow: 0 0 0 4px rgb(223 186 105 / 14%); }
-.brief-range:focus-visible { outline: 2px solid #dfba69; outline-offset: 4px; }
-.brief-position { display: inline-flex; flex-shrink: 0; align-items: center; gap: 6px; min-width: 64px; justify-content: center; padding: 5px 8px; border: 1px solid #354a44; border-radius: var(--creator-radius); background: #192b25; font-size: 11px; font-variant-numeric: tabular-nums; }
-.brief-position strong { color: #dfba69; font-weight: 650; }
-.brief-position > span { color: #91a59e; }
-.quick-templates { display: grid; gap: 10px; margin-top: 22px; }
-.quick-templates-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; }
-/* Section label with a hairline rule, so the chips read as a group rather than a form. */
-.quick-templates-label { display: flex; align-items: center; gap: 12px; color: #7d8b9c; font-size: 11px; font-weight: 700; letter-spacing: .08em; }
-.quick-templates-label::after { content: ''; flex: 1; height: 1px; background: #e1eae8; }
-.quick-templates button { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; padding: 10px 12px; border: 1px solid #d7e5e2; border-radius: var(--creator-radius); background: #fff; text-align: left; transition: border-color 160ms ease, background 160ms ease, transform 160ms ease; }
-.quick-templates button > span { display: grid; gap: 3px; min-width: 0; }
-.quick-templates button strong { overflow: hidden; color: #2f4642; font-size: 12px; font-weight: 700; text-overflow: ellipsis; white-space: nowrap; }
-.quick-templates button small { overflow: hidden; color: #94a3a0; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-.quick-templates button > svg { flex-shrink: 0; color: var(--creator-accent); opacity: 0; transform: translateX(-4px); transition: opacity 160ms ease, transform 160ms ease; }
-.quick-templates button:hover,
-.quick-templates button:focus-visible { border-color: #93d9ce; background: #f6fcfb; transform: translateY(-1px); }
-.quick-templates button:hover strong,
-.quick-templates button:focus-visible strong { color: var(--creator-accent-strong); }
-.quick-templates button:hover > svg,
-.quick-templates button:focus-visible > svg { opacity: 1; transform: none; }
-@media (hover: none) { .quick-templates button > svg { opacity: .6; transform: none; } }
-@media (prefers-reduced-motion: reduce) { .quick-templates button, .quick-templates button > svg { transition: none; transform: none; } }
-
-/* Images and videos share fixed outer gutters, including when history is collapsed. */
-.generation-state { --generation-row-width: calc(100cqi - 2 * var(--creator-workspace-gutter)); --generation-frame-height: clamp(220px, calc(100vh - 360px), 760px); position: relative; display: grid; flex: 0 0 auto; grid-template-columns: minmax(0, 1fr); justify-items: center; row-gap: 20px; margin-block: 0; padding-block: var(--creator-workspace-gutter); text-align: center; isolation: isolate; }
-.generation-state.is-video { flex: 1 0 0; grid-template-rows: auto minmax(220px, 1fr); }
-/* One compact status panel; the frames below carry the main loading animation. */
-.generation-panel { display: grid; gap: 18px; width: 100%; min-width: 0; padding: 22px 24px 20px; border: 1px solid #e6eeec; border-radius: var(--creator-radius-large); background: #fff; box-shadow: 0 1px 2px rgb(16 40 36 / 4%), 0 14px 36px -14px rgb(16 40 36 / 12%); text-align: left; }
-.generation-heading { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.generation-heading-copy { display: grid; flex: 0 1 auto; order: 1; gap: 2px; min-width: 0; }
-.generation-heading .generation-new-creation { order: 3; margin-left: auto; }
-/* The ellipsis needs overflow: hidden; the offset padding gives the status dot's pulse room so it isn't clipped. */
-.generation-state .generation-heading-copy h2 { margin-left: -8px; padding-left: 8px; overflow: hidden; color: #0f172a; font-size: 16px; font-weight: 650; letter-spacing: -.01em; line-height: 1.4; text-overflow: ellipsis; white-space: nowrap; }
-/* A breathing dot marks the task as live without a heavy icon tile. */
-.generation-status-dot { display: inline-block; width: 8px; height: 8px; margin-right: 10px; border-radius: 50%; background: var(--creator-accent); vertical-align: 2px; animation: creatorStatusPulse 1.8s ease-out infinite; }
-@media (prefers-reduced-motion: reduce) { .generation-status-dot { animation: none; } }
-.generation-body { display: grid; gap: 16px; }
-.generation-brief { display: grid; gap: 12px; min-width: 0; }
-.generation-prompt { display: -webkit-box; margin: 0; overflow: hidden; color: #1e293b; font-size: 14px; line-height: 1.75; overflow-wrap: anywhere; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.result-tags.generation-tags { align-items: center; }
-.result-tags.generation-tags li { padding: 2px 10px; border: 1px solid #e6edeb; color: #5c6b7a; background: #f8fafa; font-size: 11px; font-weight: 500; line-height: 16px; letter-spacing: .01em; font-variant-numeric: tabular-nums; }
-.result-tags.generation-tags li:first-child { border-color: #cfe9e3; color: var(--creator-accent-strong); background: #f3faf8; }
-.generation-heading-copy p { margin: 0; overflow: hidden; color: #8391a2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
-.generation-stage { display: flex; align-items: center; justify-content: center; gap: 12px; max-width: 100%; }
-.generation-stage.is-image { display: grid; width: 100%; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 12px; }
-.generation-stage.is-image .generation-frame { width: 100%; }
-/* A single portrait placeholder should follow the requested ratio instead of filling the whole canvas width. */
-.generation-stage.is-image:has(> .generation-frame:only-child) { display: flex; }
-.generation-stage.is-image:has(> .generation-frame:only-child) > .generation-frame {
-  /* Preserve a single image's ratio and portrait height limit within the full-width stage. */
-  width: var(--generation-frame-width);
-  height: auto;
-  max-width: 100%;
-  justify-self: center;
+.brief-range:focus-visible { outline: 2px solid rgb(223 186 105 / 60%); outline-offset: 2px; }
+/* The topline counter already shows the position; this copy only feeds assistive tech and tests. */
+.brief-position { display: none; }
+/* Narrow canvases stack the brief; the stage then follows the measured body height. */
+@container featured-brief (max-width: 560px) {
+  .brief-topline { gap: 12px; margin: 0 20px; }
+  .brief-stage { height: var(--brief-stage-height, auto); transition: height 220ms ease; }
+  .brief-body { grid-template-columns: minmax(0, 1fr); height: auto; padding: 20px; }
+  .brief-summary { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 14px; padding: 0 0 16px; }
+  .brief-summary > * { grid-column: 1; }
+  .brief-summary > span { justify-self: start; }
+  .brief-summary h3 { margin: 10px 0 4px; font-size: 22px; }
+  .brief-summary button { grid-column: 2; grid-row: 1 / span 3; align-self: end; margin: 0; }
+  .brief-copy { padding: 16px 0 0; border-top: 1px solid rgb(255 255 255 / 8%); border-left: 0; }
+  .brief-copy p { flex: 0 1 auto; max-height: 9.25em; }
+  .brief-copy p.is-clipped {
+    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
+  }
 }
-.generation-stage.is-video { display: grid; width: 100%; grid-template-columns: repeat(var(--generation-columns, 1), minmax(0, 1fr)); grid-auto-rows: minmax(140px, 1fr); align-items: stretch; margin-bottom: 0; }
-.generation-stage.is-video > .generation-frame { width: 100%; min-height: 0; }
-.generation-frame { position: relative; display: grid; flex: 0 1 auto; container-type: inline-size; width: var(--generation-frame-width); min-width: 0; place-items: center; overflow: hidden; border: 1px solid #cfeee8; border-radius: var(--creator-radius-large); background: linear-gradient(110deg, #ecf8f6 30%, #f8fdfc 50%, #ecf8f6 70%) 0 0 / 220% 100%; box-shadow: 0 14px 34px rgb(24 104 93 / 10%), inset 0 0 0 4px rgb(255 255 255 / 55%); }
-.generation-frame.is-current { border-color: #bfe9e1; background: #f3f9f8; box-shadow: 0 20px 50px rgb(24 104 93 / 10%), inset 0 0 0 1px rgb(255 255 255 / 70%); }
-.generation-frame.is-queued { border-style: dashed; background: rgb(255 255 255 / 55%); box-shadow: none; }
-.generation-frame.is-done { border-color: #a5ddd4; animation: creatorFrameIn .45s ease-out; }
-.generation-frame > img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
-.generation-frame-video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+.quick-templates { display: grid; gap: 12px; margin-top: 30px; }
+.quick-templates-list { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; container: quick-templates / inline-size; }
+/* Section label with a hairline rule, so the chips read as a group rather than a form. */
+.quick-templates-label { display: flex; align-items: baseline; gap: 10px; color: #334155; font-size: 13px; font-weight: 750; letter-spacing: .04em; }
+.quick-templates-label > small { color: #94a3b8; font-size: 11px; font-weight: 500; letter-spacing: .02em; }
+.quick-templates-label::after { content: ''; flex: 1; align-self: center; height: 1px; background: #e1eae8; }
+.quick-templates button { position: relative; display: block; min-width: 0; aspect-ratio: 16 / 9; overflow: hidden; padding: 0; border: 1px solid #d7e5e2; border-radius: var(--creator-radius); background: #e8f0ee; text-align: left; isolation: isolate; box-shadow: 0 1px 2px rgb(15 35 32 / 6%); }
+.quick-template-cover { position: absolute; inset: 0; z-index: -2; width: 100%; height: 100%; object-fit: cover; transition: transform 480ms cubic-bezier(.2, .7, .2, 1); }
+.quick-templates button::before { content: ''; position: absolute; inset: 0; z-index: -1; background: linear-gradient(180deg, rgb(8 18 16 / 0%) 38%, rgb(8 18 16 / 34%) 62%, rgb(8 18 16 / 78%) 100%); }
+.quick-template-text { position: absolute; right: 10px; bottom: 9px; left: 11px; display: grid; gap: 2px; min-width: 0; }
+.quick-templates button strong { overflow: hidden; color: #fff; font-size: 13px; font-weight: 700; letter-spacing: .02em; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 6px rgb(0 0 0 / 35%); }
+.quick-templates button small { overflow: hidden; color: rgb(255 255 255 / 78%); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; text-shadow: 0 1px 4px rgb(0 0 0 / 35%); }
+.quick-templates button > svg { position: absolute; top: 8px; right: 8px; box-sizing: content-box; padding: 5px; border-radius: 999px; color: #fff; background: rgb(10 22 20 / 38%); backdrop-filter: blur(6px); }
+.quick-templates button:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: 2px; }
+/* The only hover cue: the cover slowly zooms inside the fixed card frame. */
+.quick-templates button:hover .quick-template-cover,
+.quick-templates button:focus-visible .quick-template-cover { transform: scale(1.08); }
+@media (prefers-reduced-motion: reduce) { .quick-template-cover { transition: none; } }
+/* Narrow centre column (~150px cards or less): taller crop, name only. */
+@container quick-templates (max-width: 800px) {
+  .quick-templates button { aspect-ratio: 4 / 3; }
+  .quick-template-text { right: 8px; bottom: 7px; left: 9px; }
+  .quick-templates button strong { font-size: 12px; }
+  .quick-templates button small { display: none; }
+  .quick-templates button > svg { top: 6px; right: 6px; padding: 4px; }
+}
+
 /* Scale with the frame so narrow mobile frames keep the spinner proportional. */
 .generation-frame-dots { position: absolute; inset: 0; border-radius: inherit; background-image: radial-gradient(rgb(15 159 143 / 9%) 1px, transparent 1.2px); background-size: 18px 18px; pointer-events: none; }
 .generation-frame-loader { position: relative; z-index: 1; display: grid; justify-items: center; gap: 14px; }
-.generation-frame-ring { position: relative; display: grid; place-items: center; width: clamp(28px, min(calc(34px + 4cqi), calc(var(--generation-frame-height-ring-size) - 6px)), 76px); height: clamp(28px, min(calc(34px + 4cqi), calc(var(--generation-frame-height-ring-size) - 6px)), 76px); border-radius: 50%; color: var(--creator-accent-strong); background: rgb(255 255 255 / 82%); box-shadow: 0 6px 20px rgb(24 138 121 / 16%), inset 0 0 0 1px rgb(255 255 255 / 90%); backdrop-filter: blur(10px); }
+.generation-frame-ring { position: relative; display: grid; place-items: center; width: clamp(28px, calc(34px + 4cqi), 76px); height: clamp(28px, calc(34px + 4cqi), 76px); border-radius: 50%; color: var(--creator-accent-strong); background: rgb(255 255 255 / 82%); box-shadow: 0 6px 20px rgb(24 138 121 / 16%), inset 0 0 0 1px rgb(255 255 255 / 90%); backdrop-filter: blur(10px); }
 .generation-frame-ring > svg { width: 42%; height: 42%; animation: creatorTwinkle 2.4s ease-in-out infinite; }
 .generation-frame-ring::before { position: absolute; inset: -3px; border-radius: 50%; background: conic-gradient(from 0deg, transparent 0 55%, rgb(43 196 172 / 35%) 75%, var(--creator-accent-strong) 100%); content: ''; -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)); mask: radial-gradient(farthest-side, transparent calc(100% - 2.5px), #000 calc(100% - 2px)); animation: creatorSpin 1.4s linear infinite; }
 @media (prefers-reduced-motion: reduce) { .generation-frame-ring > svg, .generation-frame-ring::before { animation: none; } }
-.generation-done-count { flex: none; color: #8391a2; font-size: 12px; font-style: normal; font-weight: 500; line-height: 18px; font-variant-numeric: tabular-nums; }
-.generation-frame-index { color: #a7bbb7; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.generation-frame.is-failed { border-style: dashed; border-color: #ecc9c4; background: #fff6f5; box-shadow: none; }
-.generation-frame-failed { display: grid; justify-items: center; gap: 4px; color: #c0574d; font-size: 11px; font-weight: 600; }
-.generation-frame-open { position: absolute; z-index: 1; inset: 0; border-radius: inherit; cursor: zoom-in; }
-.generation-frame-open:focus-visible { outline: 2px solid var(--creator-accent); outline-offset: -3px; }
-.generation-frame-actions { position: absolute; z-index: 2; top: 8px; right: 8px; display: flex; gap: 6px; opacity: 0; transition: opacity 150ms ease; }
-.generation-frame:hover .generation-frame-actions, .generation-frame-actions:focus-within { opacity: 1; }
+.generation-frame-caption { display: grid; justify-items: center; gap: 4px; padding: 0 12px; color: #34504b; text-align: center; }
+.generation-frame-caption strong { font-size: 15px; font-weight: 700; line-height: 1.4; }
+.generation-frame-caption small { color: #7d8c8a; font-size: 12px; line-height: 1.5; }
+@container (max-width: 240px) { .generation-frame-caption small { display: none; } }
+@container (max-width: 150px) { .generation-frame-caption { display: none; } }
+/* Mirrors .result-missing-media.is-failed so a failure looks the same during and after generation. */
 /* Neutral glass, so the buttons read on any image without tinting it. */
-.generation-frame-action { display: grid; place-items: center; width: 30px; height: 30px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 50%; color: #fff; background: rgb(15 23 42 / 52%); box-shadow: 0 2px 8px rgb(0 0 0 / 22%); backdrop-filter: blur(6px); transition: background 150ms ease; }
-.generation-frame-action:not(:disabled):hover { background: rgb(15 23 42 / 76%); }
-.generation-frame-action > svg { width: 16px; height: 16px; }
-.generation-frame-action:disabled { cursor: wait; opacity: .5; }
-/* Touch screens have no hover, so finished frames always show their actions. */
-@media (hover: none) { .generation-frame-actions { opacity: 1; } }
-/* Narrow frames (several per row on phones) stay clean: a tap opens the preview, which has save and edit. */
-@container (max-width: 160px) {
-  .generation-frame-actions { display: none; }
-}
-.generation-metrics { display: flex; align-items: center; gap: 16px; min-height: 20px; margin: 0; }
-.generation-metrics > .progress-track { flex: 1 1 auto; height: 3px; }
-.generation-segments { display: flex; flex: 1 1 auto; gap: 6px; min-width: 0; }
-.generation-segment { position: relative; flex: 1 1 0; height: 4px; overflow: hidden; border-radius: 999px; background: #e3f4f1; transition: background .4s ease; }
-.generation-segment.is-done { background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); }
-.generation-segment.is-failed { background: #f3cdc8; }
-.generation-segment.is-current::after { position: absolute; inset: 0; background: linear-gradient(90deg, transparent, rgb(43 196 172 / 80%), transparent); content: ''; transform: translateX(-100%); animation: creatorSegmentSweep 1.8s ease-in-out var(--segment-delay, 0s) infinite; }
-@media (prefers-reduced-motion: reduce) { .generation-segment.is-current { background: #bfe7df; } .generation-segment.is-current::after { display: none; } }
-.generation-elapsed { display: inline-flex; flex: none; align-items: center; gap: 5px; white-space: nowrap; color: #8391a2; font-size: 12px; line-height: 1; }
-.generation-elapsed strong { margin-left: 2px; color: #0f172a; font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
-.generation-percent { display: inline-flex; flex: none; align-items: center; justify-content: center; min-width: 42px; height: 22px; padding: 0 8px; border-radius: 999px; color: var(--creator-accent-strong); background: #d8f8f1; font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; }
-.progress-track { width: 100%; height: 4px; margin: 0; overflow: hidden; border-radius: 999px; background: #e3f4f1; }
-.progress-track span { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); transition: width .6s ease; }
-/* 双段伸缩：长段、短段轮流从左端伸出、边走边伸缩、在右端收尾，同一时刻只有一段，前一段走完才从起点再出；位置和长度都按轨道百分比，宽度自适应；用 clip-path 裁出段落，不改 left/right，避免逐帧重排 */
-.progress-track.indeterminate span { position: relative; width: 100%; background: none; transition: none; }
-.progress-track.indeterminate span::before, .progress-track.indeterminate span::after { content: ''; position: absolute; inset: 0; border-radius: inherit; background: linear-gradient(90deg, #2bc4ac, var(--creator-accent-strong)); clip-path: inset(0 100% 0 0 round 999px); animation: creatorProgressLong 2.2s linear infinite; }
-.progress-track.indeterminate span::after { animation-name: creatorProgressShort; }
-@media (prefers-reduced-motion: reduce) { .progress-track.indeterminate span::before { clip-path: none; opacity: .6; animation: none; } .progress-track.indeterminate span::after { display: none; } }
-@media (prefers-reduced-motion: reduce) { .generation-frame.is-current, .generation-frame.is-done { animation: none; } }
-/* Keep a four-image generation balanced when the canvas can fit three cards per row. */
-@container (min-width: 900px) and (max-width: 1168px) {
-  .generation-stage.is-image:has(> .generation-frame:nth-child(4):last-child) > .generation-frame:last-child {
-    grid-column: 1 / -1;
-    width: min(100%, calc((100% - 24px) / 3));
-    justify-self: center;
-  }
-}
-.result-workspace { padding: 32px 0 24px; }
+/* Same inset on every side: top and bottom match the side gutter, and the heading row
+   sits the same distance above the results as below the canvas top. */
+.result-workspace { padding: var(--creator-workspace-gutter) 0; }
 .result-heading { align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 16px; }
 .result-heading > div { min-width: 0; }
 .result-heading .eyebrow { margin: 0 0 4px; font-weight: 600; }
-.result-heading-complete { align-items: flex-end; flex-wrap: wrap; }
-.result-heading-complete > div:first-child { flex: 1 1 240px; }
-.result-heading-title-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; }
+.result-heading-complete { align-items: center; flex-wrap: wrap; }
+.result-heading-complete > div:first-child { flex: 0 1 auto; }
+.result-heading-title-line { --result-heading-inline-gap: 8px; display: flex; flex-wrap: wrap; align-items: center; gap: 6px var(--result-heading-inline-gap); }
+/* Title → first pill and pill → pill share one gap so the row reads evenly. */
+.result-heading-pills { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px var(--result-heading-inline-gap); }
+/* While drawing, the status block and the actions are separate groups; when they wrap, the actions get their own row. */
+.result-workspace.is-generating .result-heading-complete { align-items: center; row-gap: 16px; }
+.result-workspace.is-generating .result-heading { margin-bottom: 22px; }
 .result-heading h2 { font-size: 20px; font-weight: 700; line-height: 1.4; }
 .result-heading-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-start; gap: 8px; }
 .result-count-pill { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 22px; padding: 2px 8px; border-radius: var(--creator-radius-small); white-space: nowrap; color: #4c756f; background: #e5efec; font-size: 12px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; }
+.result-failed-pill { color: #b54848; background: #fbeaea; }
 .result-heading-actions .secondary-command,
-.result-heading-actions .icon-action { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; width: auto; min-height: 34px; height: 34px; padding: 0 12px; white-space: nowrap; font-size: 12px; font-weight: 600; line-height: 1; border-color: #d6e4e1; color: #3f5d59; }
-.result-heading-actions svg { flex: 0 0 auto; }
+.result-heading-actions .icon-action { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; gap: 6px; width: auto; min-height: 36px; height: 36px; padding: 0 13px; border-radius: var(--creator-radius); white-space: nowrap; font-size: 12px; font-weight: 750; line-height: 1; letter-spacing: .01em; border-color: #dfe9e7; color: #4a6662; background: #fff; transition: border-color 150ms ease, color 150ms ease, background-color 150ms ease, box-shadow 150ms ease, transform 150ms ease; }
+.result-heading-actions .secondary-command:hover:not(:disabled),
+.result-heading-actions .icon-action:hover:not(:disabled) { border-color: #8fded2; color: var(--creator-accent-strong); background: #f4fcfa; }
+/* Delete is the only destructive action left on the page: same size as its neighbours, red on hover, solid red while armed for the confirming second click. */
+.result-heading-actions .delete-work-command:hover:not(:disabled) { border-color: #f0c2c2; color: #c84040; background: #fff7f7; }
+.result-heading-actions .delete-work-command.confirming,
+.result-heading-actions .delete-work-command.confirming:hover:not(:disabled) { border-color: #d64545; color: #fff; background: #d64545; box-shadow: 0 2px 8px rgb(214 69 69 / 22%); }
+.result-heading-actions .secondary-command:disabled { cursor: not-allowed; opacity: .5; }
+.result-heading-actions .secondary-command:active:not(:disabled),
+.result-heading-actions .icon-action:active:not(:disabled) { transform: translateY(1px); }
+.result-heading-actions svg { flex: 0 0 auto; width: 16px; height: 16px; }
 .result-heading-actions button > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.result-heading-actions .download-all-command:disabled { cursor: wait; opacity: .68; }
-.result-heading-actions .primary-soft { border-color: var(--creator-accent); color: #fff; background: var(--creator-accent); }
-.result-heading-actions .primary-soft:hover { border-color: var(--creator-accent-strong); background: var(--creator-accent-strong); }
+.result-heading-actions .download-all-command.is-downloading:disabled { cursor: wait; opacity: .68; }
+.result-heading-continue { display: contents; }
+/* Same light-green highlight as the generating view's 新建创作 button. */
+.result-heading-actions .primary-soft { border-color: #9cd9cf; color: var(--creator-accent-strong); background: #effbf8; }
+.result-heading-actions .primary-soft:hover:not(:disabled) { border-color: #8fd3c8; color: var(--creator-accent-strong); background: #e6f8f3; }
 .complete-video-card { overflow: hidden; margin-bottom: 24px; border: 1px solid #cadbd8; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 84%); box-shadow: 0 12px 30px rgb(25 74 67 / 10%); }
+/* Composed but not decoded yet: the card loads out of sight and takes no room, then fades in finished. */
+.complete-video-card.is-preparing { position: absolute; width: 1px; height: 1px; margin: 0; overflow: hidden; border: 0; opacity: 0; pointer-events: none; clip-path: inset(50%); }
+.complete-video-card:not(.is-preparing) { animation: complete-video-reveal 320ms ease-out; }
+@keyframes complete-video-reveal { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) { .complete-video-card:not(.is-preparing) { animation: none; } }
 .complete-video-card > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 16px; border-bottom: 1px solid #dce7e5; }
 .complete-video-card > header > div { min-width: 0; }
 .complete-video-card > header .eyebrow { margin: 0 0 4px; font-weight: 600; }
 .complete-video-card > header h3 { margin: 0; color: #172033; font-size: 16px; font-weight: 700; line-height: 1.4; }
-.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 5px 0 0; font-weight: 400; overflow: hidden; color: #718094; font-size: 11px; line-height: 1.65; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
-.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 11px; border: 1px solid #d4e3e0; border-radius: var(--creator-radius-small); white-space: nowrap; color: #5d716d; background: #f7faf9; font-size: 10px; }
+.complete-video-card > header p:last-child { display: -webkit-box; max-width: 650px; margin: 6px 0 0; font-weight: 400; overflow: hidden; color: #4f5f72; font-size: 13px; line-height: 1.6; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.complete-video-card > header > span { flex: 0 0 auto; padding: 7px 12px; border: 1px solid #9fddd3; border-radius: var(--creator-radius-small); white-space: nowrap; color: var(--creator-accent-strong); background: #e6f7f3; font-size: 12px; font-weight: 600; }
 .complete-video-frame,
 .video-result-frame { position: relative; width: 100%; overflow: hidden; }
-.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius); max-height: min(58vh, 620px); }
+.complete-video-frame { display: grid; width: calc(100% - 32px); margin: 16px 16px 0; border-radius: var(--creator-radius-large); max-height: min(58vh, 620px); }
 .video-result-frame { display: grid; border-radius: inherit; max-height: min(58vh, 620px); }
 /* Only the ring spins; the icon stays upright so the motion reads as one calm loop. */
 .video-loading-spinner { position: relative; display: inline-grid; width: 52px; height: 52px; place-items: center; border-radius: 50%; color: var(--creator-accent); background: #fff; box-shadow: 0 6px 18px rgb(25 74 67 / 10%); }
@@ -6527,9 +8707,72 @@ onBeforeUnmount(() => {
 .segment-heading > span { color: #8593a5; font-size: 11px; }
 .result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
 .result-grid.single { grid-template-columns: minmax(0, 1fr); }
+/* A lone image spans the full row. Landscape frames follow the image ratio; portrait and square
+   frames (and placeholder slots) are capped so one tall image does not run far below the fold. */
+.result-grid.single.is-image .result-media.fitted:not(.landscape),
+.result-grid.single.is-image .result-drawing-media,
+.result-grid.single.is-image .result-missing-media.is-image { max-height: min(72vh, 820px); }
+.result-drawing-media { position: relative; display: grid; width: 100%; place-items: center; overflow: hidden; border-radius: calc(var(--creator-radius-large) - 1px) calc(var(--creator-radius-large) - 1px) 0 0; background: #f3f9f8; }
+.result-drawing-media { container-type: inline-size; }
+.result-drawing-media .generation-frame-loader { width: 100%; }
+.result-drawing-media .generation-frame-ring { width: clamp(40px, 12cqi, 64px); height: auto; aspect-ratio: 1; }
+/* A drawing video shot is capped like the finished player; the loader's gap already spaces its progress bar. */
+.result-grid:not(.is-image) .result-drawing-media { max-height: min(58vh, 620px); }
+.result-drawing-media .slot-progress { margin-top: 0; }
+.result-card.is-drawing { border-color: #cfeee8; }
 .result-card { position: relative; overflow: hidden; border: 1px solid #d9e4e2; background: #fff; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
+.result-card.is-missing { border-style: dashed; border-color: #e7c6c0; }
+.result-missing-media { display: grid; width: 100%; min-height: 140px; max-height: min(58vh, 620px); align-content: center; justify-items: center; gap: 10px; padding: 24px 16px; color: #b64b42; background: #fff6f4; text-align: center; }
+.result-missing-media strong { font-size: 16px; }
+.result-missing-media p { margin: 0; font-size: 12px; }
+/* Failed slots mirror the large failure card: same circled icon, and icon -> title equals text -> button. */
+.result-missing-media.is-failed { gap: 0; }
+/* The slot keeps its media ratio so cards in a row line up; when a narrow card
+   makes it short, the content shrinks to its height instead of overflowing. */
+.result-missing-media.is-failed, .result-missing-media.is-regenerating { container: missing-slot / size; overflow: hidden; min-height: 0; padding: 12px 16px; }
+/* Regenerating slots reuse the drawing card's loader: dotted canvas, ring and caption,
+   with the ring kept short of crowding short slots. */
+.result-missing-media.is-regenerating .generation-frame-ring { width: clamp(32px, min(12cqi, 22cqh), 64px); height: auto; aspect-ratio: 1; }
+/* Heights below are the content box (slot height minus 24px padding). */
+@container missing-slot (max-height: 176px) {
+  .result-missing-media.is-failed > svg { width: 18px; height: 18px; padding: 9px; }
+  .result-missing-media.is-failed strong, .result-missing-media.is-regenerating strong { margin-top: 10px; font-size: 15px; }
+  .result-missing-media.is-failed p, .result-missing-media.is-regenerating p { margin-top: 4px; font-size: 11px; line-height: 1.5; }
+  .result-missing-media.is-failed p:not(:last-child) { margin-bottom: 10px; }
+  .result-missing-media .result-shot-retry { min-height: 30px; padding: 0 12px; }
+}
+/* Too short for the hint: the title and the retry button say enough. */
+@container missing-slot (max-height: 165px) {
+  .result-missing-media.is-failed p, .result-missing-media.is-regenerating p { display: none; }
+  .result-missing-media .slot-progress { margin-top: 10px; }
+  .result-missing-media.is-failed .result-shot-retry { margin-top: 10px; }
+}
+/* Very short failed slots drop the circled icon as well; the spinner stays as the only sign of progress. */
+@container missing-slot (max-height: 132px) {
+  .result-missing-media.is-failed > svg { display: none; }
+  .result-missing-media.is-failed strong { margin-top: 0; }
+}
+.result-missing-media.is-failed > svg { box-sizing: content-box; width: 22px; height: 22px; padding: 15px; border-radius: 50%; background: #fff; box-shadow: 0 6px 18px rgb(25 74 67 / 10%); }
+.result-missing-media.is-failed strong { margin-top: 20px; line-height: 1.4; }
+.result-missing-media.is-failed p { max-width: 36em; margin: 6px 0 0; line-height: 1.6; overflow-wrap: anywhere; }
+.result-missing-media.is-failed p:not(:last-child) { margin-bottom: 19px; }
+.result-missing-media.is-pending { color: #52706b; background: #f0f7f5; }
+.result-missing-media.is-regenerating { position: relative; gap: 0; color: #34504b; background: #f3f9f8; }
+.result-missing-media.is-regenerating > :not(.generation-frame-dots), .result-redraw-overlay > :not(.generation-frame-dots) { position: relative; z-index: 1; }
+.result-missing-media.is-regenerating strong { margin-top: 14px; font-size: 15px; font-weight: 700; line-height: 1.4; }
+.result-missing-media.is-regenerating p { margin: 4px 0 0; color: #7d8c8a; font-size: 12px; line-height: 1.5; }
+.result-card.is-missing:has(.is-regenerating) { border-color: #cbdad7; }
+/* Progress of a shot being redone in place; slides while the provider reports no percentage. */
+.slot-progress { position: relative; display: block; flex-shrink: 0; width: min(160px, 70%); height: 4px; margin-top: 12px; overflow: hidden; border-radius: 999px; background: rgb(17 160 140 / 14%); }
+.slot-progress i { display: block; height: 100%; border-radius: inherit; background: var(--creator-accent); transition: width .6s ease; }
+.slot-progress.indeterminate i { width: 40% !important; animation: creatorSlotSweep 1.4s ease-in-out infinite; }
+@keyframes creatorSlotSweep { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+@media (prefers-reduced-motion: reduce) { .slot-progress.indeterminate i { animation-duration: 3s; } }
+/* A missing image slot keeps the requested ratio, the same frame a finished image takes, so cards in a row line up. */
+.result-missing-media.is-image { max-height: none; }
 /* Media sits flush against the card edge: round only the top corners (outer radius minus the 1px border) so it meets the caption without a gap. */
-.result-card > .result-media,
+.result-card > .result-media-frame,
+.result-card > .result-media-frame > .result-media,
 .result-card > .video-result-frame { border-radius: calc(var(--creator-radius-large) - 1px) calc(var(--creator-radius-large) - 1px) 0 0; }
 .result-index { position: absolute; z-index: 2; top: 12px; left: 12px; display: grid; place-items: center; min-width: 28px; height: 25px; padding: 0 7px; border-radius: var(--creator-radius-small); color: #fff; background: rgb(28 39 52 / 62%); font-size: 10px; font-weight: 800; backdrop-filter: blur(5px); transition: opacity 160ms ease; }
 /* While a segment plays, the number hides like the player's own badge and returns on hover or tap. */
@@ -6548,7 +8791,7 @@ onBeforeUnmount(() => {
   background: #e8f0ee;
 }
 .result-media.landscape { height: auto; }
-.result-media.fitted { height: auto; max-height: clamp(340px, 70vh, 720px); }
+.result-media.fitted { height: auto; }
 .result-media img {
   position: absolute;
   inset: 0;
@@ -6561,37 +8804,77 @@ onBeforeUnmount(() => {
 .result-media.video { display: block; width: 100%; height: auto; object-fit: contain; }
 .result-actions { justify-content: space-between; gap: 16px; min-height: 76px; padding: 12px 14px 12px 16px; border-top: 1px solid #e6eeec; color: #64748b; font-size: 13px; }
 .result-description { min-width: 0; flex: 1; }
+.result-description-heading { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 10px; }
 .result-description strong { display: block; color: var(--creator-accent-strong); font-size: 14px; line-height: 1.4; }
+.result-description-heading > strong { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-shot-retry { display: inline-flex; flex: 0 0 auto; align-items: center; justify-content: center; min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: var(--creator-radius); color: #b64b42; background: #fff; font-size: 12px; font-weight: 700; }
+.result-shot-retry:hover:not(:disabled) { border-color: #c98f87; background: #fffafa; }
+.result-shot-retry:disabled { cursor: wait; opacity: .55; }
 .result-model { display: block; overflow: hidden; margin-top: 5px; color: #718096; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta { display: flex; flex-wrap: wrap; gap: 2px 0; margin-top: 5px; color: #718096; font-size: 12px; line-height: 1.5; }
 .result-meta > span { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .result-meta > span + span::before { content: '·'; margin: 0 6px; color: #b4bfcc; }
 .result-description p { overflow: hidden; margin: 7px 0 0; color: #526176; font-size: 13px; line-height: 1.55; text-overflow: ellipsis; white-space: nowrap; }
-.result-description p.result-prompt { display: -webkit-box; margin-top: 4px; color: #7b8b8e; font-size: 12px; line-height: 1.5; text-overflow: initial; white-space: normal; word-break: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.result-description p.result-prompt { display: -webkit-box; margin-top: 4px; color: #334155; font-size: 12px; line-height: 1.5; text-overflow: initial; white-space: normal; word-break: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
 .result-media-actions { display: flex; flex: 0 0 auto; gap: 6px; }
 /* 图片与视频共用卡片排版，不依赖参数标签是否存在。 */
-.result-card > .result-actions { display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "title actions" "prompt prompt" "tags tags"; align-items: center; column-gap: 12px; row-gap: 0; }
+.result-card > .result-actions { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-areas: "title" "prompt" "tags" "actions"; align-items: center; row-gap: 0; padding: 16px; }
+/* Pull the title up by its line-height leading so the visible gap above the title matches the gap under the buttons. */
+.result-card > .result-actions > .result-description > .result-description-heading { margin-top: -3px; }
 .result-card > .result-actions > .result-description { display: contents; }
-.result-card > .result-actions > .result-description > strong { grid-area: title; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.result-card > .result-actions > .result-description > .result-description-heading { grid-area: title; }
 .result-card > .result-actions > .result-description > p.result-prompt { grid-area: prompt; margin-top: 8px; }
-.result-card > .result-actions > .result-media-actions { grid-area: actions; }
+.result-card > .result-actions > .result-media-actions { grid-area: actions; display: grid; grid-auto-columns: minmax(0, 1fr); grid-auto-flow: column; gap: 6px; margin-top: 16px; }
+.result-card > .result-actions > .result-media-actions .icon-action { gap: 6px; width: auto; min-width: 0; padding-inline: 6px; font-size: 12px; font-weight: 650; white-space: nowrap; }
 .result-card > .result-actions > .result-tags { grid-area: tags; margin-top: 10px; }
+.result-card.is-missing > .result-actions { grid-template-areas: "title" "prompt" "tags" "actions" "pending"; }
+/* Button row always sits under the card text; labels appear only once every button has room for icon + text. */
+.result-card { container: result-card / inline-size; }
+.result-action-label { display: none; overflow: hidden; text-overflow: ellipsis; }
+@container result-card (min-width: 420px) {
+  .result-card > .result-actions > .result-media-actions .result-action-label { display: inline; }
+}
+@container result-card (max-width: 360px) {
+  .result-card > .result-actions { padding: 14px; }
+}
+.result-media-actions.is-unavailable .icon-action:disabled { cursor: not-allowed; opacity: .4; }
+.pending-video-status { grid-area: pending; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #e6eeec; }
+.pending-video-status .video-status-feedback { margin-top: 0; }
 .result-tags { display: flex; flex: 1 0 100%; flex-wrap: wrap; gap: 6px; min-width: 0; margin: 0; padding: 0; list-style: none; }
 .result-tags li { max-width: 100%; overflow: hidden; padding: 2px 8px; border-radius: 999px; color: #5b6b7f; background: #eef3f2; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: nowrap; }
 .result-workspace .icon-action,
 .result-workspace .secondary-command { border-radius: var(--creator-radius); }
 .result-media-actions .icon-action { width: 32px; height: 32px; }
-.result-error { display: grid; justify-items: center; padding: 80px 24px; border: 1px dashed #e7b4ae; border-radius: var(--creator-radius-large); color: #b64b42; background: #fff8f7; text-align: center; }
-.result-error strong { margin-top: 14px; color: #7b312b; }
-.result-error p { margin: 7px 0 18px; color: #98635e; font-size: 12px; }
+.result-media-frame { position: relative; overflow: hidden; }
+/* Same solid loader as a regenerating empty slot; the original image only keeps the card's size underneath. */
+.result-redraw-overlay { position: absolute; z-index: 1; inset: 0; display: grid; place-content: center; justify-items: center; padding: 16px; color: #34504b; background: #f3f9f8; text-align: center; }
+.result-redraw-overlay .generation-frame-ring { width: clamp(40px, 12cqi, 64px); height: auto; aspect-ratio: 1; }
+.result-redraw-overlay strong { margin-top: 14px; font-size: 15px; font-weight: 700; line-height: 1.4; }
+.result-redraw-overlay p { margin: 4px 0 0; color: #7d8c8a; font-size: 12px; line-height: 1.5; }
+@container result-card (max-width: 260px) { .result-redraw-overlay p { display: none; } }
+.result-redraw-action .is-spinning { animation: creatorSpin 1s linear infinite; }
+.result-error { display: grid; min-height: 340px; align-content: center; justify-items: center; padding: 48px 24px; border: 1px dashed #e7b4ae; border-radius: var(--creator-radius-large); color: #b64b42; background: #fff8f7; text-align: center; }
+/* Static icons sit in the same 52px white disc as the loading spinner, so every state shares one visual anchor. */
+.result-error > svg { box-sizing: content-box; width: 22px; height: 22px; padding: 15px; border-radius: 50%; background: #fff; box-shadow: 0 6px 18px rgb(25 74 67 / 10%); }
+/* Icon -> title and text -> button read as the same gap: margins differ only to offset each line's leading. */
+.result-error strong { margin-top: 20px; color: #7b312b; font-size: 16px; font-weight: 700; line-height: 1.4; }
+.result-error p { max-width: 380px; margin: 6px 0 19px; color: #98635e; font-size: 13px; line-height: 1.6; }
+.result-error p:last-child { margin-bottom: 0; }
 .result-error.muted { border-color: #cbdad7; color: #758a87; background: #f5f9f8; }
-.result-error.muted strong { color: #4c615e; }
+.result-error.muted strong { color: #34504b; }
 .result-error.muted p { color: #7d8c8a; }
+.result-error .generation-frame-ring { width: 64px; height: 64px; }
+.result-error.muted .secondary-command.primary-soft { display: inline-flex; align-items: center; gap: 6px; min-height: 38px; padding: 0 18px; border-color: #9fddd3; color: var(--creator-accent-strong); background: #f0fbf8; }
+.result-error.muted .secondary-command.primary-soft:hover:not(:disabled) { border-color: var(--creator-accent); background: #e3f7f2; }
+/* Missing images or shots: full-width banner, reason on the left, retry button on the right. */
 .partial-result-notice { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; padding: 12px 14px; border: 1px solid #f0d9a8; border-radius: var(--creator-radius); color: #a26a12; background: #fffaf0; }
+.partial-result-notice > svg { flex-shrink: 0; }
 .partial-result-notice > div { flex: 1; min-width: 0; }
 .partial-result-notice strong { display: block; color: #7a4f0d; font-size: 13px; }
 .partial-result-notice p { margin: 3px 0 0; color: #94723c; font-size: 12px; line-height: 1.6; overflow-wrap: anywhere; }
-.partial-result-notice .secondary-command { flex-shrink: 0; }
+.partial-retry-command { display: inline-flex; flex-shrink: 0; min-height: 34px; align-items: center; gap: 6px; padding: 0 14px; border: 1px solid #e6c27c; border-radius: var(--creator-radius); color: #a26a12; background: #fff; font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer; transition: background .15s ease, border-color .15s ease; }
+.partial-retry-command:hover:not(:disabled) { border-color: #d9aa55; background: #fff3dc; }
+.partial-retry-command:disabled { opacity: .6; cursor: not-allowed; }
 .status-check-icon { animation: creatorSpin .85s linear infinite; }
 .status-check-command { display: inline-flex; align-items: center; gap: 7px; border-color: #8eddd0; color: var(--creator-accent-strong); background: #effbf8; }
 .status-check-command:disabled { cursor: wait; opacity: .68; }
@@ -6600,29 +8883,19 @@ onBeforeUnmount(() => {
 .video-status-feedback.is-error { border-color: #edc5c0; color: #9a4b43; background: #fff9f8; }
 .result-parameters { container-type: inline-size; margin-top: 14px; }
 /* One grouped panel with hairline dividers instead of six separate tiles. */
-.result-stat-grid { display: grid; grid-auto-flow: row dense; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #d6e2e0; border-radius: var(--creator-radius-large); background: #fbfdfd; }
+.result-stat-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid #d9e4e2; border-radius: var(--creator-radius-large); background: #fbfdfd; box-shadow: 0 8px 22px rgb(25 74 67 / 8%); }
 .result-card { border-radius: var(--creator-radius-large); }
 /* Spread shadows draw the cell dividers so a partially filled last row stays clean. */
 .result-stat-grid article { min-width: 0; padding: 12px 14px; background: #fbfdfd; box-shadow: 0 0 0 1px #e2ebe9; }
-.result-stat-grid article.wide { grid-column: span 2; }
 .result-stat-grid span { display: block; color: #64748b; font-size: 10px; }
 .result-stat-grid strong { display: block; overflow: hidden; margin-top: 6px; color: #263549; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 @container (min-width: 420px) { .result-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @container (min-width: 600px) { .result-stat-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
-@container (min-width: 880px) { .result-stat-grid { grid-template-columns: repeat(6, minmax(0, 1fr)); } }
-.result-stat-grid .result-prompt-cell { grid-column: 1 / -1; }
-.result-prompt-cell .full-prompt { margin: 6px 0 0; color: #334155; font-size: 12px; line-height: 1.75; white-space: pre-wrap; overflow-wrap: anywhere; }
-.result-prompt-cell .full-prompt.clamped { display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
-.result-prompt-toggle { display: inline-flex; align-items: center; gap: 3px; margin-top: 6px; padding: 0; border: 0; color: var(--creator-accent-strong); background: none; font-size: 12px; cursor: pointer; }
-.result-prompt-toggle svg { transition: transform 160ms ease; }
-.result-prompt-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
-.result-prompt-toggle:focus-visible { border-radius: 4px; outline: 2px solid var(--creator-accent-strong); outline-offset: 2px; }
 .secondary-command { min-height: 38px; padding: 0 14px; border: 1px solid #d8b3ad; border-radius: var(--creator-radius); background: #fff; font-size: 12px; font-weight: 700; }
 
-.professional-workspace { align-self: stretch; margin-top: 28px; margin-bottom: 70px; padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
+.professional-workspace { align-self: stretch; margin-top: 28px; margin-bottom: var(--creator-workspace-gutter); padding: 18px; border: 1px solid #d4e2df; border-radius: var(--creator-radius-large); background: rgb(255 255 255 / 76%); box-shadow: 0 14px 32px rgb(36 78 72 / 8%); }
 .sequence-shot { cursor: pointer; }
 .sequence-shot.active { border-color: #55d4c2; background: #f0fcf9; box-shadow: 0 7px 18px rgb(24 138 121 / 10%); }
-.sequence-shot:focus-visible { outline: 2px solid #39b9a5; outline-offset: 2px; }
 .sequence-shot.active .sequence-shot-index { border-color: #0f9f8f; color: #fff; background: #0f9f8f; }
 .sequence-header { display: grid; grid-template-columns: minmax(0, 1fr) auto 36px; align-items: center; gap: 18px; padding-bottom: 14px; border-bottom: 1px solid #dce8e5; }
 .sequence-eyebrow { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; color: var(--creator-accent-strong); font-size: 10px; font-weight: 850; letter-spacing: .04em; }
@@ -6663,7 +8936,6 @@ onBeforeUnmount(() => {
 .sequence-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #dce8e5; color: #73869a; font-size: 11px; }
 .sequence-footer > span { display: flex; align-items: center; gap: 5px; }
 .sequence-footer strong { color: #6f8092; font-size: 11px; }
-.sequence-footer strong.invalid { color: #c9463b; }
 
 .settings-panel {
   min-height: 0;
@@ -6680,17 +8952,13 @@ onBeforeUnmount(() => {
   overscroll-behavior: contain;
   overflow-anchor: none;
   padding: 22px 20px 28px;
-  scrollbar-gutter: stable;
-  scrollbar-color: #c5cbd1 transparent;
-  scrollbar-width: thin;
+  scrollbar-width: none;
 }
-.settings-scroll::-webkit-scrollbar { width: 8px; }
-.settings-scroll::-webkit-scrollbar-track { background: transparent; }
-.settings-scroll::-webkit-scrollbar-thumb { border: 2px solid #fff; border-radius: 999px; background: #c5cbd1; }
-.settings-scroll::-webkit-scrollbar-thumb:hover { background: #9ba4ad; }
-.settings-heading { justify-content: space-between; margin-bottom: 16px; }
-.settings-heading > svg { color: var(--creator-accent-strong); }
+.settings-scroll::-webkit-scrollbar { display: none; }
+.settings-heading { justify-content: space-between; gap: 12px; margin-bottom: 16px; }
 .capability-switch { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; margin-bottom: 20px; padding: 4px; border: 1px solid #d8e4e2; border-radius: var(--creator-radius-large); background: #eff5f4; }
+.video-capability-switch { display: flex; }
+.video-capability-switch button { flex: 1 1 auto; padding-inline: 8px; }
 .capability-switch button { min-height: 45px; border-radius: var(--creator-radius); color: #6e7e93; font-size: 12px; font-weight: 700; white-space: nowrap; }
 .capability-switch button.active { color: var(--creator-accent-strong); background: #fff; box-shadow: 0 3px 12px rgb(26 76 70 / 9%); }
 .capability-switch button:disabled { color: #b4c0cc; cursor: not-allowed; }
@@ -6701,7 +8969,6 @@ onBeforeUnmount(() => {
 .field-row small { display: block; margin-top: 6px; color: #8492a6; font-size: 10px; line-height: 1.5; }
 .creator-field-hint { color: var(--creator-accent-strong) !important; }
 .studio-input { width: 100%; min-height: 42px; padding: 0 12px; border: 1px solid #d7e0e7; border-radius: var(--creator-radius); outline: none; color: #1b2638; background: #fff; font-size: 12px; transition: 150ms ease; }
-.studio-input:focus { border-color: #6dd4c4; box-shadow: 0 0 0 3px rgb(41 185 164 / 12%); }
 .studio-input:disabled { cursor: not-allowed; color: #97a3b2; background: #f4f6f7; }
 .model-input { height: 42px; contain: layout; }
 .model-input.is-loading:disabled:not(:invalid) { color: #1b2638; background: #fff; }
@@ -6862,7 +9129,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 .spinning { animation: creatorSpin .8s linear infinite; }
 
 
-.settings-heading > svg { width: 16px; height: 16px; }
 
 .modal-backdrop { position: fixed; z-index: 70; inset: 0; display: grid; place-items: center; padding: 24px; background: rgb(15 23 42 / 58%); backdrop-filter: blur(5px); }
 /* The bottom band is reserved for the action buttons: 16px below them, 36px button, 16px above.
@@ -6894,7 +9160,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   transition: background-color 140ms ease, border-color 140ms ease;
 }
 .preview-nav:hover { border-color: rgb(255 255 255 / 45%); background: rgb(17 24 39 / 85%); }
-.preview-nav:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
 .preview-nav.is-prev { left: 18px; }
 .preview-nav.is-next { right: 18px; }
 /* Sits in the reserved band below the image. */
@@ -6905,35 +9170,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 @keyframes creatorSpin { to { transform: rotate(360deg); } }
 @keyframes creatorTwinkle { 50% { opacity: .55; transform: scale(.88) rotate(-8deg); } }
 @keyframes creatorShimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
-@keyframes creatorFrameIn { from { opacity: 0; transform: scale(.96); } }
 @keyframes creatorStatusPulse { to { opacity: .35; transform: scale(.92); } }
-/* 头部 = u + s·u(1-u)，尾部 = u - s·u(1-u)：两端都只向右走，长度 200s·u(1-u)% 中段最长（长段 s=1 → 50%，短段 s=.5 → 25%），出右端时收成 0 */
-@keyframes creatorProgressLong {
-  0% { clip-path: inset(0 100% 0 0% round 999px); }
-  6% { clip-path: inset(0 81% 0 1% round 999px); }
-  12% { clip-path: inset(0 64% 0 4% round 999px); }
-  18% { clip-path: inset(0 49% 0 9% round 999px); }
-  24% { clip-path: inset(0 36% 0 16% round 999px); }
-  30% { clip-path: inset(0 25% 0 25% round 999px); }
-  36% { clip-path: inset(0 16% 0 36% round 999px); }
-  42% { clip-path: inset(0 9% 0 49% round 999px); }
-  48% { clip-path: inset(0 4% 0 64% round 999px); }
-  54% { clip-path: inset(0 1% 0 81% round 999px); }
-  60%, 100% { clip-path: inset(0 0% 0 100% round 999px); }
-}
 @keyframes creatorStatusPulse { 0% { box-shadow: 0 0 0 0 rgb(15 159 143 / 35%); } 70%, 100% { box-shadow: 0 0 0 6px rgb(15 159 143 / 0%); } }
-@keyframes creatorSegmentSweep { to { transform: translateX(100%); } }
-@keyframes creatorProgressShort {
-  0%, 60% { clip-path: inset(0 100% 0 0% round 999px); }
-  65% { clip-path: inset(0 82.03% 0 7.031% round 999px); }
-  70% { clip-path: inset(0 65.62% 0 15.62% round 999px); }
-  75% { clip-path: inset(0 50.78% 0 25.78% round 999px); }
-  80% { clip-path: inset(0 37.5% 0 37.5% round 999px); }
-  85% { clip-path: inset(0 25.78% 0 50.78% round 999px); }
-  90% { clip-path: inset(0 15.62% 0 65.62% round 999px); }
-  95% { clip-path: inset(0 7.031% 0 82.03% round 999px); }
-  100% { clip-path: inset(0 0% 0 100% round 999px); }
-}
 
 :global(.dark) .creator-studio { --creator-line: #30413f; color: #e7efed; }
 :global(.dark) .studio-toolbar,
@@ -6948,7 +9186,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .history-heading h2,
 :global(.dark) .settings-heading h2,
 :global(.dark) .inspiration-intro h2,
-:global(.dark) .generation-state h2,
 :global(.dark) .result-heading h2 { color: #eef5f4; }
 :global(.dark) .mode-switch,
 :global(.dark) .history-tabs,
@@ -6961,13 +9198,21 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .mode-option-image.active .mode-option-icon { border-color: #39776d; color: #71d9c9; background: #18332f; }
 :global(.dark) .mode-option-video.active .mode-option-icon { border-color: #355f9e; color: #75a7ff; background: #172b49; }
 :global(.dark) .ready-status { border-color: #26745d; color: #71dab5; background: #142b24; }
-:global(.dark) .connection-action { color: #b8c7c4; }
-:global(.dark) .connection-action:hover { color: #7de0d1; background: #1b312e; box-shadow: inset 0 0 0 1px #35514c; }
+:global(.dark) .reset-settings-action { border-color: #35514c; color: #b8c7c4; background: transparent; }
+:global(.dark) .reset-settings-action:hover { border-color: #4f7a72; color: #7de0d1; background: #1b312e; }
 :global(.dark) .icon-action,
 :global(.dark) .collapse-action,
 :global(.dark) .studio-input,
 :global(.dark) .stepper,
 :global(.dark) .stepper button { border-color: #354643; color: #c3cfcc; background: #172321; }
+:global(.dark) .result-heading-actions .secondary-command:not(.primary-soft),
+:global(.dark) .result-heading-actions .icon-action { border-color: #354643; color: #c3cfcc; background: #172321; box-shadow: none; }
+:global(.dark) .result-heading-actions .secondary-command:not(.primary-soft):hover:not(:disabled),
+:global(.dark) .result-heading-actions .icon-action:hover:not(:disabled) { border-color: #3f6a63; color: #7de0d1; background: #1b312e; }
+:global(.dark) .result-heading-actions .delete-work-command:not(.confirming):hover:not(:disabled) { border-color: #6b3434; color: #ff9a9a; background: #2a1a1a; }
+:global(.dark) .result-heading-actions .delete-work-command.confirming { border-color: #c04040; color: #fff; background: #c04040; }
+:global(.dark) .result-heading-actions .primary-soft { border-color: #2f6b62; color: #79dfd0; background: #1a2f2c; box-shadow: none; }
+:global(.dark) .result-heading-actions .primary-soft:hover:not(:disabled) { border-color: #3f7a70; color: #7de0d1; background: #1d3833; }
 :global(.dark) .stepper-value { color: #c3cfcc; }
 :global(.dark) .stepper-value:hover,
 :global(.dark) .stepper-value:focus-within { background: #1d2b29; }
@@ -6991,38 +9236,19 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .history-item:hover { --history-item-bg: #172321; }
 :global(.dark) .history-item.active { --history-item-bg: #17322e; border-color: #357f74; background: #17322e; }
 :global(.dark) .history-item.generating { border-color: #357f74; }
-:global(.dark) .generation-frame { border-color: #2f4d48; background-image: linear-gradient(110deg, #16302c 30%, #1f3c37 50%, #16302c 70%); box-shadow: 0 14px 34px rgb(0 0 0 / 28%); }
-:global(.dark) .generation-frame.is-queued { border-color: #33504b; background: rgb(255 255 255 / 3%); }
-:global(.dark) .generation-frame.is-failed { border-color: #5a3430; background: rgb(216 75 75 / 8%); }
-:global(.dark) .generation-frame-failed { color: #ff9a90; }
+:global(.dark) .result-drawing-media { background: #152926; }
+:global(.dark) .result-card.is-drawing { border-color: #2f4d48; }
 :global(.dark) .partial-result-notice { border-color: #5b4724; color: #f0c06a; background: #2a2416; }
 :global(.dark) .partial-result-notice strong { color: #f6d39a; }
 :global(.dark) .partial-result-notice p { color: #c9ad7f; }
-:global(.dark) .generation-panel { border-color: #2a3a38; background: #142220; box-shadow: none; }
-:global(.dark) .generation-state .generation-heading-copy h2 { color: #eef5f4; }
-:global(.dark) .generation-prompt { color: #e2ebe9; }
-:global(.dark) .result-tags.generation-tags li { border-color: #2c3d3b; color: #a5b8b4; background: transparent; }
-:global(.dark) .result-tags.generation-tags li:first-child { border-color: #2b4a45; color: #79dfd0; background: #17302c; }
-:global(.dark) .generation-segment { background: #213532; }
-:global(.dark) .generation-segment.is-done { background: linear-gradient(90deg, #2bc4ac, #79dfd0); }
-:global(.dark) .generation-segment.is-failed { background: #5a2f2b; }
-:global(.dark) .generation-status-dot { background: #79dfd0; }
-:global(.dark) .generation-heading-copy p,
-:global(.dark) .generation-elapsed { color: #93a7a3; }
-:global(.dark) .generation-elapsed strong { color: #e6efed; }
-:global(.dark) .generation-done-count { color: #93a7a3; }
-:global(.dark) .generation-new-creation { border-color: #344744; color: #c5d6d3; background: #192725; }
-:global(.dark) .generation-new-creation:hover { border-color: #79dfd0; color: #79dfd0; background: #1d2f2c; }
-:global(.dark) .progress-track { background: #213532; }
+:global(.dark) .partial-retry-command { border-color: #7a5f2e; color: #f0c06a; background: #1f1a10; }
+:global(.dark) .partial-retry-command:hover:not(:disabled) { border-color: #93733a; background: #33291a; }
 :global(.dark) .generation-frame-ring { color: #79dfd0; background: rgb(23 50 46 / 80%); box-shadow: 0 10px 30px rgb(0 0 0 / 30%), inset 0 0 0 1px rgb(255 255 255 / 6%); }
-:global(.dark) .generation-frame.is-current { border-color: #2f4d48; background: #152926; }
-:global(.dark) .result-description p.result-prompt { color: #93a7a3; }
+:global(.dark) .result-description p.result-prompt { color: #dbe7e5; }
 :global(.dark) .history-generating { background-image: linear-gradient(110deg, #1a2a27 30%, #223632 50%, #1a2a27 70%); }
 :global(.dark) .history-generating.has-preview { background: rgb(19 31 29 / 55%); }
 :global(.dark) .history-generating-ring { color: #79dfd0; background: #17322e; box-shadow: none; }
 :global(.dark) .history-generating-ring::before { border-color: #2c4a45; border-top-color: #79dfd0; }
-:global(.dark) .history-item-actions button:hover { background: #223431; }
-:global(.dark) .history-item-actions .history-delete:hover { color: #ff8a8a; background: #3a2424; }
 :global(.dark) .history-copy strong,
 :global(.dark) .field-block > label,
 :global(.dark) .field-row label,
@@ -7033,6 +9259,17 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .toggle-row,
 :global(.dark) .video-duration-estimate,
 :global(.dark) .result-card { border-color: #334642; background: #14211f; }
+:global(.dark) .result-card.is-missing { border-color: #6b3f38; }
+:global(.dark) .result-redraw-overlay { color: #a5bdb6; background: #152926; }
+:global(.dark) .result-redraw-overlay p { color: #8aa29c; }
+:global(.dark) .generation-frame-caption { color: #a5bdb6; }
+:global(.dark) .generation-frame-caption small { color: #8aa29c; }
+:global(.dark) .result-shot-retry { border-color: #6b3d37; color: #f0a99f; background: #2f2120; }
+:global(.dark) .result-shot-retry:hover:not(:disabled) { border-color: #8a4d45; background: #382624; }
+:global(.dark) .result-missing-media { color: #f0a99f; background: #2a1d1b; }
+:global(.dark) .result-missing-media.is-failed > svg { background: #3a2624; box-shadow: 0 6px 18px rgb(0 0 0 / 30%); }
+:global(.dark) .result-missing-media.is-pending { color: #a5bdb6; background: #1d302c; }
+:global(.dark) .result-missing-media.is-regenerating { color: #a5bdb6; background: #152926; }
 :global(.dark) .professional-workspace,
 :global(.dark) .result-stat-grid article,
 :global(.dark) .sequence-shot { border-color: #334642; background: #14211f; }
@@ -7040,7 +9277,6 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .sequence-header dd,
 :global(.dark) .sequence-shot-prompt,
 :global(.dark) .result-stat-grid strong,
-:global(.dark) .result-prompt-cell .full-prompt { color: #dbe7e5; }
 :global(.dark) .result-stat-grid { border-color: #334642; background: #14211f; }
 :global(.dark) .result-stat-grid article { box-shadow: 0 0 0 1px #334642; }
 :global(.dark) .result-actions { border-top-color: #2a3b38; }
@@ -7052,15 +9288,10 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 :global(.dark) .prompt-template-grid strong { color: #d6e0de; }
 :global(.dark) .prompt-template-grid button,
 :global(.dark) .prompt-page-actions button { border-color: #354643; color: #c3cfcc; background: #172321; }
-:global(.dark) .quick-templates-label { color: #8a9c99; }
+:global(.dark) .quick-templates-label { color: #c7d4d1; }
+:global(.dark) .quick-templates-label > small { color: #74878a; }
 :global(.dark) .quick-templates-label::after { background: #2a3b38; }
-:global(.dark) .quick-templates button { border-color: #354643; background: #172321; }
-:global(.dark) .quick-templates button strong { color: #d6e0de; }
-:global(.dark) .quick-templates button small { color: #7f938f; }
-:global(.dark) .quick-templates button:hover,
-:global(.dark) .quick-templates button:focus-visible { border-color: #347a6f; background: #1b2b28; }
-:global(.dark) .quick-templates button:hover strong,
-:global(.dark) .quick-templates button:focus-visible strong { color: #83ddd0; }
+:global(.dark) .quick-templates button { border-color: #354643; background: #172321; box-shadow: none; }
 
 @media (max-width: 1380px) {
   .studio-grid { grid-template-columns: 17rem minmax(390px, 1fr) 21rem; }
@@ -7084,22 +9315,8 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
 @media (max-width: 800px) {
   /* Match the settings panel's 16px inline padding stacked above the canvas. */
   .creator-studio { --creator-workspace-gutter: 16px; --creator-workspace-width: calc(100% - 32px); height: auto; min-height: auto; overflow: visible; }
-  .generation-stage { width: 100%; }
-  .generation-stage.is-image { display: grid; width: 100%; grid-template-columns: repeat(var(--generation-mobile-columns, 1), minmax(0, 1fr)); }
-  .generation-stage.is-image > .generation-frame:not(:only-child):last-child:nth-child(odd) { grid-column: 1 / -1; width: min(100%, calc((100% - 12px) / 2)); justify-self: center; }
-  .generation-stage.is-image:has(> .generation-frame:only-child) { display: flex; }
-  .generation-stage.is-image:has(> .generation-frame:only-child) > .generation-frame { width: auto; height: min(var(--generation-frame-height), 62vh); }
-  .generation-state.is-video { flex: 0 0 auto; grid-template-rows: auto auto; }
-  .generation-stage.is-video { grid-auto-rows: auto; justify-items: center; }
-  .generation-frame { flex: 1 1 0; width: auto; max-width: var(--generation-frame-mobile-max); }
-  .generation-stage.is-video .generation-frame { width: 100%; aspect-ratio: var(--generation-frame-aspect-ratio); }
-  .generation-panel { width: 100%; padding: 18px 16px 16px; }
-  .generation-panel .generation-body { gap: 14px; }
-  .generation-heading { gap: 10px; }
-  /* Compact button keeps the heading on one row so the subtitle has room. */
-  .generation-heading .generation-new-creation { min-height: 34px; gap: 4px; padding: 0 12px; font-size: 12px; }
   /* The card no longer clips (overflow: visible for sticky), so round the toolbar to match it. */
-  .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: flex; gap: 8px; align-items: stretch; padding: 8px; border-radius: var(--creator-surface-radius) var(--creator-surface-radius) 0 0; transition: border-radius 160ms ease; }
+  .studio-toolbar { position: sticky; z-index: 8; top: 64px; display: flex; gap: 8px; align-items: stretch; padding: 8px 16px; border-radius: var(--creator-surface-radius) var(--creator-surface-radius) 0 0; transition: border-radius 160ms ease; }
   .studio-toolbar.is-stuck { border-radius: 0; }
   .mode-switch { flex: 0 1 360px; min-width: 0; width: min(360px, 100%); }
   .mode-option { gap: 6px; min-height: 38px; }
@@ -7130,6 +9347,14 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   /* Show current results above the settings when there is an active creation. */
   /* Fallback only: revealSettingsOnMobile sets the measured toolbar offset inline. */
   /* Bottom of the unclipped card, so it carries the card's lower corners like the toolbar does the upper ones. */
+  /* While a creation is generating the progress view fills the card; settings return when it is left. */
+  .studio-grid.is-generating,
+  .studio-grid.is-viewing-result { border-radius: 0 0 var(--creator-surface-radius) var(--creator-surface-radius); }
+  .studio-grid.is-generating > .settings-panel,
+  .studio-grid.is-viewing-result > .settings-panel { display: none; }
+  /* Results and progress use the page's 16px phone inset inside the card, matching the toolbar above. */
+  .studio-grid.is-generating,
+  .studio-grid.is-viewing-result { --creator-workspace-gutter: 16px; --creator-workspace-width: calc(100% - 32px); }
   .settings-panel { order: 2; height: auto; border-top: 1px solid var(--creator-line); border-left: 0; border-radius: 0 0 var(--creator-surface-radius) var(--creator-surface-radius); scroll-margin-top: 136px; }
   /* Not a scroll container on mobile: with overscroll-behavior: contain it would swallow page swipes. */
   .settings-scroll { height: auto; max-height: none; overflow: visible; overscroll-behavior: auto; padding: 18px 16px 22px; scrollbar-gutter: auto; }
@@ -7143,47 +9368,35 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .sequence-header dl { display: none; }
   .sequence-track { grid-template-columns: minmax(0, 1fr); }
   .sequence-shot { width: 100%; }
-  /* The stage follows each brief's height (measured in script) so short briefs leave no gap. */
-  .brief-stage { height: var(--brief-stage-height, auto); transition: height 220ms ease; }
-  .brief-body { --brief-body-pad-block: 20px; grid-template-columns: minmax(0, 1fr); height: auto; padding: var(--brief-body-pad-block) 24px; }
-  .brief-summary { padding: 0 0 16px; border-right: 0; border-bottom: 1px solid #33423f; }
-  .brief-summary h3 { margin: 12px 0 4px; font-size: 24px; }
-  .brief-summary small { display: none; }
-  .brief-copy { padding: 16px 0 0; }
-  /* The margin plus the line's half-leading (~5px) matches the card padding below the button. */
-  .brief-copy p { flex: 0 1 auto; margin: 10px 0 calc(var(--brief-body-pad-block) - 5px); }
-  /* The scroller's bottom edge rarely lands on a line boundary; fade the cut line out while more text is below. */
-  .brief-copy p.is-clipped {
-    -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
-    mask-image: linear-gradient(to bottom, #000 calc(100% - 1.8em), transparent);
-  }
-  .brief-copy button { align-self: stretch; justify-content: center; min-height: 44px; }
-  .brief-topline button { width: 36px; height: 36px; }
-  /* The topline already shows the position; avoid a second counter. */
-  .brief-position { display: none; }
-  .brief-navigation { min-height: 52px; }
   .quick-templates { margin-top: 18px; }
   .quick-templates-list { display: flex; gap: 8px; margin-inline: calc(-1 * var(--creator-workspace-gutter)); padding: 2px var(--creator-workspace-gutter) 4px; overflow-x: auto; scroll-padding-inline: var(--creator-workspace-gutter); scroll-snap-type: x proximity; scrollbar-width: none; overscroll-behavior-x: contain; }
   .quick-templates-list::-webkit-scrollbar { display: none; }
-  .quick-templates-list button { flex: 0 0 auto; min-width: 124px; scroll-snap-align: start; }
+  .quick-templates-list button { flex: 0 0 auto; width: 148px; scroll-snap-align: start; }
   .result-grid { grid-template-columns: 1fr; }
-  .result-heading-complete { align-items: flex-start; gap: 10px; }
-  .result-heading-complete > .result-heading-title { flex: 1 1 100%; }
-  .result-heading-actions { flex: 0 0 100%; flex-wrap: nowrap; gap: 6px; }
+  /* One vertical rhythm for the stacked blocks: toolbar → heading → actions → notice → cards.
+     Top and bottom padding equal the side gutter so the content sits in an even 16px frame inside the card. */
+  .result-workspace { --result-stack-gap: 16px; padding-block: var(--creator-workspace-gutter); }
+  .result-heading,
+  .result-workspace.is-generating .result-heading { margin-bottom: var(--result-stack-gap); }
+  .partial-result-notice { margin-bottom: var(--result-stack-gap); }
+  .result-heading-complete { align-items: flex-start; gap: 12px; }
+  .result-heading-complete > .result-heading-title { flex: 1 1 100%; padding-inline: 4px; }
+  .result-heading-title-line { row-gap: 8px; }
+  .result-heading h2 { font-size: 19px; line-height: 1.4; }
+  .result-heading-actions { flex: 0 0 100%; flex-wrap: wrap; gap: 8px; }
+  .result-heading-continue { display: flex; flex: 1 1 100%; gap: 8px; min-width: 0; }
+  .result-heading-continue .secondary-command { flex: 1 1 0; }
   .result-heading-actions .secondary-command,
-  .result-heading-actions .icon-action { flex: 1 1 auto; min-width: 0; gap: 4px; padding-inline: 6px; font-size: 11px; }
+  .result-heading-actions .icon-action { flex: 1 1 0; min-width: 0; min-height: 34px; height: 34px; gap: 5px; padding-inline: 8px; font-size: 12px; font-weight: 700; }
+  .result-heading-actions svg { width: 14px; height: 14px; }
   .complete-video-card > header { align-items: flex-start; flex-direction: column; gap: 10px; }
   .complete-video-card > footer { align-items: flex-start; flex-direction: column; }
   .result-media { height: clamp(280px, 62vh, 460px); }
   .result-media.landscape { height: auto; }
-  .result-media.fitted { height: auto; max-height: clamp(280px, 62vh, 460px); }
+  .result-media.fitted { height: auto; }
 }
 
 @media (max-width: 480px) {
-  .result-heading-actions { gap: 5px; }
-  .result-heading-actions .secondary-command,
-  .result-heading-actions .icon-action { gap: 2px; padding-inline: 2px; font-size: 10px; }
-  .result-heading-actions svg { width: 14px; height: 14px; }
   .capability-switch button { min-height: 36px; font-size: 10px; }
   .mode-switch { flex-basis: 320px; width: min(320px, 100%); }
   .mode-option { min-height: 36px; }
@@ -7204,16 +9417,24 @@ textarea.studio-input { padding: 10px 12px; resize: vertical; }
   .image-size-confirm { min-width: 0; flex: 1; }
   .toggle-row.wide { grid-column: auto; }
   .featured-brief { margin-top: 18px; }
-  .brief-summary h3 { font-size: 22px; }
   .sequence-footer { align-items: flex-start; flex-direction: column; }
   .modal-backdrop { padding: 10px; }
 }
 
-@media (hover: none) {
-  /* No hover on touch: keep delete reachable but quiet so it doesn't compete with the title. */
-  .history-item-actions { opacity: .55; pointer-events: auto; }
-  .history-item.active .history-item-actions { opacity: .8; }
+/* Very narrow phones: drop the toolbar icons so the mode and history labels keep room to breathe. */
+@media (max-width: 400px) {
+  .studio-toolbar { gap: 6px; }
+  .mode-option { gap: 0; padding-inline: 4px; }
+  .mode-option-icon { display: none; }
+  .mode-option-copy { text-align: center; }
+  .history-entry-surface { gap: 0; padding: 0 12px; }
+  .history-entry-copy { text-align: center; }
+  /* Collapse the history icon but keep its live dot, now anchored to the button corner. */
+  .history-drawer-toggle .history-entry-icon { position: static; flex: none; width: 0; height: 0; background: none; }
+  .history-drawer-toggle .history-entry-icon > svg { display: none; }
+  .history-drawer-toggle-live { top: 5px; right: 5px; }
 }
+
 .image-cost-preview { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin: 16px 0 8px; padding: 14px 2px 4px; border-top: 1px solid #e8eeed; }
 .image-cost-copy { min-width: 0; }
 .image-cost-label { color: #53647a; font-size: 12px; font-weight: 600; }

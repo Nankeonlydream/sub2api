@@ -4,7 +4,7 @@ import { createI18n } from 'vue-i18n'
 import { describe, expect, it, vi } from 'vitest'
 import SeedanceVideoPricing from '../SeedanceVideoPricing.vue'
 import { createVideoModelPricesForm, serializeVideoModelPrices } from '../groupsVideoModelPricing'
-import { SEEDANCE_VIDEO_TIERS } from '@/utils/seedanceVideo'
+import { isGrokRelayVideoModel, isMuseVideoModel, SEEDANCE_VIDEO_TIERS } from '@/utils/seedanceVideo'
 
 vi.mock('@/api/admin/seedanceCatalog', () => ({ getSeedanceCatalog: vi.fn().mockResolvedValue({ customized: false, entries: [] }) }))
 
@@ -23,7 +23,7 @@ describe('Seedance video pricing', () => {
     await wrapper.get('input[type="checkbox"]').setValue(true)
     const next = wrapper.emitted('update:modelValue')![0][0] as Form
     await wrapper.setProps({ modelValue: next })
-    expect(wrapper.findAll('input[type="number"]')).toHaveLength(Object.keys(SEEDANCE_VIDEO_TIERS).length)
+    expect(wrapper.findAll('input[type="number"]')).toHaveLength(Object.keys(SEEDANCE_VIDEO_TIERS).filter(model => !isGrokRelayVideoModel(model) && !isMuseVideoModel(model)).length)
     expect(serializeVideoModelPrices(next)).toEqual(existing)
   })
 

@@ -52,16 +52,20 @@ def prepare(root, data):
     if worktree.exists() or git(root, 'show-ref', '--verify', 'refs/heads/' + branch, check=False).returncode == 0:
         raise RuntimeError('Upgrade already prepared. Inspect existing branch/worktree: ' + str(worktree))
     base_sha = git(root, 'rev-parse', base).stdout.strip()
+    version_file = 'backend/cmd/server/VERSION'
+    # The Creator release (e.g. creator.3.0) is independent of the upstream version; carry it forward.
+    current = git(root, 'show', base_sha + ':' + version_file).stdout.strip()
+    creator = re.fullmatch(r'\d+\.\d+\.\d+-creator\.(\d+(?:\.\d+)?)', current)
+    new_version = tag[1:] + '-creator.' + (creator.group(1) if creator else '1') + '\n'
     git(root, 'worktree', 'add', '-b', branch, str(worktree), base)
     merged = git(worktree, 'merge', '--no-commit', '--no-ff', ref, check=False)
     conflicts = git(worktree, 'diff', '--name-only', '--diff-filter=U').stdout.splitlines()
-    version_file = 'backend/cmd/server/VERSION'
     if version_file in conflicts:
-        (worktree / version_file).write_text(tag[1:] + '-creator.1\n')
+        (worktree / version_file).write_text(new_version)
         git(worktree, 'add', version_file)
         conflicts.remove(version_file)
     elif merged.returncode == 0:
-        (worktree / version_file).write_text(tag[1:] + '-creator.1\n')
+        (worktree / version_file).write_text(new_version)
         git(worktree, 'add', version_file)
     changed = git(worktree, 'diff', '--name-only', base_sha).stdout.splitlines()
     report = {

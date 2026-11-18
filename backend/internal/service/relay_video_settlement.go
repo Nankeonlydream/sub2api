@@ -198,6 +198,8 @@ func (s *OpenAIGatewayService) pollRelayVideoSettlement(ctx context.Context, tas
 	relay := seedanceVideoRelay
 	if strings.HasPrefix(task.TaskID, "minimax-h3:") {
 		relay = miniMaxH3Relay
+	} else if isMuseVideoAccount(account) {
+		relay = museVideoRelay
 	}
 	base, err := s.validateUpstreamBaseURL(account.GetCredential("base_url"))
 	if err != nil {
@@ -239,6 +241,9 @@ func (s *OpenAIGatewayService) pollRelayVideoSettlement(ctx context.Context, tas
 	}
 	if id == "" || id != strings.TrimPrefix(task.TaskID, relay.TaskPrefix) {
 		return "", errors.New("video status task mismatch")
+	}
+	if relay.State != nil {
+		return relay.State(body), nil
 	}
 	if e := gjson.GetBytes(body, "error"); e.Exists() && e.Type != gjson.Null {
 		return "failed", nil

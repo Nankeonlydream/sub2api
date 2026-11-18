@@ -3,9 +3,10 @@ import {
   MINIMAX_H3_ASPECT_RATIOS,
   MINIMAX_H3_MAX_REFERENCE_IMAGES,
   miniMaxH3Tier,
+  type MiniMaxCatalogState,
   type MiniMaxH3Tier,
 } from '@/utils/miniMaxH3'
-import { isGrokRelayVideoModel, seedanceVideoTier, type SeedanceCatalogState, type SeedanceVideoTier } from '@/utils/seedanceVideo'
+import { isGrokRelayVideoModel, isMuseVideoModel, seedanceVideoTier, type SeedanceCatalogState, type SeedanceVideoTier } from '@/utils/seedanceVideo'
 
 export interface CreatorImagePricing {
   currency: 'USD'
@@ -29,6 +30,14 @@ export interface CreatorVideoPricing {
 
 export async function getCreatorVideoPricing(apiKey: string, model: string, signal?: AbortSignal): Promise<CreatorVideoPricing> {
   return fetchJSON<CreatorVideoPricing>(buildGatewayUrl(`/v1/sub2api/video-pricing?model=${encodeURIComponent(model)}`), {
+    headers: authHeaders(apiKey),
+    signal,
+  })
+}
+
+// The MiniMax-H3 models an administrator currently sells and how to describe them.
+export async function getCreatorMiniMaxCatalog(apiKey: string, signal?: AbortSignal): Promise<MiniMaxCatalogState> {
+  return fetchJSON<MiniMaxCatalogState>(buildGatewayUrl('/v1/sub2api/minimax-catalog'), {
     headers: authHeaders(apiKey),
     signal,
   })
@@ -89,6 +98,8 @@ export interface CreatorGeneratedImage {
 export interface ImageGenerationResult {
   created?: number
   data: CreatorGeneratedImage[]
+  /** Usage-record ID of the request that produced the images, for cost lookup. */
+  billingId?: string
 }
 
 export interface VideoGenerationInput {
@@ -176,8 +187,17 @@ function creatorErrorFromBody(response: Response, body: any): CreatorError {
   return error
 }
 
-async function fetchJSON<T>(url: string, init: RequestInit): Promise<T> {
+// Usage records key a gateway request as "client:" + its X-Client-Request-ID.
+function usageBillingId(response: Response): string | undefined {
+  const id = response.headers.get('X-Client-Request-ID')?.trim()
+  return id ? `client:${id}` : undefined
+}
+
+// Task status lookups pass keepErrorPayload: a finished-but-failed task answers
+// 200 with an `error` describing the task, which is a result, not a failed request.
+async function fetchJSON<T>(url: string, init: RequestInit, meta?: { billingId?: string }, options: { keepErrorPayload?: boolean } = {}): Promise<T> {
   const response = await fetch(url, init)
+  if (meta) meta.billingId = usageBillingId(response)
   if (!response.ok) throw await parseCreatorError(response)
   let body: any
   try {
@@ -193,7 +213,7 @@ async function fetchJSON<T>(url: string, init: RequestInit): Promise<T> {
   }
   // A non-streaming image heartbeat commits HTTP 200 before a late upstream
   // error is known. Treat the final OpenAI error envelope as a failed request.
-  if (hasCreatorErrorPayload(body?.error)) throw creatorErrorFromBody(response, body)
+  if (!options.keepErrorPayload && hasCreatorErrorPayload(body?.error)) throw creatorErrorFromBody(response, body)
   return body
 }
 
@@ -347,13 +367,14 @@ async function generateOpenAIImage(
   const references = input.referenceImages || input.references || []
   assertSvgWithoutReferences(input, references)
   let body: unknown
+  const meta: { billingId?: string } = {}
 
   if (references.length === 0) {
     body = await fetchJSON<any>(buildGatewayUrl('/v1/images/generations'), {
       method: 'POST',
       headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'image' }),
       body: JSON.stringify(buildOpenAIJSONPayload(input)),
-    })
+    }, meta)
   } else {
     const form = new FormData()
     const fields = buildOpenAIJSONPayload(input)
@@ -364,10 +385,10 @@ async function generateOpenAIImage(
       method: 'POST',
       headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'image' }),
       body: form,
-    })
+    }, meta)
   }
 
-  return normalizeOpenAIImages(body, imageMimeType(input))
+  return { ...normalizeOpenAIImages(body, imageMimeType(input)), billingId: meta.billingId }
 }
 
 function readFileAsDataURL(file: File): Promise<string> {
@@ -435,6 +456,7 @@ async function generateGeminiImage(
     },
   }
   const model = input.model.trim().replace(/^models\//, '')
+  const meta: { billingId?: string } = {}
   const body = await fetchJSON<any>(
     buildGatewayUrl(`/v1beta/models/${encodeURIComponent(model)}:generateContent`),
     {
@@ -442,8 +464,9 @@ async function generateGeminiImage(
       headers: authHeaders(apiKey, { 'Content-Type': 'application/json', 'X-Sub2API-Creator': 'image' }),
       body: JSON.stringify(payload),
     },
+    meta,
   )
-  return normalizeGeminiImages(body)
+  return { ...normalizeGeminiImages(body), billingId: meta.billingId }
 }
 
 export function generateCreatorImage(
@@ -465,9 +488,9 @@ export interface CreatorImageTaskStatus {
  * Submits an OpenAI-protocol image as a server-side task so the result survives
  * a page refresh. Resolves to null when the gateway has no async image tasks
  * (no object storage, or a platform without them); callers then generate
- * synchronously.
+ * synchronously. billingId names the task's usage record.
  */
-export async function submitCreatorImageTask(apiKey: string, input: ImageGenerationInput): Promise<string | null> {
+export async function submitCreatorImageTask(apiKey: string, input: ImageGenerationInput): Promise<{ id: string; billingId?: string } | null> {
   if (input.protocol === 'gemini') return null
   const references = input.referenceImages || input.references || []
   assertSvgWithoutReferences(input, references)
@@ -491,7 +514,8 @@ export async function submitCreatorImageTask(apiKey: string, input: ImageGenerat
   const body = await response.json().catch(() => null)
   const id = String(body?.task_id || body?.id || '')
   if (!id) throw new Error('图片任务接口没有返回任务 ID')
-  return id
+  // The finished task is billed under the submit request's ID, not a poll's.
+  return { id, billingId: usageBillingId(response) }
 }
 
 export async function getCreatorImageTask(apiKey: string, taskId: string, input: Pick<ImageGenerationInput, 'outputFormat'>): Promise<CreatorImageTaskStatus> {
@@ -516,7 +540,8 @@ export async function getCreatorImageTask(apiKey: string, taskId: string, input:
 function createRelayVideoPayload(input: VideoGenerationInput, tier: MiniMaxH3Tier | SeedanceVideoTier, images: string[], provider: string) {
   const seedance = 'supportsUploadedReferences' in tier ? tier : null
   const ratios = tier.aspectRatios || MINIMAX_H3_ASPECT_RATIOS
-  const maxImages = seedance?.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES
+  // Seedance text-only lines (0) are refused below; Muse's one image is a first frame.
+  const maxImages = seedance ? seedance.maxReferenceImages || MINIMAX_H3_MAX_REFERENCE_IMAGES : tier.maxReferenceImages
   // Resolution comes from the model; fixed tiers take no duration field.
   const seconds = Math.round(Number(input.duration ?? tier.minSeconds))
   if (seconds < tier.minSeconds || seconds > tier.maxSeconds) {
@@ -527,8 +552,11 @@ function createRelayVideoPayload(input: VideoGenerationInput, tier: MiniMaxH3Tie
   if (tier.allowedSeconds && !tier.allowedSeconds.includes(seconds)) {
     throw new Error(`该 ${provider} 模型时长只能是 ${tier.allowedSeconds.join(' 或 ')} 秒`)
   }
-  if (images.length && seedance && !seedance.supportsUploadedReferences) {
+  if (images.length && seedance && !seedance.supportsUploadedReferences && !isMuseVideoModel(input.model)) {
     throw new Error('该 Seedance 模型只支持文生视频，不能使用参考图')
+  }
+  if (images.length && !seedance && !tier.maxReferenceImages) {
+    throw new Error(`该 ${provider} 模型只支持文生视频，不能使用参考图`)
   }
   if (!images.length && 'requiresReference' in tier && tier.requiresReference) {
     throw new Error(`该 ${provider} 模型需要至少 1 张参考图，请改用参考图生视频`)
@@ -557,10 +585,18 @@ export async function createCreatorVideo(
   const h3Tier = miniMaxH3Tier(input.model)
   const seedanceTier = seedanceVideoTier(input.model)
   const relayTier = h3Tier || seedanceTier
-  const relayProvider = h3Tier ? 'MiniMax H3' : isGrokRelayVideoModel(input.model) ? 'Grok' : 'Seedance'
-  if (relayTier && input.imageDataUrl) {
+  const relayProvider = h3Tier ? 'MiniMax H3' : isMuseVideoModel(input.model) ? 'Muse' : isGrokRelayVideoModel(input.model) ? 'Grok' : 'Seedance'
+  if (relayTier && input.imageDataUrl && !isMuseVideoModel(input.model)) {
     throw new Error(`${relayProvider} 不支持首帧图生视频，请改用参考图生视频`)
   }
+  if (isMuseVideoModel(input.model) && referenceImageDataUrls.length > 1) {
+    throw new Error('Muse 只支持 1 张首帧图，不支持多张参考图')
+  }
+  // Muse has no reference-image mode: its single image is the first frame, which
+  // the relay payload carries in the same `images` field.
+  const relayImages = isMuseVideoModel(input.model) && input.imageDataUrl
+    ? [input.imageDataUrl, ...referenceImageDataUrls]
+    : referenceImageDataUrls
   if (!relayTier && referenceImageDataUrls.length > 7) {
     throw new Error('参考图生视频最多支持 7 张参考图')
   }
@@ -568,7 +604,7 @@ export async function createCreatorVideo(
   if (!relayTier && referenceImageDataUrls.length && !/^grok-imagine-video-1\.5(?:$|-)/i.test(normalizedModel)) {
     throw new Error('参考图生视频仅支持 Grok Imagine Video 1.5 或 MiniMax H3 模型')
   }
-  const payload = relayTier ? createRelayVideoPayload(input, relayTier, referenceImageDataUrls, relayProvider) : {
+  const payload = relayTier ? createRelayVideoPayload(input, relayTier, relayImages, relayProvider) : {
     ...input.extra,
     model: input.model,
     prompt: input.prompt,
@@ -604,6 +640,9 @@ export async function getCreatorVideoStatus(
   const body = await fetchJSON<any>(
     buildGatewayUrl(`/v1/videos/${encodeURIComponent(requestId)}`),
     { headers: authHeaders(apiKey, { 'X-Sub2API-Creator': 'video' }) },
+    undefined,
+    // A failed task is reported below as status "failed" with its reason.
+    { keepErrorPayload: true },
   )
   const nested = body?.video || body?.data || {}
   const nestedVideo = nested?.video || {}
@@ -758,6 +797,10 @@ export async function getCreatorPlayableVideo(
   status?: VideoStatusResult,
 ): Promise<Blob> {
   const current = status || await getCreatorVideoStatus(apiKey, requestId)
+  if (current.status === 'failed') {
+    const message = (current.error as { message?: unknown } | undefined)?.message
+    throw new Error(typeof message === 'string' && message ? message : '视频生成失败')
+  }
   if (!isCreatorVideoComplete(current.status) && !current.url) {
     throw new Error('视频仍在处理中')
   }

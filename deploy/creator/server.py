@@ -46,7 +46,7 @@ def log(message):
 
 
 def validate_image_ref(value):
-    pattern = re.escape(REPOSITORY) + r'(?:@sha256:[a-f0-9]{64}|:\d+\.\d+\.\d+-creator\.\d+)'
+    pattern = re.escape(REPOSITORY) + r'(?:@sha256:[a-f0-9]{64}|:\d+\.\d+\.\d+-creator\.\d+(?:\.\d+)?)'
     require(re.fullmatch(pattern, value), 'Use a fixed Creator version or digest from ' + REPOSITORY)
     return value
 
@@ -69,7 +69,7 @@ def validate_companions(services):
 
 
 def validate_metadata(data, image):
-    require(re.fullmatch(r'\d+\.\d+\.\d+-creator\.\d+', data.get('version', '')), 'Invalid Creator version')
+    require(re.fullmatch(r'\d+\.\d+\.\d+-creator\.\d+(?:\.\d+)?', data.get('version', '')), 'Invalid Creator version')
     require(re.fullmatch(r'[a-f0-9]{40}', data.get('revision', '')), 'Invalid revision')
     require(image['Architecture'] == 'amd64', 'Image architecture mismatch')
     require(image['Config'].get('Labels', {}).get('org.opencontainers.image.revision') == data['revision'],

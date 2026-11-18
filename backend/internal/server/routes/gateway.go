@@ -276,6 +276,7 @@ func RegisterGatewayRoutes(
 	gateway.GET("/sub2api/image-pricing", h.OpenAIGateway.CreatorImagePricing)
 	gateway.GET("/sub2api/video-pricing", h.OpenAIGateway.CreatorVideoPricing)
 	gateway.GET("/sub2api/seedance-catalog", h.OpenAIGateway.CreatorSeedanceCatalog)
+	gateway.GET("/sub2api/minimax-catalog", h.OpenAIGateway.CreatorMiniMaxCatalog)
 	gateway.Use(groupModelAllowlist, apiKeyModelPolicy)
 	gateway.Use(groupCodexCLIOnly, groupBlockSubagents)
 	gateway.Use(groupAntiDistillation, groupStreamOnly)

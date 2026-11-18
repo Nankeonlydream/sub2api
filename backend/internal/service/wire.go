@@ -953,6 +953,9 @@ func ProvideSettingService(scopedKeys ScopedAdminKeyRepository, settingRepo Sett
 	if err := svc.LoadSeedanceCatalog(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: load Seedance catalog failed, using built-in catalog: %v", err)
 	}
+	if err := svc.LoadMiniMaxCatalog(context.Background()); err != nil {
+		logger.LegacyPrintf("service.setting", "Warning: load MiniMax catalog failed, using built-in catalog: %v", err)
+	}
 	if err := svc.MigrateOpenAIAllowClaudeCodeCodexPluginSetting(context.Background()); err != nil {
 		logger.LegacyPrintf("service.setting", "Warning: migrate openai allow Claude Code Codex plugin setting failed: %v", err)
 	}

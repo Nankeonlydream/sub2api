@@ -148,6 +148,7 @@ func RegisterUserRoutes(
 			usage.GET("/dashboard/models", h.Usage.DashboardModels)
 			usage.GET("/dashboard/snapshot-v2", h.Usage.DashboardSnapshotV2)
 			usage.POST("/dashboard/api-keys-usage", h.Usage.DashboardAPIKeysUsage)
+			usage.POST("/creator-costs", h.Usage.CreatorCosts)
 		}
 
 		// 公告（用户可见）

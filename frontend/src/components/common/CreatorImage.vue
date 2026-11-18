@@ -1,5 +1,5 @@
 <template>
-  <div class="creator-image" :class="{ 'is-preview': preview }" :aria-busy="state === 'loading'">
+  <div class="creator-image" :class="{ 'is-preview': preview }" :aria-busy="state === 'loading' || (state === 'error' && pending)">
     <component :is="preview ? 'div' : 'button'" :type="preview ? undefined : 'button'" class="creator-image-open" :disabled="preview ? undefined : state !== 'ready'" :aria-label="alt" @click="!preview && $emit('preview')">
       <!-- The card's downscaled copy is already decoded, so it paints at once while the original decodes. -->
       <img v-if="placeholderSrc && state !== 'ready'" class="creator-image-placeholder" :src="placeholderSrc" alt="" aria-hidden="true" />
@@ -17,10 +17,10 @@
         @click="preview && keepPreviewOpen($event)"
       />
     </component>
-    <div v-if="state === 'loading' && !placeholderSrc" class="creator-image-skeleton" :class="{ 'is-delayed': wasDisplayed }" role="status" aria-live="polite">
+    <div v-if="(state === 'loading' || (state === 'error' && pending)) && !placeholderSrc" class="creator-image-skeleton" :class="{ 'is-delayed': wasDisplayed }" role="status" aria-live="polite">
       <span class="creator-image-sr-only">正在加载图片</span>
     </div>
-    <div v-else-if="state === 'error'" class="creator-image-feedback" role="alert">
+    <div v-else-if="state === 'error' && !pending" class="creator-image-feedback" role="alert">
       <strong>图片加载失败</strong>
       <button type="button" class="creator-image-retry" @click.stop="retry">重新加载</button>
     </div>
@@ -34,7 +34,8 @@ import { forgetCreatorDisplayImage, getCreatorDisplayImage, peekCreatorDisplayIm
 import { getCreatorImageObjectUrl } from '@/services/creatorImageBlobs'
 
 // downscale: show a cached, card-sized copy of large data URLs (needs cacheKey).
-const props = defineProps<{ src: string; alt: string; preview?: boolean; cacheKey?: string; downscale?: boolean }>()
+// pending: a local copy will replace src soon, so a failed load keeps loading instead of showing an error.
+const props = defineProps<{ src: string; alt: string; preview?: boolean; cacheKey?: string; downscale?: boolean; pending?: boolean }>()
 defineEmits<{ preview: [] }>()
 // Isolated pages (including the Vite dev server) block no-CORS CDN images
 // without a CORP header. Match thumbnail requests there; keep ordinary image

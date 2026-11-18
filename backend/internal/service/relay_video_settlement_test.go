@@ -205,7 +205,7 @@ func TestRelaySubmissionFailureNeverReplaysPOST(t *testing.T) {
 				}
 				return nil
 			}, Accept: func(context.Context, *OpenAIForwardResult) error { return errors.New("SQL unavailable") }})
-			result, err := s.ForwardMiniMaxH3(ctx, c, account, MiniMaxH3EndpointCreate, "", []byte(`{"model":"MiniMax-H3-933-1440p-15s","prompt":"test"}`))
+			result, err := s.ForwardMiniMaxH3(ctx, c, account, MiniMaxH3EndpointCreate, "", []byte(`{"model":"Xminimex-h3","prompt":"test"}`))
 			if admissionFails {
 				require.Error(t, err)
 				require.Zero(t, up.calls)

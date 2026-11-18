@@ -1195,6 +1195,11 @@ type GatewayConfig struct {
 	// GrokResponseHeaderTimeout bounds the pre-first-byte wait for xAI/Grok.
 	// A zero value uses the provider-safe default instead of the generic gateway timeout.
 	GrokResponseHeaderTimeout int `mapstructure:"grok_response_header_timeout"`
+	// GrokVideoAsyncCreateWaitSeconds bounds how long a native Grok video create
+	// waits for its upstream task ID before answering with a gateway task ID and
+	// finishing the submission in the background. It keeps slow creates under
+	// CDN read timeouts (Cloudflare: 125s). 0 disables the gateway task ID.
+	GrokVideoAsyncCreateWaitSeconds int `mapstructure:"grok_video_async_create_wait_seconds"`
 	// OpenAIFirstOutputTimeoutSeconds: native HTTP Responses 首个语义输出超时（秒），0表示禁用。
 	OpenAIFirstOutputTimeoutSeconds int `mapstructure:"openai_first_output_timeout_seconds"`
 	// Only authenticated plugin responses may opt into early metadata delivery.
@@ -2744,6 +2749,7 @@ func setDefaults() {
 	viper.SetDefault("gateway.response_header_timeout", 600) // 600秒(10分钟)等待上游响应头，LLM高负载时可能排队较久
 	viper.SetDefault("gateway.openai_response_header_timeout", 0)
 	viper.SetDefault("gateway.grok_response_header_timeout", 120)
+	viper.SetDefault("gateway.grok_video_async_create_wait_seconds", 90)
 	viper.SetDefault("gateway.openai_first_output_timeout_seconds", 0)
 	viper.SetDefault("gateway.openai_plugin_sse_early_events_enabled", false)
 	viper.SetDefault("gateway.openai_upload_timeout_seconds", 0)
@@ -3753,6 +3759,9 @@ func (c *Config) Validate() error {
 	}
 	if c.Gateway.GrokResponseHeaderTimeout < 0 || c.Gateway.GrokResponseHeaderTimeout > 1800 {
 		return fmt.Errorf("gateway.grok_response_header_timeout must be between 0-1800 seconds")
+	}
+	if c.Gateway.GrokVideoAsyncCreateWaitSeconds < 0 || c.Gateway.GrokVideoAsyncCreateWaitSeconds > 600 {
+		return fmt.Errorf("gateway.grok_video_async_create_wait_seconds must be between 0-600 seconds")
 	}
 	if c.Gateway.OpenAIUploadTimeoutSeconds < 0 || c.Gateway.OpenAIUploadTimeoutSeconds > 1800 {
 		return fmt.Errorf("gateway.openai_upload_timeout_seconds must be between 0-1800 seconds")

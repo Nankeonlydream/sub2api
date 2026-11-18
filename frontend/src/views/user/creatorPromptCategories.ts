@@ -1,7 +1,30 @@
+import imgEcommerceCover from '@/assets/creator-categories/img-ecommerce.webp'
+import imgFoodCover from '@/assets/creator-categories/img-food.webp'
+import imgPortraitCover from '@/assets/creator-categories/img-portrait.webp'
+import imgLandscapeCover from '@/assets/creator-categories/img-landscape.webp'
+import imgArchitectureCover from '@/assets/creator-categories/img-architecture.webp'
+import imgInteriorCover from '@/assets/creator-categories/img-interior.webp'
+import imgIllustrationCover from '@/assets/creator-categories/img-illustration.webp'
+import imgPosterCover from '@/assets/creator-categories/img-poster.webp'
+import imgPetsCover from '@/assets/creator-categories/img-pets.webp'
+import imgFantasyCover from '@/assets/creator-categories/img-fantasy.webp'
+import vidProductCover from '@/assets/creator-categories/vid-product.webp'
+import vidFoodCover from '@/assets/creator-categories/vid-food.webp'
+import vidAerialCover from '@/assets/creator-categories/vid-aerial.webp'
+import vidStreetCover from '@/assets/creator-categories/vid-street.webp'
+import vidEmotionCover from '@/assets/creator-categories/vid-emotion.webp'
+import vidFashionCover from '@/assets/creator-categories/vid-fashion.webp'
+import vidPetsCover from '@/assets/creator-categories/vid-pets.webp'
+import vidSeasonsCover from '@/assets/creator-categories/vid-seasons.webp'
+import vidSportsCover from '@/assets/creator-categories/vid-sports.webp'
+import vidVfxCover from '@/assets/creator-categories/vid-vfx.webp'
+
 // Quick-start categories under the featured brief: one click fills a random
 // prompt from the category, so each prompt must stand on its own.
 export interface PromptCategory {
   name: string
+  // Sample thumbnail generated from a representative prompt of the category.
+  cover: string
   hint: string
   prompts: string[]
 }
@@ -9,6 +32,7 @@ export interface PromptCategory {
 export const imagePromptCategories: PromptCategory[] = [
   {
     name: '电商产品',
+    cover: imgEcommerceCover,
     hint: '主图 · 场景图',
     prompts: [
       '一瓶无标志的透明玻璃香水放在浅米色石膏台上，背景是柔和的暖灰渐变。三分之二侧角，50mm 镜头，左侧柔光箱打亮瓶身，右侧窄条光勾出轮廓，台面有清晰倒影，高级简洁的电商主图。',
@@ -25,6 +49,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '美食饮品',
+    cover: imgFoodCover,
     hint: '菜品 · 饮品 · 甜点',
     prompts: [
       '一碗热气腾腾的红汤牛肉面放在深色木桌上，面上铺着大块牛肉、香菜和葱花，旁边是一双竹筷。45 度俯视近景，侧逆光让热气清晰可见，汤面油光诱人，真实的餐饮菜单图。',
@@ -41,6 +66,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '人像写真',
+    cover: imgPortraitCover,
     hint: '肖像 · 职业照',
     prompts: [
       '一位成年女性坐在窗边的木椅上，侧脸望向窗外，浅色针织衫，头发自然垂落。85mm 镜头近景，侧窗柔光在脸上形成柔和明暗，背景浅色虚化，安静温柔的人像写真。',
@@ -57,6 +83,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '风光自然',
+    cover: imgLandscapeCover,
     hint: '山川 · 湖海 · 星空',
     prompts: [
       '秋天的山谷中，红黄相间的枫林覆盖两侧山坡，一条清澈小溪从中间流过，远处山峰有薄雾。广角远景，上午侧光让树叶色彩饱满，层次丰富的秋季风光摄影。',
@@ -73,6 +100,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '城市建筑',
+    cover: imgArchitectureCover,
     hint: '街景 · 建筑 · 夜景',
     prompts: [
       '雨后的城市夜景，高楼灯光倒映在湿润的街道上，一辆出租车驶过留下红色尾灯光轨。低机位广角，冷蓝与霓虹暖色对比，电影感的城市夜景摄影。',
@@ -89,6 +117,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '室内家居',
+    cover: imgInteriorCover,
     hint: '空间 · 软装 · 角落',
     prompts: [
       '北欧风格的卧室，白色床品搭配燕麦色毛毯，床头是一盏陶瓷台灯和几本书，墙上挂着一幅抽象画。平视广角，清晨柔和窗光，空间干净温馨，家居杂志风格图。',
@@ -105,6 +134,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '插画绘本',
+    cover: imgIllustrationCover,
     hint: '扁平 · 水彩 · 绘本',
     prompts: [
       '水彩绘本风格插画，一只小狐狸提着灯笼走在月光下的森林小路上，周围飘着萤火虫。柔和的蓝绿色调，笔触通透，温暖治愈，适合儿童绘本内页，无文字。',
@@ -121,6 +151,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '品牌海报',
+    cover: imgPosterCover,
     hint: 'KV · 节日 · 活动',
     prompts: [
       '春节主题海报背景，红色渐变底色上漂浮着金色祥云、灯笼和梅花，中央留出大片空白用于标题。中心对称构图，喜庆华丽的国潮风格，无文字。',
@@ -137,6 +168,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '萌宠动物',
+    cover: imgPetsCover,
     hint: '宠物 · 野生动物',
     prompts: [
       '一只橘猫趴在洒满阳光的窗台上打盹，尾巴垂下，窗外是绿色树叶。平视近景，午后暖光勾出毛发轮廓，背景柔和虚化，温馨治愈的宠物摄影。',
@@ -153,6 +185,7 @@ export const imagePromptCategories: PromptCategory[] = [
   },
   {
     name: '科幻奇幻',
+    cover: imgFantasyCover,
     hint: '未来 · 奇幻 · 概念',
     prompts: [
       '未来城市的夜景，悬浮车流在摩天楼之间穿梭，巨大的全息广告投影在楼体上，街道下雨反光。广角低机位，青紫霓虹色调，赛博朋克风格概念图。',
@@ -172,6 +205,7 @@ export const imagePromptCategories: PromptCategory[] = [
 export const videoPromptCategories: PromptCategory[] = [
   {
     name: '产品广告',
+    cover: vidProductCover,
     hint: '旋转 · 推近 · 特写',
     prompts: [
       '一瓶无标志的玻璃香水立在黑色镜面台上，镜头缓慢环绕半圈，一道暖光沿瓶身从左向右扫过，瓶中液体微微晃动。背景纯黑，倒影清晰，高级香水广告镜头。',
@@ -188,6 +222,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '美食饮品',
+    cover: vidFoodCover,
     hint: '烹饪 · 倒入 · 慢动作',
     prompts: [
       '一块牛排放进烧热的铸铁锅中，油花四溅，表面迅速变色，一块黄油随后融化并被勺子浇在牛排上。俯侧角特写，暖色火光，升格慢动作，餐厅宣传镜头。',
@@ -204,6 +239,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '航拍风光',
+    cover: vidAerialCover,
     hint: '前飞 · 环绕 · 拉升',
     prompts: [
       '无人机沿着海岸悬崖边缘低空前飞，左侧是陡峭的绿色崖壁，右侧是拍打礁石的白色浪花，前方海岬逐渐显露。运动平稳匀速，晴天侧光，海滨文旅宣传镜头。',
@@ -220,6 +256,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '城市街景',
+    cover: vidStreetCover,
     hint: '夜景 · 人流 · 光影',
     prompts: [
       '雨夜的城市街头，镜头贴近湿润路面缓慢前推，霓虹灯招牌倒映在积水中，行人撑伞从画面中走过。低机位，冷蓝与粉紫色调，电影感的城市夜景镜头。',
@@ -236,6 +273,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '人物情绪',
+    cover: vidEmotionCover,
     hint: '叙事 · 表情 · 氛围',
     prompts: [
       '一位成年女性坐在火车窗边，窗外风景快速后退，阳光在她脸上明暗交替闪过，她转头望向窗外露出淡淡微笑。近景固定镜头，暖色调，文艺电影感镜头。',
@@ -252,6 +290,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '时尚服装',
+    cover: vidFashionCover,
     hint: '走秀 · 面料 · 街拍',
     prompts: [
       '一位成年女模特穿红色丝绒长裙从长廊尽头走向镜头，裙摆随步伐摆动。镜头在正前方匀速后退跟拍，全身构图，两侧柱子依次掠过，时尚大片风格。',
@@ -268,6 +307,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '萌宠动物',
+    cover: vidPetsCover,
     hint: '宠物 · 野生动物',
     prompts: [
       '一只橘猫在窗台上伸了个大大的懒腰，打了个哈欠后蜷成一团继续睡觉，尾巴轻轻摆动。平视近景固定镜头，午后暖阳，治愈系宠物视频。',
@@ -284,6 +324,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '季节空镜',
+    cover: vidSeasonsCover,
     hint: '春夏秋冬 · 天气',
     prompts: [
       '春日的油菜花田，微风吹过花海形成一道道金色波浪，蜜蜂在花间飞舞，远处是白墙黑瓦的村落。镜头缓慢横移，明媚阳光，春季乡村空镜。',
@@ -300,6 +341,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '运动活力',
+    cover: vidSportsCover,
     hint: '速度 · 力量 · 动感',
     prompts: [
       '一位成年冲浪者在巨浪中滑行，身后浪管卷起白色浪花，水珠在阳光下飞溅。长焦侧面跟拍，升格慢动作，蓝色海水通透，极限运动广告镜头。',
@@ -316,6 +358,7 @@ export const videoPromptCategories: PromptCategory[] = [
   },
   {
     name: '奇幻特效',
+    cover: vidVfxCover,
     hint: '科幻 · 魔法 · 概念',
     prompts: [
       '一本古老的魔法书在木桌上自动翻开，书页中升起金色光点和发光的符文，在空中盘旋。中景缓慢推进，暖金色光芒照亮昏暗书房，奇幻电影镜头。',

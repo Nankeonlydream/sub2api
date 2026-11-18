@@ -76,6 +76,7 @@ class UpgradeTests(unittest.TestCase):
                 server.validate_image_ref(ref)
         self.assertEqual(server.validate_image_ref(NEW), NEW)
         server.validate_image_ref(server.REPOSITORY + ':2.10.4-creator.1')
+        server.validate_image_ref(server.REPOSITORY + ':2.22.0-creator.3.0')
 
     def test_replacement_preserves_other_compose_fields(self):
         source = 'services:\n  sub2api:\n    image: ' + OLD + '\n    restart: always\n'
@@ -148,7 +149,7 @@ class UpgradeTests(unittest.TestCase):
             git(source, 'add', '.')
             git(source, 'commit', '-m', 'base')
             git(source, 'checkout', '-b', upstream.BASE)
-            version.write_text('9.0.0-creator.1\n')
+            version.write_text('9.0.0-creator.3.0\n')
             (source / 'creator.txt').write_text('keep creator')
             git(source, 'add', '.')
             git(source, 'commit', '-m', 'custom')
@@ -166,7 +167,7 @@ class UpgradeTests(unittest.TestCase):
                 upstream.prepare(checkout, {'tag_name': 'v9.0.1', 'html_url': 'https://example.invalid', 'body': 'fixture'})
             candidate = root / 'sub2api-creator-v9.0.1'
             self.assertEqual((candidate / 'creator.txt').read_text(), 'keep creator')
-            self.assertEqual((candidate / 'backend/cmd/server/VERSION').read_text(), '9.0.1-creator.1\n')
+            self.assertEqual((candidate / 'backend/cmd/server/VERSION').read_text(), '9.0.1-creator.3.0\n')
             self.assertEqual(git(checkout, 'rev-parse', 'HEAD'), before)
             self.assertEqual(git(candidate, 'diff', '--name-only', '--diff-filter=U'), '')
             self.assertTrue((root / 'creator-upgrade-v9.0.1.json').exists())

@@ -24,11 +24,20 @@ export interface CreatorHistoryItem {
   createdAt: number
   updatedAt: number
   outputs: string[]
+  /** Original requested image index of each saved output, including gaps from failed requests. */
+  imageOutputIndexes?: number[]
+  /** Original image index of each unfinished server task. */
+  imageTaskIndexes?: Record<string, number>
+  imageFailedIndexes?: number[]
+  /** Models that produced images after the selected model kept failing. */
+  fallbackModels?: string[]
   /** Original image bytes. Empty output slots are rebuilt when history is read. */
   imageBlobs?: (Blob | undefined)[]
   imagePersistenceError?: string
   /** Browser-persisted video payloads used to rebuild temporary blob URLs after refresh. */
   videoBlobs?: Blob[]
+  /** Local video bytes were dropped to free browser storage; reload them from the server by requestId. */
+  videoBlobsEvicted?: boolean
   /** Small locally generated cover; usable without opening/decoding the video. */
   videoThumbnail?: string
   mergedOutput?: string
@@ -69,6 +78,10 @@ export interface CreatorHistoryItem {
   completedAt?: number
   generationDurationMs?: number
   referenceCount?: number
+  /** Image works: the uploaded reference files, restored when the work is reopened. */
+  referenceBlobs?: Blob[]
+  /** Video works: reference/source files per shot, restored when the work is reopened. */
+  shotReferenceBlobs?: Blob[][]
   videoGenerationMethod?: CreatorVideoGenerationMethod
   outputCount?: number
   requestedDuration?: number
@@ -76,8 +89,15 @@ export interface CreatorHistoryItem {
   version?: string
   source?: string
   requestId?: string
+  /** Usage-record IDs of the image requests that produced the outputs, for cost lookup. */
+  billingIds?: string[]
   /** Server-side image tasks still owed to this work; they survive a refresh. */
   imageTaskIds?: string[]
+  /**
+   * Listed with deferImages: the originals are still only in imageBlobs and the
+   * matching outputs are empty. readCreatorHistoryImages fills them. Never stored.
+   */
+  imageOutputsPending?: boolean
   error?: string
 }
 
@@ -135,6 +155,10 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return {
     ...item,
     outputs: [...item.outputs],
+    imageOutputIndexes: item.imageOutputIndexes ? [...item.imageOutputIndexes] : undefined,
+    imageTaskIndexes: item.imageTaskIndexes ? { ...item.imageTaskIndexes } : undefined,
+    imageFailedIndexes: item.imageFailedIndexes ? [...item.imageFailedIndexes] : undefined,
+    fallbackModels: item.fallbackModels ? [...item.fallbackModels] : undefined,
     imageBlobs: item.imageBlobs ? [...item.imageBlobs] : undefined,
     upstreamImageSizes: item.upstreamImageSizes ? [...item.upstreamImageSizes] : undefined,
     imageOutputSizes: item.imageOutputSizes ? [...item.imageOutputSizes] : undefined,
@@ -149,7 +173,11 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
     shotActualOutputSizes: item.shotActualOutputSizes ? [...item.shotActualOutputSizes] : undefined,
     shotOutputIndexes: item.shotOutputIndexes ? [...item.shotOutputIndexes] : undefined,
     shotQueue: cloneShotQueue(item.shotQueue),
+    referenceBlobs: item.referenceBlobs ? [...item.referenceBlobs] : undefined,
+    shotReferenceBlobs: item.shotReferenceBlobs ? item.shotReferenceBlobs.map(blobs => [...blobs]) : undefined,
     imageTaskIds: item.imageTaskIds ? [...item.imageTaskIds] : undefined,
+    // Must be copied too: a reactive array proxy here makes IndexedDB throw DataCloneError.
+    billingIds: item.billingIds ? [...item.billingIds] : undefined,
   }
 }
 
@@ -157,6 +185,8 @@ function cloneItem(item: CreatorHistoryItem): CreatorHistoryItem {
 // Keep URLs only for older works whose original bytes have not been recovered.
 function imageStorageItem(item: CreatorHistoryItem): CreatorHistoryItem {
   const stored = cloneItem(item)
+  // A deferred work already has the stored shape: empty outputs over its Blobs.
+  delete stored.imageOutputsPending
   if (stored.type !== 'image') return stored
   stored.imageBlobs = stored.outputs.map((output, index) => {
     if (!output.startsWith('data:image/')) return stored.imageBlobs?.[index]
@@ -171,13 +201,25 @@ function imageStorageItem(item: CreatorHistoryItem): CreatorHistoryItem {
   return stored
 }
 
+// Every focus refresh lists the whole history. Re-encoding unchanged 4K
+// originals to Base64 each time stalls the page, so reuse this revision.
+function imageRevision(item: CreatorHistoryItem): string {
+  const blobs = item.imageBlobs || []
+  return `${item.updatedAt}:${blobs.map(blob => blob ? `${blob.size}/${blob.type}` : '').join(',')}:${item.outputs.map(output => output.length).join(',')}`
+}
+
+/** True when reading this work still has to encode stored originals to Base64. */
+function needsImageRead(item: CreatorHistoryItem): boolean {
+  return item.type === 'image' && Boolean(item.imageBlobs?.some(Boolean))
+    && !cachedCreatorImageOutputs(item.id, imageRevision(item))
+}
+
 async function readableItem(item: CreatorHistoryItem): Promise<CreatorHistoryItem> {
   const readable = cloneItem(item)
+  delete readable.imageOutputsPending
   if (readable.type !== 'image' || !readable.imageBlobs?.some(Boolean)) return readable
   const blobs = readable.imageBlobs
-  // Every focus refresh lists the whole history. Re-encoding unchanged 4K
-  // originals to Base64 each time stalls the page, so reuse this revision.
-  const revision = `${readable.updatedAt}:${blobs.map(blob => blob ? `${blob.size}/${blob.type}` : '').join(',')}:${readable.outputs.map(output => output.length).join(',')}`
+  const revision = imageRevision(readable)
   const cached = cachedCreatorImageOutputs(readable.id, revision)
   readable.outputs = cached ? [...cached] : await Promise.all(readable.outputs.map((output, index) => {
     const blob = blobs[index]
@@ -203,6 +245,7 @@ async function writeItem(
   expectedUpdatedAt?: number,
 ): Promise<boolean> {
   const encoded = imageStorageItem(item)
+  if (encoded.videoBlobs?.length) delete encoded.videoBlobsEvicted
   let applied = false
   await runWrite(database, store => {
     if (expectedUpdatedAt === undefined) {
@@ -220,6 +263,58 @@ async function writeItem(
   return applied
 }
 
+let evictedVideoIds: string[] = []
+
+/** IDs of videos whose local copy was dropped to free space since the last call. */
+export function takeEvictedCreatorVideos(): string[] {
+  const ids = evictedVideoIds
+  evictedVideoIds = []
+  return ids
+}
+
+// Only finished videos with a server task can be fetched again; never drop the
+// work being written or a video that exists nowhere else.
+function evictableVideo(item: CreatorHistoryItem, keepId: string): boolean {
+  return item.type === 'video' && item.id !== keepId && item.status === 'completed'
+    && Boolean(item.requestId?.trim()) && Boolean(item.videoBlobs?.length || item.mergedVideoBlob)
+}
+
+// Drops the bytes of the oldest such video (preferring one with a cover, so the
+// history list still shows it) and keeps the record and its revision, so other
+// windows and delayed recoveries are unaffected.
+async function evictOldestVideoBlobs(database: IDBDatabase, keepId: string): Promise<boolean> {
+  let evictedId: string | undefined
+  await runWrite(database, store => {
+    let fallback: CreatorHistoryItem | undefined
+    const evict = (item: CreatorHistoryItem) => {
+      const { videoBlobs: _videoBlobs, mergedVideoBlob: _mergedVideoBlob, ...rest } = item
+      store.put({ ...rest, videoBlobsEvicted: true })
+      evictedId = item.id
+    }
+    const request = store.index(CREATED_AT_INDEX).openCursor()
+    request.onsuccess = () => {
+      const cursor = request.result
+      if (!cursor) {
+        if (fallback) evict(fallback)
+        return
+      }
+      const item = cursor.value as CreatorHistoryItem
+      if (evictableVideo(item, keepId)) {
+        if (item.videoThumbnail) {
+          evict(item)
+          return
+        }
+        fallback ??= item
+      }
+      cursor.continue()
+    }
+  })
+  if (evictedId) evictedVideoIds.push(evictedId)
+  return Boolean(evictedId)
+}
+
+const MAX_VIDEO_EVICTIONS_PER_WRITE = 30
+
 export function sortCreatorHistory(items: CreatorHistoryItem[]): CreatorHistoryItem[] {
   return [...items].sort((left, right) => {
     return right.createdAt - left.createdAt || right.updatedAt - left.updatedAt
@@ -236,6 +331,37 @@ function getIndexedDB(): IDBFactory | null {
   }
 }
 
+let persistenceRequested = false
+let lastWriteErrorName: string | undefined
+
+/** Name of the most recent failed history write (e.g. QuotaExceededError), for diagnostics. */
+export function lastCreatorHistoryWriteError(): string | undefined {
+  return lastWriteErrorName
+}
+
+// Ask the browser to treat this origin's data as persistent. Granted origins
+// are not evicted under storage pressure and get a larger quota in Firefox/Safari.
+function requestPersistentStorage(): void {
+  if (persistenceRequested) return
+  persistenceRequested = true
+  try {
+    const storage = typeof navigator === 'undefined' ? undefined : navigator.storage
+    if (!storage?.persist || !storage.persisted) return
+    void storage.persisted().then(persisted => persisted || storage.persist()).catch(() => undefined)
+  } catch { /* Persistence is best effort. */ }
+}
+
+function errorName(error: unknown): string {
+  return (error as { name?: string } | null)?.name || 'UnknownError'
+}
+
+/** Let an explicit user retry reopen IndexedDB after an earlier failure switched to memory. */
+export function resetCreatorHistoryStorage(): void {
+  if (!memoryOnly) return
+  memoryOnly = false
+  databasePromise = undefined
+}
+
 function switchToMemory(): void {
   memoryOnly = true
   const currentDatabase = databasePromise
@@ -250,8 +376,10 @@ function openDatabase(): Promise<IDBDatabase | null> {
   const indexedDB = getIndexedDB()
   if (!indexedDB) {
     memoryOnly = true
+    lastWriteErrorName = 'IndexedDBUnavailable'
     return Promise.resolve(null)
   }
+  requestPersistentStorage()
 
   databasePromise = new Promise((resolve) => {
     let settled = false
@@ -260,6 +388,7 @@ function openDatabase(): Promise<IDBDatabase | null> {
       if (settled) return
       settled = true
       memoryOnly = true
+      lastWriteErrorName = 'IndexedDBOpenFailed'
       resolve(null)
     }
 
@@ -303,22 +432,52 @@ function listMemoryItems(): CreatorHistoryItem[] {
   return sortCreatorHistory(Array.from(memoryItems.values(), cloneItem))
 }
 
-async function listDatabaseItems(database: IDBDatabase): Promise<CreatorHistoryItem[]> {
+export interface CreatorHistoryListOptions {
+  /**
+   * Leave finished image works whose originals are not encoded yet as
+   * imageOutputsPending, for readCreatorHistoryImages to fill when shown.
+   * Encoding every original up front keeps a large history blank for seconds.
+   */
+  deferImages?: boolean
+}
+
+function readRawItems(database: IDBDatabase): Promise<CreatorHistoryItem[]> {
   return new Promise((resolve, reject) => {
     const transaction = database.transaction(STORE_NAME, 'readonly')
     const request = transaction.objectStore(STORE_NAME).getAll()
     let items: CreatorHistoryItem[] = []
 
     request.onsuccess = () => {
-      items = request.result.map(cloneItem)
+      items = request.result
     }
     request.onerror = () => reject(request.error ?? new Error('Unable to read creator history'))
-    transaction.oncomplete = () => {
-      Promise.all(items.map(readableItem)).then(items => resolve(sortCreatorHistory(items)), reject)
-    }
+    // Stored Blobs are file handles, so this read is cheap; encoding is not.
+    transaction.oncomplete = () => resolve(items)
     transaction.onerror = () => reject(transaction.error ?? new Error('Unable to read creator history'))
     transaction.onabort = () => reject(transaction.error ?? new Error('Creator history read aborted'))
   })
+}
+
+// Pending works stay complete: a refreshed page resumes them in the background.
+function deferredItem(item: CreatorHistoryItem): CreatorHistoryItem | undefined {
+  if (item.status === 'pending' || !needsImageRead(item)) return undefined
+  return { ...cloneItem(item), imageOutputsPending: true }
+}
+
+async function listDatabaseItems(database: IDBDatabase, options: CreatorHistoryListOptions = {}): Promise<CreatorHistoryItem[]> {
+  const raw = sortCreatorHistory(await readRawItems(database))
+  return Promise.all(raw.map(item => (options.deferImages && deferredItem(item)) || readableItem(item)))
+}
+
+/** The work with its stored originals as data URLs; returns other works unchanged. */
+export async function readCreatorHistoryImages(item: CreatorHistoryItem): Promise<CreatorHistoryItem> {
+  return item.imageOutputsPending ? readableItem(item) : item
+}
+
+function withMemoryItems(databaseItems: CreatorHistoryItem[]): CreatorHistoryItem[] {
+  const mergedItems = new Map(databaseItems.map((item) => [item.id, item]))
+  memoryItems.forEach((item, id) => mergedItems.set(id, cloneItem(item)))
+  return sortCreatorHistory(Array.from(mergedItems.values()))
 }
 
 async function runWrite(
@@ -342,15 +501,12 @@ async function runWrite(
   })
 }
 
-export async function listCreatorHistory(): Promise<CreatorHistoryItem[]> {
+export async function listCreatorHistory(options: CreatorHistoryListOptions = {}): Promise<CreatorHistoryItem[]> {
   const database = await openDatabase()
   if (!database) return listMemoryItems()
 
   try {
-    const databaseItems = await listDatabaseItems(database)
-    const mergedItems = new Map(databaseItems.map((item) => [item.id, item]))
-    memoryItems.forEach((item, id) => mergedItems.set(id, cloneItem(item)))
-    return sortCreatorHistory(Array.from(mergedItems.values()))
+    return withMemoryItems(await listDatabaseItems(database, options))
   } catch {
     switchToMemory()
     return listMemoryItems()
@@ -379,6 +535,25 @@ export async function getCreatorHistory(id: string): Promise<CreatorHistoryItem 
   return item ? cloneItem(item) : undefined
 }
 
+async function writeAfterEvictingVideos(
+  database: IDBDatabase,
+  item: CreatorHistoryItem,
+  expectedUpdatedAt: number | undefined,
+  quotaError: unknown,
+): Promise<boolean> {
+  let lastError = quotaError
+  for (let attempt = 0; attempt < MAX_VIDEO_EVICTIONS_PER_WRITE; attempt++) {
+    if (!await evictOldestVideoBlobs(database, item.id)) throw lastError
+    try {
+      return await writeItem(database, item, expectedUpdatedAt)
+    } catch (error) {
+      if (errorName(error) !== 'QuotaExceededError') throw error
+      lastError = error
+    }
+  }
+  throw lastError
+}
+
 export async function putCreatorHistory(item: CreatorHistoryItem, expectedUpdatedAt?: number): Promise<boolean | undefined> {
   const storedItem = cloneItem(item)
   // A conditional recovery must not insert a stale memory copy before its
@@ -389,16 +564,31 @@ export async function putCreatorHistory(item: CreatorHistoryItem, expectedUpdate
   let saved = false
   try {
     if (database) {
-      const applied = await writeItem(database, storedItem, expectedUpdatedAt)
+      let applied: boolean
+      try {
+        applied = await writeItem(database, storedItem, expectedUpdatedAt)
+      } catch (error) {
+        if (errorName(error) === 'QuotaExceededError') {
+          // A full quota will not clear by itself: free the oldest videos that
+          // can be downloaded again, one at a time, until this write fits.
+          applied = await writeAfterEvictingVideos(database, storedItem, expectedUpdatedAt, error)
+        } else {
+          // Other aborts (Safari reports large Blob writes as UnknownError/AbortError) often succeed on retry.
+          await new Promise(resolve => setTimeout(resolve, 300))
+          applied = await writeItem(database, storedItem, expectedUpdatedAt)
+        }
+      }
       if (!applied) return undefined
       saved = true
+      lastWriteErrorName = undefined
       // Keep only unsaved items in memory, so stale local copies cannot hide a
       // newer result (or deletion) committed by another creator window.
       if (memoryItems.get(storedItem.id) === storedItem) memoryItems.delete(storedItem.id)
     }
-  } catch {
+  } catch (error) {
     // Keep the database readable and retry writes after the user frees space.
     // The caller receives false and must explain this session-only fallback.
+    lastWriteErrorName = errorName(error)
   }
   if (!saved) {
     if (expectedUpdatedAt !== undefined) {
@@ -469,10 +659,14 @@ export const creatorHistory = {
   subscribeExternal: subscribeExternalCreatorHistory,
   get: getCreatorHistory,
   list: listCreatorHistory,
+  readImages: readCreatorHistoryImages,
   put: putCreatorHistory,
   saveVideoThumbnail: saveCreatorVideoThumbnail,
   remove: removeCreatorHistory,
   clear: clearCreatorHistory,
+  lastWriteError: lastCreatorHistoryWriteError,
+  resetStorage: resetCreatorHistoryStorage,
+  takeEvictedVideos: takeEvictedCreatorVideos,
 }
 
 export default creatorHistory

@@ -70,17 +70,26 @@ func TestNormalizeSeedanceCatalog(t *testing.T) {
 		require.Equal(t, "720p", out[0].Resolution)
 	})
 
+	t.Run("aspect ratios are trimmed, deduplicated and keep their order", func(t *testing.T) {
+		entry := valid
+		entry.AspectRatios = []string{" 9:16", "1:1", "9:16"}
+		out, err := NormalizeSeedanceCatalog([]SeedanceCatalogEntry{entry})
+		require.NoError(t, err)
+		require.Equal(t, []string{"9:16", "1:1"}, out[0].AspectRatios)
+	})
+
 	rejected := map[string][]SeedanceCatalogEntry{
-		"empty catalog":      {},
-		"blank model":        {{Model: "  ", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15}},
-		"model with space":   {{Model: "a b", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15}},
-		"duplicate model":    {valid, {Model: "M1", Resolution: "480p", MinSeconds: 5, MaxSeconds: 15}},
-		"unknown resolution": {{Model: "m2", Resolution: "4k", MinSeconds: 5, MaxSeconds: 15}},
-		"inverted range":     {{Model: "m2", Resolution: "720p", MinSeconds: 15, MaxSeconds: 5}},
-		"zero seconds":       {{Model: "m2", Resolution: "720p"}},
-		"too long":           {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 500}},
-		"negative reference": {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: -1}},
-		"too many reference": {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: 101}},
+		"unknown aspect ratio": {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15, AspectRatios: []string{"5:4"}}},
+		"empty catalog":        {},
+		"blank model":          {{Model: "  ", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15}},
+		"model with space":     {{Model: "a b", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15}},
+		"duplicate model":      {valid, {Model: "M1", Resolution: "480p", MinSeconds: 5, MaxSeconds: 15}},
+		"unknown resolution":   {{Model: "m2", Resolution: "4k", MinSeconds: 5, MaxSeconds: 15}},
+		"inverted range":       {{Model: "m2", Resolution: "720p", MinSeconds: 15, MaxSeconds: 5}},
+		"zero seconds":         {{Model: "m2", Resolution: "720p"}},
+		"too long":             {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 500}},
+		"negative reference":   {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: -1}},
+		"too many reference":   {{Model: "m2", Resolution: "720p", MinSeconds: 5, MaxSeconds: 15, MaxReferenceImages: 101}},
 	}
 	for name, entries := range rejected {
 		t.Run("rejects "+name, func(t *testing.T) {

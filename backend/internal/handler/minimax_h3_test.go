@@ -17,16 +17,16 @@ import (
 )
 
 func TestMiniMaxH3GroupGateAndLookupOwnership(t *testing.T) {
-	for _, scenario := range []string{"disabled", "wrong duration", "accepted", "upstream unavailable", "other key", "other user", "lookup owned", "wrong content type"} {
+	for _, scenario := range []string{"disabled", "unpriced model", "accepted", "upstream unavailable", "other key", "other user", "lookup owned", "wrong content type"} {
 		t.Run(scenario, func(t *testing.T) {
 			h, slots, bindings, upstream := newGrokMediaSlotHandler(t, false, false, service.PlatformMiniMax)
 			c, w := grokMediaSlotContext(context.Background(), true)
 			key, _ := middleware.GetAPIKeyFromContext(c)
 			key.Group.Platform = service.PlatformMiniMax
 			key.Group.AllowImageGeneration = false // video has its own switch
-			key.Group.VideoModelPrices = map[string]map[string]float64{service.MiniMaxH3PriceFamily: {"request_10s": 0.02}}
+			key.Group.VideoModelPrices = map[string]map[string]float64{service.MiniMaxH3PriceFamily: {"xminimex-h3": 0.002}}
 			key.Group.RateMultiplier = 0.1
-			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"Minimax-H3-768p-933-10s","prompt":"waves"}`))
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/videos", strings.NewReader(`{"model":"Xminimex-h3","prompt":"waves","seconds":10}`))
 			c.Request.Header.Set("Content-Type", "application/json")
 			upstream.call = func(req *http.Request, _ int64) (*http.Response, error) {
 				if scenario == "upstream unavailable" {
@@ -39,8 +39,8 @@ func TestMiniMaxH3GroupGateAndLookupOwnership(t *testing.T) {
 			case "disabled":
 				key.Group.VideoModelPrices = nil
 				want, calls = http.StatusBadRequest, 0
-			case "wrong duration":
-				key.Group.VideoModelPrices[service.MiniMaxH3PriceFamily] = map[string]float64{"request_15s": 0.08}
+			case "unpriced model":
+				key.Group.VideoModelPrices[service.MiniMaxH3PriceFamily] = map[string]float64{"minimaxh3-768": 0.08}
 				want, calls = http.StatusBadRequest, 0
 			case "wrong content type":
 				c.Request.Header.Set("Content-Type", "multipart/form-data")

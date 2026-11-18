@@ -429,32 +429,34 @@ describe('creator gateway API', () => {
     const { createCreatorVideo } = await import('@/api/creator')
     const references = Array.from({ length: 9 }, (_, index) => `data:image/png;base64,REF${index}`)
 
-    const fixed = await createCreatorVideo('sk-h3', {
-      model: 'Minimax-H3-768p-933-10s',
+    const created = await createCreatorVideo('sk-h3', {
+      model: 'MinimaxH3-768',
       prompt: 'lake at dawn',
       duration: 10,
       aspectRatio: '16:9',
       resolution: '768p',
       referenceImageDataUrls: references,
     })
-    expect(fixed.id).toBe('task_768')
+    expect(created.id).toBe('task_768')
     expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
-      model: 'Minimax-H3-768p-933-10s',
+      model: 'MinimaxH3-768',
       prompt: 'lake at dawn',
+      seconds: 10,
       aspect_ratio: '16:9',
       images: references,
     })
 
-    // Prompt-only H3 is allowed; the variable tier sends integer seconds.
+    // Prompt-only H3 is allowed on tiers that do not require references;
+    // ratios outside the tier are dropped.
     await createCreatorVideo('sk-h3', {
-      model: 'MiniMax-H3-933-1440p-10-15s',
+      model: 'Xminimex-h3',
       prompt: 'boardwalk',
       duration: 12,
       aspectRatio: '5:2',
       resolution: '1440p',
     })
     expect(JSON.parse(String(vi.mocked(fetch).mock.calls[1][1]?.body))).toEqual({
-      model: 'MiniMax-H3-933-1440p-10-15s',
+      model: 'Xminimex-h3',
       prompt: 'boardwalk',
       seconds: 12,
     })
@@ -462,24 +464,36 @@ describe('creator gateway API', () => {
 
   it('rejects MiniMax H3 inputs outside the selected tier', async () => {
     const { createCreatorVideo } = await import('@/api/creator')
-    await expect(createCreatorVideo('sk-h3', { model: 'Minimax-H3-768p-933-10s-15s', prompt: 'x', duration: 9 }))
-      .rejects.toThrow('10–15 秒')
-    await expect(createCreatorVideo('sk-h3', { model: 'MiniMax-H3-933-1440p-15s', prompt: 'x', duration: 10 }))
-      .rejects.toThrow('固定生成 15 秒')
-    await expect(createCreatorVideo('sk-h3', { model: 'MiniMax-H3-933-1440p-10-15s', prompt: 'x', duration: 16 }))
-      .rejects.toThrow('10–15 秒')
+    const { applyMiniMaxCatalog } = await import('@/utils/miniMaxH3')
+    await expect(createCreatorVideo('sk-h3', { model: 'Xminimex-h3', prompt: 'x', duration: 4 }))
+      .rejects.toThrow('5–15 秒')
+    await expect(createCreatorVideo('sk-h3', { model: 'Xminimex-h3', prompt: 'x', duration: 16 }))
+      .rejects.toThrow('5–15 秒')
+    await expect(createCreatorVideo('sk-h3', { model: 'MinimaxH3-768', prompt: 'x', duration: 8, referenceImageDataUrls: ['data:image/png;base64,R'] }))
+      .rejects.toThrow('只能是')
+    await expect(createCreatorVideo('sk-h3', { model: 'MinimaxH3-768', prompt: 'x', duration: 10 }))
+      .rejects.toThrow('至少 1 张参考图')
     await expect(createCreatorVideo('sk-h3', {
-      model: 'MiniMax-H3-933-1440p-15s',
+      model: 'Xminimex-h3',
       prompt: 'x',
       duration: 15,
       referenceImageDataUrls: Array.from({ length: 10 }, (_, index) => `data:image/png;base64,REF${index}`),
     })).rejects.toThrow('最多支持 9 张参考图')
     await expect(createCreatorVideo('sk-h3', {
-      model: 'MiniMax-H3-933-1440p-15s',
+      model: 'Xminimex-h3',
       prompt: 'x',
       duration: 15,
       imageDataUrl: 'data:image/png;base64,SOURCE',
     })).rejects.toThrow('不支持首帧图生视频')
+    // An administrator's catalog sets the limits, including text-only models.
+    applyMiniMaxCatalog({ customized: true, entries: [{ model: 'text-h3', name: 'T', note: '', resolution: '768p', min_seconds: 6, max_seconds: 6, per_request: true, max_reference_images: 0, requires_reference: false }] })
+    try {
+      await expect(createCreatorVideo('sk-h3', { model: 'text-h3', prompt: 'x', duration: 6, referenceImageDataUrls: ['data:image/png;base64,R'] }))
+        .rejects.toThrow('只支持文生视频')
+      await expect(createCreatorVideo('sk-h3', { model: 'text-h3', prompt: 'x', duration: 7 })).rejects.toThrow('固定生成 6 秒')
+    } finally {
+      applyMiniMaxCatalog(null)
+    }
     expect(fetch).not.toHaveBeenCalled()
   })
 
@@ -504,6 +518,32 @@ describe('creator gateway API', () => {
       .rejects.toThrow('Seedance 模型时长需为 5–15 秒')
     await expect(createCreatorVideo('sk-sd', { model: 'TTsedanco2.0-720', prompt: 'x', imageDataUrl: 'data:image/png;base64,S' }))
       .rejects.toThrow('Seedance 不支持首帧图生视频')
+    expect(fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends Muse video with one image as the first frame and refuses several', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ id: 'sf_muse', status: 'queued' }))
+    const { createCreatorVideo } = await import('@/api/creator')
+    await createCreatorVideo('sk-muse', {
+      model: 'muse-video',
+      prompt: '镜头缓慢推进',
+      duration: 3,
+      aspectRatio: '16:9',
+      imageDataUrl: 'data:image/png;base64,FRAME',
+    })
+    expect(JSON.parse(String(vi.mocked(fetch).mock.calls[0][1]?.body))).toEqual({
+      model: 'muse-video',
+      prompt: '镜头缓慢推进',
+      seconds: 3,
+      aspect_ratio: '16:9',
+      images: ['data:image/png;base64,FRAME'],
+    })
+    await expect(createCreatorVideo('sk-muse', {
+      model: 'muse-video',
+      prompt: 'x',
+      duration: 3,
+      referenceImageDataUrls: ['data:image/png;base64,A', 'data:image/png;base64,B'],
+    })).rejects.toThrow('只支持 1 张首帧图')
     expect(fetch).toHaveBeenCalledTimes(1)
   })
 
@@ -582,10 +622,18 @@ describe('creator gateway API', () => {
     }
   })
 
-  it('still fails a video whose relay error carries a message', async () => {
-    vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ id: 'vid_2', status: 'failed', error: { message: 'moderation rejected' } }))
+  it('reports a video whose relay error carries a message as a failed task, not a failed lookup', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(jsonResponse({ id: 'vid_2', status: 'failed', error: { message: 'moderation rejected' } }))
+      // Some relays keep a non-terminal status beside the task's error.
+      .mockResolvedValueOnce(jsonResponse({ id: 'vid_3', status: 'in_progress', progress: 13, error: { message: 'provider gave up', type: 'upstream_task_error' } }))
     const { getCreatorVideoStatus } = await import('@/api/creator')
-    await expect(getCreatorVideoStatus('sk-grok', 'vid_2')).rejects.toThrow('moderation rejected')
+    await expect(getCreatorVideoStatus('sk-grok', 'vid_2')).resolves.toMatchObject({
+      id: 'vid_2', status: 'failed', error: { message: 'moderation rejected' },
+    })
+    await expect(getCreatorVideoStatus('sk-grok', 'vid_3')).resolves.toMatchObject({
+      id: 'vid_3', status: 'failed', progress: 13, error: { message: 'provider gave up' },
+    })
   })
 
   it('reads the MiniMax H3 result URL from metadata', async () => {
@@ -638,10 +686,10 @@ describe('creator gateway API', () => {
     await expect(getCreatorVideoStatus('sk-video', 'task')).resolves.toMatchObject({ status: 'failed', error: expect.anything() })
   })
 
-  it('rejects a top-level video generation error even when status is done', async () => {
+  it('reports a top-level video generation error as failed even when status is done', async () => {
     vi.mocked(fetch).mockResolvedValueOnce(jsonResponse({ status: 'done', error: { message: 'render failed' }, video: { url: '/v1/videos/task/content' } }))
     const { getCreatorVideoStatus } = await import('@/api/creator')
-    await expect(getCreatorVideoStatus('sk-video', 'task')).rejects.toThrow('render failed')
+    await expect(getCreatorVideoStatus('sk-video', 'task')).resolves.toMatchObject({ status: 'failed', error: { message: 'render failed' } })
   })
 
   it('rejects a partial video body when requesting the complete file', async () => {

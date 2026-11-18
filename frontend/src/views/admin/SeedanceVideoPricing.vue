@@ -19,7 +19,7 @@
             <code class="font-mono">{{ row.model }}</code>
             <span class="block break-words text-gray-700 dark:text-gray-300">{{ row.note || row.name }}</span>
           </span>
-          <input type="number" class="input" min="0" step="any" :data-model="row.model" :placeholder="t('admin.groups.videoPricing.seedanceDisabled')" :value="tariff[row.model] ?? ''" @input="changePrice(row.model, $event)" />
+          <input type="number" class="input" min="0" step="any" :data-model="row.model" :placeholder="t('admin.groups.videoPricing.seedanceDisabled')" :value="tariff[row.model] ?? ''" @input="changePrice(row.model, $event)" @focus="editing = true" @blur="stopEditing" />
           <span class="text-xs text-gray-500 dark:text-gray-400">
             {{ t(row.perRequest ? 'admin.groups.videoPricing.seedancePerRequest' : 'admin.groups.videoPricing.seedancePerSecond') }}
             <span v-if="tariff[row.model] !== null && tariff[row.model] !== undefined && tariff[row.model] !== ''" class="block">→ {{ finalPriceFor(tariff[row.model]) }}</span>
@@ -32,16 +32,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { getSeedanceCatalog } from '@/api/admin/seedanceCatalog'
-import { applySeedanceCatalog, isGrokRelayVideoModel, seedanceCatalogModels, SEEDANCE_VIDEO_PRICE_FAMILY as family, type SeedanceCatalogState, type SeedanceVideoTier } from '@/utils/seedanceVideo'
+import { applySeedanceCatalog, isGrokRelayVideoModel, isMuseVideoModel, seedanceCatalogModels, SEEDANCE_VIDEO_PRICE_FAMILY as family, sortSeedanceModels, type SeedanceVideoTier } from '@/utils/seedanceVideo'
 import SeedanceCatalogEditor from './SeedanceCatalogEditor.vue'
 import type { VideoModelPricesForm } from './groupsVideoModelPricing'
 
 // One USD price per catalog model: per second or per request as the upstream
 // sells it. A blank model is not sold in this group. Grok groups (grokOnly)
-// list only the relay Grok lines (e.g. heavy-grok-720p).
+// list the relay Grok lines (e.g. heavy-grok-720p) plus muse-video.
 const props = defineProps<{ modelValue: VideoModelPricesForm; multiplier: number; grokOnly?: boolean }>()
 const emit = defineEmits<{ 'update:modelValue': [value: VideoModelPricesForm] }>()
 const { t } = useI18n()
@@ -50,10 +50,21 @@ type Row = SeedanceVideoTier & { model: string }
 // when none is saved) the built-in catalog is shown.
 const customized = ref(false)
 const catalogOpen = ref(false)
-const rows = computed<Row[]>(() => seedanceCatalogModels()
-  .filter(([model]) => isGrokRelayVideoModel(model) === Boolean(props.grokOnly))
-  .map(([model, tier]) => ({ ...tier, model })))
-function onCatalogSaved(state: SeedanceCatalogState) {
+// Rows follow sortSeedanceModels (resolution, per-request first, cheapest
+// first). Prices typed into a field only re-sort once it loses focus, so the
+// row does not jump away while it is being edited.
+const editing = ref(false)
+const sortPrices = ref<Record<string, number | string | null>>({})
+const rows = computed<Row[]>(() => {
+  const tiers = new Map(seedanceCatalogModels()
+    .filter(([model]) => (isGrokRelayVideoModel(model) || isMuseVideoModel(model)) === Boolean(props.grokOnly)))
+  return sortSeedanceModels([...tiers.keys()], sortPrices.value).map(model => ({ ...tiers.get(model)!, model }))
+})
+function stopEditing() {
+  editing.value = false
+  sortPrices.value = { ...tariff.value }
+}
+function onCatalogSaved(state: { customized: boolean }) {
   customized.value = state.customized
 }
 onMounted(async () => {
@@ -67,6 +78,7 @@ onMounted(async () => {
 })
 const tariff = computed(() => props.modelValue[family] ?? {})
 const enabled = computed(() => family in props.modelValue)
+watch(tariff, value => { if (!editing.value) sortPrices.value = { ...value } }, { immediate: true })
 
 function finalPriceFor(value: number | string | null | undefined) {
   return `$${(Number(value) * props.multiplier).toFixed(6)}`
