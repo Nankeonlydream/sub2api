@@ -27,10 +27,12 @@ class UpgradeTests(unittest.TestCase):
         with patch.object(server.socket, 'gethostname', return_value=host):
             production = load('server')
         self.assertIn(host, production.HOSTS)
+        self.assertEqual(production.APP_SERVICE, 'app')
         self.assertEqual(production.COMPOSE, ['docker', 'compose', '-p', 'catbee-production',
                                              '-f', '/root/catbee-production/compose.json'])
         labels = {'com.docker.compose.project': 'catbee-production',
-                  'com.docker.compose.service': 'sub2api',
+                  'com.docker.compose.service': 'app',
+                  'com.docker.compose.project.working_dir': str(production.DEPLOY),
                   'com.docker.compose.project.config_files': str(production.OVERRIDE)}
         production.validate_production_project({'Config': {'Labels': labels}})
         for label in labels:
@@ -39,21 +41,26 @@ class UpgradeTests(unittest.TestCase):
                 production.validate_production_project({'Config': {'Labels': wrong}})
 
     def test_json_replacement_changes_only_application_image(self):
-        config = {'services': {'sub2api': {'image': OLD, 'environment': {'EXAMPLE': OLD}},
+        with patch.object(server.socket, 'gethostname', return_value=server.CATBEE_PRODUCTION_HOST):
+            production = load('server')
+        config = {'services': {'app': {'image': OLD, 'container_name': 'sub2api', 'environment': {'EXAMPLE': OLD}},
                                'postgres': {'image': 'postgres:18'}, 'redis': {'image': 'redis:8'}},
                   'networks': {'default': {'name': 'catbee-network'}}}
         original = json.dumps(config)
-        config['services']['sub2api']['image'] = NEW
-        self.assertEqual(json.loads(server.replace_json_image(original, OLD, NEW)), config)
-        with self.assertRaisesRegex(RuntimeError, 'Unexpected sub2api image'):
-            server.replace_json_image(original, NEW, OLD)
+        config['services']['app']['image'] = NEW
+        self.assertEqual(json.loads(production.replace_json_image(original, OLD, NEW)), config)
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected image entry for Compose service app'):
+            production.replace_json_image(original, NEW, OLD)
+        with self.assertRaisesRegex(RuntimeError, 'Unexpected image entry for Compose service app'):
+            production.replace_json_image(json.dumps({'services': {'sub2api': {'image': OLD}}}), OLD, NEW)
         with self.assertRaisesRegex(RuntimeError, 'Duplicate key'):
-            server.replace_json_image('{"services": {}, "services": {}}', OLD, NEW)
+            production.replace_json_image('{"services": {}, "services": {}}', OLD, NEW)
 
     def test_consolidated_node_uses_application_project_not_database_project(self):
         with patch.object(server.socket, 'gethostname', return_value=server.CONSOLIDATED_HOST):
             consolidated = load('server')
         self.assertIn(server.CONSOLIDATED_HOST, consolidated.HOSTS)
+        self.assertEqual(consolidated.APP_SERVICE, 'sub2api')
         self.assertEqual(consolidated.DEPLOY, Path('/root/catbee-app'))
         self.assertEqual(consolidated.COMPOSE,
                          ['docker', 'compose', '-f', '/root/catbee-app/docker-compose.yml',
@@ -79,6 +86,11 @@ class UpgradeTests(unittest.TestCase):
         server.validate_companions({'sub2api': {}, 'redis': {}})
         with self.assertRaisesRegex(RuntimeError, 'Shared-network companion'):
             server.validate_companions({'prism-adapter': {'network_mode': 'service:sub2api'}})
+        with patch.object(server.socket, 'gethostname', return_value=server.CATBEE_PRODUCTION_HOST):
+            production = load('server')
+        for mode in ('service:app', 'container:sub2api'):
+            with self.subTest(mode=mode), self.assertRaisesRegex(RuntimeError, 'Shared-network companion'):
+                production.validate_companions({'companion': {'network_mode': mode}})
 
     def test_official_return_only_accepts_reviewed_digest_on_left(self):
         server.validate_current_image(server.LEFT_HOST, server.LEFT_OFFICIAL_IMAGE)
@@ -151,6 +163,23 @@ class UpgradeTests(unittest.TestCase):
                     server.switch_image('old config', 'new config', {}, {}, old, {}, Path(tmp))
             self.assertEqual(override.read_text(), 'old config')
             self.assertEqual(sum('--no-deps' in c for c in calls), 2)
+
+    def test_production_recreate_and_rollback_target_only_app_service(self):
+        with patch.object(server.socket, 'gethostname', return_value=server.CATBEE_PRODUCTION_HOST):
+            production = load('server')
+        old = {'Image': 'old-id'}
+        with tempfile.TemporaryDirectory() as tmp:
+            override = Path(tmp) / 'compose.json'
+            override.write_text('old config')
+            with patch.object(production, 'OVERRIDE', override), patch.object(production, 'run', return_value='') as run, \
+                 patch.object(production, 'validate_running', side_effect=RuntimeError('health failed')), \
+                 patch.object(production, 'wait_healthy', return_value=old), \
+                 patch.object(production, 'config_signature', return_value={}):
+                with self.assertRaisesRegex(RuntimeError, 'health failed'):
+                    production.switch_image('old config', 'new config', {}, {}, old, {}, Path(tmp))
+            self.assertEqual(override.read_text(), 'old config')
+            ups = [call.args[0] for call in run.call_args_list if 'up' in call.args[0]]
+            self.assertEqual(ups, [production.COMPOSE + ['up', '-d', '--no-deps', '--pull', 'never', 'app']] * 2)
 
     def test_switch_preserves_new_override_on_success(self):
         with tempfile.TemporaryDirectory() as tmp:

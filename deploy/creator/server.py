@@ -27,11 +27,13 @@ HOSTNAME = socket.gethostname()
 if HOSTNAME == CATBEE_PRODUCTION_HOST:
     DEPLOY = Path('/root/catbee-production')
     OVERRIDE = DEPLOY / 'compose.json'
+    APP_SERVICE = 'app'
     COMPOSE = ['docker', 'compose', '-p', 'catbee-production', '-f', str(OVERRIDE)]
 else:
     # The consolidated node keeps its existing database Compose project separate.
     DEPLOY = Path('/root/catbee-app' if HOSTNAME == CONSOLIDATED_HOST else '/root/sub2api-deploy')
     OVERRIDE = DEPLOY / 'docker-compose.creator.yml'
+    APP_SERVICE = 'sub2api'
     COMPOSE = ['docker', 'compose', '-f', str(DEPLOY / 'docker-compose.yml'), '-f', str(OVERRIDE)]
 
 
@@ -71,7 +73,8 @@ def validate_migration_compatibility(applied, target):
 
 def validate_companions(services):
     # Replacing a network namespace owner strands companions in the old namespace.
-    require(not any(s.get('network_mode') == 'service:sub2api' for s in services.values()),
+    modes = ('service:' + APP_SERVICE, 'container:sub2api')
+    require(not any(s.get('network_mode') in modes for s in services.values()),
             'Shared-network companion requires a separately reviewed deployment')
 
 
@@ -106,8 +109,9 @@ def replace_json_image(original, old, new):
     config = json.loads(original, object_pairs_hook=unique_json_object)
     require(isinstance(config, dict) and isinstance(config.get('services'), dict),
             'Expected a JSON Compose project with services')
-    service = config['services'].get('sub2api')
-    require(isinstance(service, dict) and service.get('image') == old, 'Unexpected sub2api image entry')
+    service = config['services'].get(APP_SERVICE)
+    require(isinstance(service, dict) and service.get('image') == old,
+            'Unexpected image entry for Compose service ' + APP_SERVICE)
     service['image'] = new
     return json.dumps(config, indent=2, ensure_ascii=False) + '\n'
 
@@ -115,7 +119,8 @@ def replace_json_image(original, old, new):
 def validate_production_project(container):
     labels = container['Config'].get('Labels') or {}
     require(labels.get('com.docker.compose.project') == 'catbee-production' and
-            labels.get('com.docker.compose.service') == 'sub2api' and
+            labels.get('com.docker.compose.service') == APP_SERVICE and
+            labels.get('com.docker.compose.project.working_dir') == str(DEPLOY) and
             labels.get('com.docker.compose.project.config_files') == str(OVERRIDE),
             'Running application does not match the registered production Compose project')
 
@@ -193,13 +198,13 @@ def switch_image(original, replacement, image, metadata, old, expected_migration
     try:
         atomic_write(OVERRIDE, replacement)
         run(COMPOSE + ['config', '--quiet'])
-        log(run(COMPOSE + ['up', '-d', '--no-deps', '--pull', 'never', 'sub2api']))
+        log(run(COMPOSE + ['up', '-d', '--no-deps', '--pull', 'never', APP_SERVICE]))
         return validate_running(image, metadata, old, expected_migrations)
     except Exception:
         log('VALIDATION_FAILED: restoring previous application image; database migrations are not undone')
         atomic_write(OVERRIDE, original)
         try:
-            run(COMPOSE + ['up', '-d', '--no-deps', '--pull', 'never', 'sub2api'])
+            run(COMPOSE + ['up', '-d', '--no-deps', '--pull', 'never', APP_SERVICE])
             restored = wait_healthy()
             require(restored['Image'] == old['Image'], 'Rollback image mismatch')
             require(config_signature(restored) == config_signature(old), 'Rollback config mismatch')
@@ -237,7 +242,8 @@ def main():
         require(old['State'].get('Health', {}).get('Status') == 'healthy', 'Current service is not healthy')
         services = json.loads(run(COMPOSE + ['config', '--format', 'json']))['services']
         validate_companions(services)
-        require(services['sub2api']['image'] == old['Config']['Image'], 'Compose/running image mismatch')
+        require(services.get(APP_SERVICE, {}).get('image') == old['Config']['Image'],
+                'Compose/running image mismatch')
         original = OVERRIDE.read_text()
         log('PULL ' + args.image)
         log(run(['docker', 'pull', args.image], timeout=600))

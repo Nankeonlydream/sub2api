@@ -1,6 +1,6 @@
 # 创作中心日常升级入口
 
-> 当前指定左侧节点 `154.37.208.216`：VNC 核对主机名 `ser109767888688`，生产 Compose 项目 `catbee-production`，文件 `/root/catbee-production/compose.json`。升级器在该节点核对运行容器的 Compose 标签，只替换 `services.sub2api.image`，用 `--no-deps` 重建子服务；不会重建 PostgreSQL 或 Redis。此地址与下方阿里云历史节点不同，不要从历史记录推断升级目标。
+> 当前指定左侧节点 `154.37.208.216`：VNC 核对主机名 `ser109767888688`，生产 Compose 项目 `catbee-production`，文件 `/root/catbee-production/compose.json`。容器名是 `sub2api`，Compose 服务名是 `app`。升级器核对运行容器的项目、服务、工作目录和配置文件标签，只替换 `services.app.image`，用 `--no-deps` 重建 `app`；不会重建 PostgreSQL 或 Redis。此地址与下方阿里云历史节点不同，不要从历史记录推断升级目标。
 
 > 2026-11-10 22:36:58（北京时间）右侧 Nginx 过渡转发已通过 SIGQUIT 平滑停止，并取消开机自启；右侧 80/443 已无监听。两侧旧任务退场记录均已核实通过。停止后主域名、www、登录页面和左侧实际 API 访问记录验证通过；当前域名入口不再经过右侧。右侧云实例及原文件保留，未关机、未释放。恢复右侧转发：`sudo systemctl enable --now nginx`。详见 `DEPLOYMENT-2026-11-09-application-consolidation.md` 的 11 月 10 日退场验收。本条覆盖下列关于右侧仍保留转发和旧应用兼容的历史状态。
 
@@ -72,7 +72,7 @@ sudo /usr/local/sbin/creator-upgrade --image ghcr.io/nankeonlydream/sub2api@sha2
 
    省略 `--apply` 只拉取和隔离验证，不更改生产容器。`--status` 显示当前版本和健康。
    工具校验主机、镜像 revision/版本、创作中心资源、真实 1K 尺寸，原子更新 override，
-   仅重建 sub2api，校验健康、配置及新增迁移，应用检查失败时恢复原 override。
+   仅重建 `sub2api` 应用容器（当前指定左侧节点的 Compose 服务名为 `app`），校验健康、配置及新增迁移，应用检查失败时恢复原配置。
 7. 验证公网 `/health` 和 `/creator` 静态资源与新容器一致，记录最终版本、镜像摘要、CI 链接、迁移结果和局限。
    成功标记与旧 Compose 位于 `/root/sub2api-creator-release/<版本>-<时间>-<pid>/`。
    不做 `docker system prune`，保留旧镜像作为回退条件。
